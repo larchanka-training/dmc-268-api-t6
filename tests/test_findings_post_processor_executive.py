@@ -476,6 +476,7 @@ def test_executive_store_time_repack_keeps_an_unusable_name_out_of_the_body() ->
     )
 
     assert "moved.py" not in final.review_body
+    assert "\n- **Находка** (имя файла скрыто, low)\n" in final.review_body
     assert len(final.review_body) <= 4000
 
 
@@ -521,7 +522,14 @@ def test_executive_block_survives_the_store_time_repack_within_the_body_budget()
         run_url="https://example.test/runs/1",
     )
 
-    assert final.review_body.startswith(f"{processed.executive_block}\n\n## Review summary\n")
+    assert final.review_body.startswith(
+        "## Executive summary\n\n"
+        "**Verdict:** attention · **Risk Score:** Medium\n\n"
+        "**What to check:**\n"
+        "- Не проверено — patch неполон (8): `src/cut0.py`, `src/cut1.py`, `src/cut2.py`, "
+        "`src/cut3.py`, `src/cut4.py` и ещё 3\n\n"
+        "## Review summary\n"
+    )
     assert final.review_body.count("**Verdict:**") == 1
     assert len(final.review_body) <= 4000
     assert _body_only_accounted_in_review_body(final.review_body) == 10
