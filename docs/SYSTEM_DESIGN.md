@@ -2053,7 +2053,7 @@ null, не 0. У legacy coverage=null. `blocking` = supported critical/high,
 API, VCS и check-run показывают один backend summary из supported findings и scope;
 raw модельная похвала/неподтверждённые дефекты в публичную сводку не переносятся.
 
-**Лимит тела запроса (#530).** На маршрутах, чьё тело разбирает FastAPI, чтение останавливается на 64 KiB (`MAX_REQUEST_BODY_BYTES`, [`request_body_limit.py`](../app/common/request_body_limit.py)): ответ 413 с `detail` приходит до проверки токена и валидации, потому что FastAPI читает тело раньше зависимостей. Новый маршрут с телом попадает под лимит сам. Вебхуки читают поток вручную и считают свои лимиты: GitHub и GitLab 10 MiB (§8.3, §8.1), Bitbucket 256 KiB ([`BITBUCKET_WEBHOOK.md`](BITBUCKET_WEBHOOK.md)).
+**Лимит тела запроса (#530).** На маршрутах, чьё тело разбирает FastAPI, чтение останавливается на 64 KiB (`MAX_REQUEST_BODY_BYTES`, [`request_body_limit.py`](../app/common/infrastructure/request_body_limit.py)): ответ 413 с `detail` приходит до проверки токена и валидации, потому что FastAPI читает тело раньше зависимостей. Новый маршрут с телом попадает под лимит сам. Вебхуки читают поток вручную и считают свои лимиты: GitHub и GitLab 10 MiB (§8.3, §8.1), Bitbucket 256 KiB ([`BITBUCKET_WEBHOOK.md`](BITBUCKET_WEBHOOK.md)).
 
 Провод — **camelCase** (Ф-10): `defaultEngine`, `waitForCi`, `maxComments`, `reviewEvent`, `branchFilter`, `severityThreshold`, `installationAvailable`, `ragEnabled`, `ragIndex`; snake_case — только в БД (и во внутренних сообщениях очереди, §7.2). Префикс `/api` без версии.
 

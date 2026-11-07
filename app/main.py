@@ -49,13 +49,13 @@ from app.bootstrap.run_step_listener import run_step_listener
 from app.bootstrap.run_update_listener import run_update_listener
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
 from app.common.domain.run_enums import RunStatus
+from app.common.infrastructure.request_body_limit import RequestBodyLimitMiddleware
 from app.common.infrastructure.telemetry import (
     TracingMiddleware,
     configure_logging,
     configure_tracing,
     shutdown_tracing,
 )
-from app.common.request_body_limit import RequestBodyLimitMiddleware
 from app.common.strict_json import StrictJsonRoute
 from app.modules.auth.api.router import auth_router
 from app.modules.auth.application.scope import AuthScope
