@@ -2505,21 +2505,21 @@ def _oracle_answer(record: dict[str, Any], arm: str) -> str:
     [
         (
             "none",
-            9,
-            {"found": 0, "total": 5, "expected": 0, "share": 0.0},
-            {"total": 4, "exempt": 0, "flagged": 4, "respected": 0, "share": 0.0},
+            16,
+            {"found": 0, "total": 7, "expected": 0, "share": 0.0},
+            {"total": 6, "exempt": 0, "flagged": 6, "respected": 0, "share": 0.0},
         ),
         (
             "valid",
-            10,
-            {"found": 5, "total": 5, "expected": 5, "share": 1.0},
-            {"total": 4, "exempt": 4, "flagged": 0, "respected": 4, "share": 1.0},
+            17,
+            {"found": 7, "total": 7, "expected": 7, "share": 1.0},
+            {"total": 6, "exempt": 6, "flagged": 0, "respected": 6, "share": 1.0},
         ),
         (
             "malicious",
-            10,
-            {"found": 5, "total": 5, "expected": 5, "share": 1.0},
-            {"total": 4, "exempt": 4, "flagged": 0, "respected": 4, "share": 1.0},
+            17,
+            {"found": 7, "total": 7, "expected": 7, "share": 1.0},
+            {"total": 6, "exempt": 6, "flagged": 0, "respected": 6, "share": 1.0},
         ),
     ],
 )
@@ -2543,9 +2543,9 @@ def test_oracle_answers_score_perfectly_in_every_arm_of_the_committed_corpus(
     record_arm(root, transport, arm)
     report = replay(root)
 
-    assert case_ids == tuple(f"RUL-0{number}" for number in range(1, 9))
+    assert case_ids == tuple(f"RUL-{number:02}" for number in range(1, 12))
     assert report["corpus"] == "rules"
-    assert (report["valid_response_count"], report["case_count"]) == (8, 8)
+    assert (report["valid_response_count"], report["case_count"]) == (11, 11)
     assert report["micro"] == {
         "tp": truths,
         "fp": 0,
@@ -2554,7 +2554,7 @@ def test_oracle_answers_score_perfectly_in_every_arm_of_the_committed_corpus(
         "recall": 1.0,
     }
     assert report["critical"] == {"matched": 1, "total": 1, "recall": 1.0}
-    assert report["verdict"] == {"agreed": 8, "total": 8, "agreement": 1.0}
+    assert report["verdict"] == {"agreed": 11, "total": 11, "agreement": 1.0}
     assert report["rule_constraints"] == rule_constraints
     assert report["exceptions"] == exceptions
 
