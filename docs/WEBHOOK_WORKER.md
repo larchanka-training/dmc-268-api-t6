@@ -527,8 +527,8 @@ GitHub webhook delivery <delivery_id> event=<event> status=<status> detail=<deta
 `ignored_irrelevant_event` and `ignored_invalid_event`, or a deferral
 (`ignored_unknown_installation`, `ignored_unknown_repository`, `deferred_known_event`,
 `deferred_repository_details`, retried as described in "Deferred deliveries" below;
-`deferred_run_trigger`, retried every 30 seconds without a poll-count limit until one hour after
-the receipt was received, see "Superseded heads" below); a deferral carries `retry_at`.
+`deferred_run_trigger`, retried every 30 seconds without a poll-count limit until Run A reaches a terminal
+state (with code-level safety net `_RUN_TRIGGER_MAX_WAIT` = 1 hour, see "Superseded heads" below); a deferral carries `retry_at`.
 `detail` is `-` or the reason; a delivery that requested an index update ends it with
 `index=requested` (see "Index updates"). For a `pull_request` event it starts with `action=<action>`, so
 `labeled` and `synchronize` can be told apart (an ignored action, such as `ready_for_review`,
@@ -545,8 +545,8 @@ head with `; ` (and has no action):
 | `ineligible` | the CI gate reason: `ci_blocked` (a foreign check suite or the commit status is not green), `waiting_for_ci` (no CI evidence yet: with `wait_for_ci = always`, with `auto` while the label or head time is unknown, or with `auto` still inside the 2-minute window), `label_not_active`, `stale_head`, `stale_state`, `closed_pr`, `disabled_repository`, `unknown_pr` | the gate decided not to start a Run |
 | `unconfigured` | `missing_installation`, `missing_rules` (no active rule version), `missing_prompt` (no active `review.system` prompt and none pinned) | the repository lacks what a Run needs; a new label or CI event does not change that |
 | `stale` | `pull_request_gone`, `repository_gone`, `state_changed` (the PR changed between the gate and the locked read) | the decision no longer matches the current PR |
-| `deferred` | `active_run` (a different head still has a queued, running or publishing Run with cancellation requested) | the receipt stays retryable until the blocker is terminal, but at most one hour from its `received_at`, worker downtime included; then it is marked failed, see "Superseded heads" |
-| `duplicate` | `active_run` (an active Run exists on this head, or a different active head has no cancellation requested), `head_already_reviewed` (this head already has a webhook Run) | no second Run is created |
+| `deferred` | `active_run` (a different head still has an active queued, running or publishing Run; running/publishing Runs complete to establish incremental diff base, queued Runs cancel via T6, SD §6.3, [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6.4) | the receipt stays retryable until the blocker reaches a terminal state (governed by attempt deadlines and reconciler; emergency safety net `_RUN_TRIGGER_MAX_WAIT` = 1 hour), see "Superseded heads" |
+| `duplicate` | `active_run` (an active Run exists on this head), `head_already_reviewed` (this head already has a webhook Run) | no second Run is created |
 
 `ci_blocked` and `waiting_for_ci` carry a detail that says what blocks or delays the gate,
 for example `ineligible (ci_blocked: check suite app=5111174 queued)`:
@@ -578,9 +578,9 @@ label changes, for example
 `No-CI sweep pr=<id> head=aaaaaaa: unconfigured (missing_rules); excluded until the head or label changes`.
 A `deferred` result gets no suffix and does not exclude the candidate: the sweep reconsiders it
 on a later pass. The sweep selects only PRs without an active Run, so it meets `deferred` only
-when, after the selection, a Run of another head became active and had its cancellation
-requested; while that Run stays active, later passes skip the PR without a GitHub request,
-and once it is terminal the PR can be selected again.
+when, after the selection, a Run of another head became active (and continues running to form
+the base of the incremental review); while that Run stays active, later passes skip the PR without
+a GitHub request, and once it is terminal the PR can be selected again.
 
 Other details: `no open pull request` (a PR event or label whose PR is closed or unknown,
 nothing to enqueue), `no open pull request at this head` (a CI event for a head that no open PR
@@ -652,9 +652,10 @@ three attempts in total. For these deferrals `retry_at=none` means no retry is s
 the receipt waits until something revives it, the hourly revival for installation events or
 linking the installation (`wake_receipts`), see "Deferred deliveries" below.
 A `deferred_run_trigger` line is different: it ends with `retry_at=<time>` 30 seconds later on
-every pass, and with `retry_at=none` only when the supersession wait reaches its one-hour limit.
-The receipt is then marked failed, not deferred, nothing revives it, and its WARNING is the
-age-limit one, see "Superseded heads" below.
+every pass, and the receipt waits until Run A reaches a terminal state (or wakes up earlier via
+`pg_notify('webhook_work_available')`). Waiting is finite and bounded: RunGuard enforces bounded
+execution deadlines on Run A (lease 5m, attempt deadline 8m, at most 3 attempts with backoff: 30s, 2 min, or longer with explicit `Retry-After > 2m`,
+and cancellation via T12 → T6 `superseded` upon requeue after head move), see "Superseded heads" below.
 
 Logged fields. In this line and in the failure line below, `event` and `action` are plain
 tokens: a value is logged only when it is `[a-z_]`, 1 to 40 characters, and as `-` otherwise.
@@ -719,11 +720,31 @@ and database libraries; without a classifier every other failure is `internal`.
 | `database` | a database error: the connection, a statement or the connection pool |
 | `internal` | anything else: our own bugs and failed invariants on a GitHub response (a `ValueError` for an unexpected response, such as inconsistent check-suite pagination or a changed pull request number, a pydantic `ValidationError`, a JSON error); the traceback record tells them apart |
 
-Superseded heads (api#109). A push can request cancellation of running head A while
-successful CI for head B arrives before A becomes terminal. Cancellation requested is
-still active: the one-active-Run index and active states (`queued`, `running`, `publishing`)
-are unchanged. Only a different head with `cancel_requested=true` is temporary contention;
-same-head active Runs and ordinary active blockers remain final duplicates.
+Superseded heads (api#109). Under the incremental review architecture (SD §6.3,
+[`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6.4, Ч.2 #306),
+when a push or `synchronize` event arrives while Run A is already in `running` or `publishing`,
+Run A is not cancelled (`cancel_requested` remains false); it finishes execution and publishes
+its review on A's commit. The seam in `app/modules/reviews/application/try_enqueue_webhook_run.py:288-290`
+is modified so that the predicate for `DEFERRED` requires only that an active Run exists for a different
+head (`message.head_sha != candidate.ci.head_sha`), regardless of whether `cancel_requested` is true
+(removing the requirement for `cancel_requested` to be true).
+The dispatch returns status `deferred_run_trigger` with detail `deferred (active_run)`.
+Note that `deferred_run_trigger` is a transient dispatcher status and structured log representation,
+not a persisted column in `webhook_events` (the delivery is scheduled via `retry_after = now() + 30s`).
+
+When Run A reaches terminal state:
+- If Run A succeeded (`succeeded`, T14), `publisher` sends PostgreSQL notification `NOTIFY webhook_work_available`
+  and resets `retry_after = now()` strictly for pending receipts of this PR
+  (which `webhook-worker` listens to via `webhook_work_listener.py`, alongside periodic 30-second `retry_after` polling),
+  waking up `webhook-worker` to claim delivery B and launch Run B as an incremental review
+  (`is_incremental = true`, `diff_base_commit = A.head_sha`, T1-INC).
+- If Run A terminated with `failed` or `cancelled` without publishing receipts, Run B searches for the latest Run with published receipts per §6.5.1 step 1; if a prior Run with receipts exists, Run B proceeds incrementally from that base, and only if no published Run exists does it fall back to full review (`is_incremental = false`, `incremental_fallback_reason = 'no_prior_published_run'`).
+- If Run A was in `queued` (regardless of `attempt`), it is cancelled immediately via T6 (`superseded`).
+- In case of rapid series of pushes (e.g. head B arrives, then head C arrives before Run A completes):
+  when Run A finishes, delivery B detects head C as current (`ineligible (stale_head)`),
+  and only the latest head C is launched.
+
+Delivery B waits until Run A reaches a terminal state. Waiting is safe from hangs because RunGuard enforces strict attempt deadlines on Run A: heartbeat lease 5 min (`LEASE`), attempt deadline 8 min (`FAST_ATTEMPT_DEADLINE`), at most 3 attempts (`MAX_ATTEMPTS`) with backoff (standard backoff retries use two delays: 30s and 2 min; delays of 10 min or longer apply only when explicit `Retry-After > 2m` is returned by provider, `run_failures.py:228-249`), and path T12 → T6 (`superseded`) if Run A is requeued after a new push. If the worker crashes or halts, the reconciler transitions Run A to terminal `failed/lease_expired` after the third attempt (T13), freeing the PR blocker. The code-level `_RUN_TRIGGER_MAX_WAIT = timedelta(hours=1)` in `receive_github_delivery.py:25` serves as an emergency ceiling: on main, any delivery receipt waiting longer than 1 hour in deferred state is marked failed (`receive_github_delivery.py:337`, `:355`), stopping further retries for that delivery; bounded execution ensures normal runs finish well within this ceiling.
 
 The trigger returns typed retry intent separately from its rendered detail. The dispatch
 status is `deferred_run_trigger`, for example
@@ -739,50 +760,20 @@ token, resets `projection_attempt_count` to zero, and commits a `retry_after` 30
 later. A successful waiting dispatch breaks the sequence of dispatch failures, so three
 consecutive failures still mark a receipt failed, but failures separated by successful
 waits do not accumulate. Ordinary repository/installation deferrals keep their existing
-attempt policy. Waiting has no poll-count ceiling, so cancellation lasting more than three
-polls does not finish the receipt. The existing worker poll processes it when due; a restart
-uses the saved payload and retry time without needing another webhook. If the process crashes
-before finalizing the receipt, its claim becomes available after the five-minute lease. A lost
-claim raises; it does not report a successful release. Pending waits are not finished receipts
-and cannot be purged by finished-receipt retention.
+attempt policy. Waiting has no poll-count ceiling: waiting while Run A completes does not
+finish the receipt. The existing worker poll processes it when due; a restart uses the saved
+payload and retry time without needing another webhook. If the process crashes before finalizing
+the receipt, its claim becomes available after the five-minute lease. A lost claim raises;
+it does not report a successful release. Pending waits are not finished receipts and cannot be
+purged by finished-receipt retention.
 
-Continued supersession waiting is bounded to one hour from the original persisted
-`received_at`. On the first successful dispatch that still reports `deferred_run_trigger`
-at or after that deadline, the same token-guarded update sets `projection_failed_at`, resets
-the attempt counter and clears retry, claim and lease. After the use case commits, it logs
-`GitHub webhook delivery <delivery_id> failed after supersession wait reached its age limit`
-at WARNING. A failed commit emits no expiry warning and leaves the previous receipt state
-intact. Expired receipts never replay, even when A later completes; finished-receipt
-retention can purge them 30 days after failure. Dispatch still checks current state before
-applying this waiting limit: if A has already become terminal during delayed worker
-recovery, B can enqueue even after the receipt's one-hour deadline.
-
-Receipt age includes webhook-worker downtime. After more than an hour offline, the worker
-can expire a still-blocked receipt on its first successful waiting dispatch after restart.
-The ceiling bounds waiting for the superseded Run, not CI duration: pending CI finishes the
-receipt as `processed_ci` before it reaches this waiting path.
-
-If a `check_suite` or `status` delivery for B's current head has already set `ci_status`
-(`{"event":"check_suite"}` or `{"event":"status"}`; `workflow_run` does not write it), the
-no-CI sweep cannot rescue B after expiry: it selects only PRs with empty `ci_status`, even
-after A becomes terminal. Nor can it under `always` or `never`: the sweep selects only
-repositories with `wait_for_ci = auto`. In these cases, a new push or label event gives another
-launch opportunity, subject to current eligibility, and so does a rerun from the UI
-(SYSTEM_DESIGN §6.7): it creates a Run on the PR's current head without a CI check, but answers
-409 while the PR has an active Run, A with cancellation requested included (other refusals:
-PIPELINE_SPEC T3), so it works only once A is terminal. A's original check-run still promises
-review for the new commit (`В PR новый коммит — ревью будет для него.`). When `PORTAL_URL` is
-configured, its `details_url` points to A's Run; its summary has no link.
-Expiry has no UI or check-run alert; the WARNING is its only failure signal.
-
-The 30-second retry interval allows approximately 120 wait polls per hour. Each CI receipt
-poll in `always`/`auto` makes at least two GitHub requests: the check-suites of the head, read in
-pages of 100, and its combined status, plus an installation token request when no token is
-cached; a PR/label receipt also fetches the current PR, so approximately 240/360 requests per
-hour respectively are lower bounds. Separate CI deliveries for
-the same head each incur that cost. The deadline is enforced on the next due successful
-wait poll; worker downtime, an in-progress dispatch, or GitHub failures can delay that
-poll. No backoff or additional GitHub request is introduced.
+Receipt waiting continues for the duration of Run A's active execution. Because RunGuard
+and reconciler guarantee finite execution bounds, Run A cannot block the PR indefinitely.
+Once Run A reaches `succeeded` at T14, `publisher` emits `NOTIFY webhook_work_available` and
+resets `retry_after = now()` strictly for pending receipts of this PR. For Run A terminating
+in `failed` or `cancelled` before publication, delivery B is claimed on its 30-second periodic poll.
+If delivery B is still current, Run B is enqueued; if superseded by a newer head C,
+delivery B is classified as `ineligible (stale_head)`.
 
 Every retry runs target lookup and current eligibility again. An obsolete B CI event has no
 current target after push C; B's success cannot approve C. Current PR label/lifecycle
@@ -879,8 +870,8 @@ how many it handled, deferred and deferred for good
 due logs nothing. K counts the final deferrals and is part of M; each of them also logs
 `GitHub webhook delivery … deferred after its last attempt`. A dispatch that fails on its
 last attempt is not in any of the three numbers: it logs its own
-`… failed after its last attempt` WARNING. An expired supersession wait counts in handled
-and deferred, but not K; it logs the age-limit WARNING above. A revival that resets receipts
+`… failed after its last attempt` WARNING. A delivery exceeding the emergency one-hour ceiling (`_RUN_TRIGGER_MAX_WAIT`) logs
+the delivery age-limit WARNING. A revival that resets receipts
 logs how many.
 
 Retention. Finished receipts (projected, failed, or deferred and not revived since) are deleted
