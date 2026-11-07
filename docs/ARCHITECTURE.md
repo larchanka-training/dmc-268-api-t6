@@ -99,14 +99,15 @@ flowchart TD
 
 ## Процессы
 
-Один образ, разные команды (`docker-compose.yml`, на staging `deploy/compose/staging.yml`).
+Один образ, разные точки входа. Команды и где какой процесс запущен — в
+[README «Run»](../README.md#run) и [SD §14](SYSTEM_DESIGN.md#14-развёртывание-v1).
 
-| Процесс | Команда | Запуск | Роль |
-|---|---|---|---|
-| `backend` (на staging `api`) | `uvicorn app.main:app` | всегда | маршруты портала, входа и вебхуков в одном приложении; читает и пишет PostgreSQL, Redis не использует |
-| `worker` | `python -m app.worker` | всегда | `review.run.fast`, `review.publish`, `index.repo`, лидер: no-CI sweep, повторная публикация, задачи индекса |
-| `webhook-worker` | `python -m app.webhook_worker` | локально `--profile webhooks`, на staging всегда | квитанции `webhook_events` → проекция и Run |
-| `bootstrap` | `alembic upgrade head`, затем `python -m app.bootstrap.seed_prompts` | разово, до остальных | миграции и промпты |
+| Процесс | Точка входа | Роль |
+|---|---|---|
+| `backend` (на staging `api`) | `app/main.py` | маршруты портала, входа и вебхуков в одном приложении; читает и пишет PostgreSQL, Redis не использует |
+| `worker` | `app/worker.py` | `review.run.fast`, `review.publish`, `index.repo`, лидер: no-CI sweep, повторная публикация, задачи индекса |
+| `webhook-worker` | `app/webhook_worker.py` | квитанции `webhook_events` → проекция и Run |
+| `bootstrap` | миграции Alembic, `app/bootstrap/seed_prompts.py` | разово: схема БД и промпты |
 
 Хранилища:
 
