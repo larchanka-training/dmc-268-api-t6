@@ -805,6 +805,14 @@ deep: 5 цен единицы).
 
 ### 11.3. Роль и JWT
 
+**Список Workspace в токене.** Сейчас он строится только из
+`github_user_workspace_access` (`app/modules/auth/infrastructure/sessions.py`, SD
+§6.5). С #373 при выдаче токена к нему добавляются workspace, где у пользователя
+есть строка роли с `source = invite` (Admin, Billing, Member по приглашению), и из
+него вычитаются исключения. Так Billing без доступа GitHub после принятия
+приглашения видит workspace и может платить; прогоны и находки ему по-прежнему
+не видны (§11.1).
+
 Роль не кладётся в JWT. На каждом важном действии (оплата, тариф, авто-пополнение,
 настройки, команда) роль читается из БД. Запись об исключении (§11.2, шаг 2)
 проверяется на каждом запросе к workspace, в том числе на чтении: список Workspace
@@ -864,7 +872,8 @@ deep: 5 цен единицы).
 | PIPELINE_SPEC §6 | С #372: коды `plan_repo_limit`, `plan_graph_rag_unavailable` (§4.4) |
 | PIPELINE_SPEC §7 (check-run, только GitHub) | С #371: у `skipped` с `balance_exhausted` в summary ссылка на пополнение (сейчас у `skipped` ссылки нет); комментарий в PR с той же ссылкой не чаще раза в сутки на PR (§8.1) |
 | `AGENTS.md`, `.agents/rules/backend.md` §3, BACKEND_ARCHITECTURE (исключения короткой транзакции) | С #371: имя единственной точки записи строк списания (класс и метод модуля `billing`) вписывается рядом с `SqlAlchemyUsageLedger.record` |
-| SD §6.5, §8.2, §12, `contracts/openapi.yaml` | С #373: роли, Owner из GitHub, исключения, приглашения, право App `members: read`, проверка роли в БД; исключение проверяется на каждом запросе к workspace, включая чтение (`app/modules/auth/application/scope.py`, §11.3); вебхуки `organization` и `membership` (§11.2) |
+| SD §6.5, §8.2, §12, `contracts/openapi.yaml` | С #373: роли, Owner из GitHub, исключения, приглашения, право App `members: read`, проверка роли в БД; исключение проверяется на каждом запросе к workspace, включая чтение (`app/modules/auth/application/scope.py`, §11.3); список Workspace в токене
+включает workspace со строкой роли по приглашению (`app/modules/auth/infrastructure/sessions.py`, §11.3); вебхуки `organization` и `membership` (§11.2) |
 | BACKEND_ARCHITECTURE (таблица задач worker, лидер-цикл) | С #371: задачи досписания и истечения (§10.6) и суточная сверка со Stripe (§10.5) в лидер-цикле |
 | `app/modules/reviews/application/get_metrics_summary.py` (флаг `paused` от `FAST_RUN_COST_LIMIT`) | С #371: флаг считается от цены единицы тарифа и остатка дня по списаниям, только при `daily_budget_usd > 0` (§8.1) |
 | PIPELINE_SPEC §1 T5 | С #371 и #372: причины `balance_exhausted` и `plan_repo_limit` при claim |
