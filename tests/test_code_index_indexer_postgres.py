@@ -13,168 +13,117 @@ Each test migrates its own schema to head and drops it afterwards.
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import io
-import os
-import tarfile
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
-from alembic.config import Config
-from sqlalchemy import Connection, create_engine, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
+from sqlalchemy import text
 
-from alembic import command
-from app.modules.code_index.application import build_index
 from app.modules.code_index.application.build_index import (
     BuildMode,
     BuildOutcome,
-    BuildRepositoryIndex,
     BuildStatus,
-    FullBuildReason,
-    IndexBuildSettings,
-    IndexVersions,
-    limits_profile_version,
-    parser_profile_version,
 )
 from app.modules.code_index.application.exclusions import ExclusionClass
-from app.modules.code_index.application.index_resolution import INDEX_RESOLVER_VERSION
 from app.modules.code_index.application.index_store import (
-    ImportRecord,
     IndexAdmission,
     IndexBuildStats,
     IndexedEdge,
-    IndexedSymbol,
-    IndexState,
 )
 from app.modules.code_index.application.ports import IndexedRepository
-from app.modules.code_index.application.vcs import (
-    Ancestry,
-    BranchHead,
-    ChangedPath,
-    ChangeStatus,
-    Comparison,
-    IndexLimitExceeded,
-    SourceArchive,
-)
-from app.modules.code_index.domain.enums import EdgeKind, IndexStatus, PurgeReason
+from app.modules.code_index.domain.enums import IndexStatus, PurgeReason
 from app.modules.code_index.domain.limits import IndexLimits
-from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeIndexUnitOfWork
 from app.modules.code_index.infrastructure.repository_reader import (
     SqlAlchemyIndexRepositoryReader,
 )
-from app.modules.code_index.infrastructure.tar_archive import TarArchiveReader
 from app.modules.reviews.application.ast_resolution import ImportResolution
 from app.modules.reviews.application.ast_symbols import (
     AstFacts,
     AstFailureReason,
-    AstLanguage,
     ParseRequest,
     SourceParser,
 )
-from app.modules.reviews.application.policy_documents import missing_document, normalize_document
-from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
-from app.modules.reviews.application.policy_snapshot import PolicyDocument
-from app.modules.reviews.infrastructure.subprocess_source_parser import SubprocessSourceParser
-from app.modules.reviews.infrastructure.tree_sitter_facts import QUERY_VERSION, profile_version
-
-_MIB = 1_048_576
-_KIB = 1_024
-_LIMITS = IndexLimits()
-# As the composition root computes them (plan, "Versions").
-_VERSIONS = IndexVersions(
-    extractor_version=QUERY_VERSION,
-    resolver_version=INDEX_RESOLVER_VERSION,
-    parser_profile_version=parser_profile_version(
-        profile_version(language) for language in AstLanguage
-    ),
-    limits_profile_version=limits_profile_version(_LIMITS),
+from tests.code_index_indexer_support import (
+    _ADMISSION as _ADMISSION,
 )
-_ADMISSION = IndexAdmission(2, 1, 512 * _MIB, 2_048 * _MIB)
-_SETTINGS = IndexBuildSettings(admission=_ADMISSION)
+from tests.code_index_indexer_support import (
+    _KIB as _KIB,
+)
+from tests.code_index_indexer_support import (
+    _LIMITS as _LIMITS,
+)
+from tests.code_index_indexer_support import (
+    _MIB as _MIB,
+)
+from tests.code_index_indexer_support import (
+    _SETTINGS as _SETTINGS,
+)
+from tests.code_index_indexer_support import (
+    _USER as _USER,
+)
+from tests.code_index_indexer_support import (
+    _VERSIONS as _VERSIONS,
+)
+from tests.code_index_indexer_support import (
+    EXTERNAL as EXTERNAL,
+)
+from tests.code_index_indexer_support import (
+    RESOLVED as RESOLVED,
+)
+from tests.code_index_indexer_support import (
+    Branch as Branch,
+)
+from tests.code_index_indexer_support import (
+    Indexer as Indexer,
+)
+from tests.code_index_indexer_support import (
+    Link as Link,
+)
+from tests.code_index_indexer_support import (
+    Snapshot as Snapshot,
+)
+from tests.code_index_indexer_support import (
+    Tree as Tree,
+)
+from tests.code_index_indexer_support import (
+    Vcs as Vcs,
+)
+from tests.code_index_indexer_support import (
+    Wakeups as Wakeups,
+)
+from tests.code_index_indexer_support import (
+    _changes as _changes,
+)
+from tests.code_index_indexer_support import (
+    _Database as _Database,
+)
+from tests.code_index_indexer_support import (
+    _imports as _imports,
+)
+from tests.code_index_indexer_support import (
+    _raw_rows as _raw_rows,
+)
+from tests.code_index_indexer_support import (
+    _record as _record,
+)
+from tests.code_index_indexer_support import (
+    _repository as _repository,
+)
+from tests.code_index_indexer_support import (
+    _run as _run,
+)
+from tests.code_index_indexer_support import (
+    _sha as _sha,
+)
+from tests.code_index_indexer_support import (
+    _tarball as _tarball,
+)
+from tests.code_index_indexer_support import (
+    _uses as _uses,
+)
 
-
-@pytest.fixture
-def code_index_database() -> Iterator[Connection]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_code_indexer_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                config = Config("alembic.ini")
-                config.attributes["connection"] = connection
-                command.upgrade(config, "head")
-                yield connection
-            finally:
-                connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
-    finally:
-        engine.dispose()
-
-
-def _repository(connection: Connection, installation_external_id: int, full_name: str) -> UUID:
-    workspace_id, installation_id, repository_id = uuid4(), uuid4(), uuid4()
-    connection.execute(
-        text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'acme', 5)"),
-        {"id": workspace_id},
-    )
-    connection.execute(
-        text(
-            "INSERT INTO provider_installations "
-            "(id, workspace_id, provider, external_id, metadata) "
-            "VALUES (:id, :workspace, 'github', :external_id, '{\"account_login\": \"octo\"}')"
-        ),
-        {"id": installation_id, "workspace": workspace_id, "external_id": installation_external_id},
-    )
-    connection.execute(
-        text(
-            "INSERT INTO repositories "
-            "(id, provider_installation_id, external_id, full_name, default_branch, web_url) "
-            "VALUES (:id, :installation, 101, :full_name, 'main', 'https://github.com/x')"
-        ),
-        {"id": repository_id, "installation": installation_id, "full_name": full_name},
-    )
-    return repository_id
-
-
-@dataclass(frozen=True)
-class _Database:
-    factory: async_sessionmaker[AsyncSession]
-    a: UUID
-    b: UUID
-
-
-@pytest.fixture
-def database(code_index_database: Connection) -> Iterator[_Database]:
-    """Two repositories in their own installations, committed for async sessions."""
-    connection = code_index_database
-    repository_a = _repository(connection, 17, "octo/indexed-a")
-    repository_b = _repository(connection, 18, "octo/indexed-b")
-    connection.commit()
-    schema = connection.scalar(text("SELECT current_schema()"))
-    engine = create_async_engine(
-        os.environ["TEST_DATABASE_URL"],
-        connect_args={"options": f"-csearch_path={schema}"},
-        poolclass=NullPool,
-    )
-    try:
-        yield _Database(
-            async_sessionmaker(engine, expire_on_commit=False), repository_a, repository_b
-        )
-    finally:
-        asyncio.run(engine.dispose())
+pytest_plugins = ("tests.code_index_indexer_support",)
 
 
 @pytest.mark.integration
@@ -197,334 +146,67 @@ def test_the_repository_reader_names_the_repository_and_its_installation(
     )
 
 
-# --- the fake VCS --------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Link:
-    """A symlink of a tree."""
-
-    target: str
-
-
-Tree = Mapping[str, bytes | Link]
-
-
-def _sha(number: int) -> str:
-    return f"{number:02x}" * 20
-
-
-@dataclass
-class Branch:
-    """A linear default branch: every pushed tree is a commit; HEAD is the last one."""
-
-    commits: list[tuple[str, Tree]] = field(default_factory=list)
-    export_ignored: frozenset[str] = frozenset()
-    policy_errors: dict[str, PolicyError] = field(default_factory=dict)
-
-    def push(self, tree: Tree) -> str:
-        sha = _sha(len(self.commits) + 1)
-        self.commits.append((sha, dict(tree)))
-        return sha
-
-    @property
-    def head(self) -> str | None:
-        return self.commits[-1][0] if self.commits else None
-
-    def tree(self, sha: str) -> Tree:
-        return dict(self.commits)[sha]
-
-    def position(self, sha: str) -> int | None:
-        return next((index for index, (item, _) in enumerate(self.commits) if item == sha), None)
-
-
-def _changes(old: Tree, new: Tree) -> tuple[ChangedPath, ...]:
-    """What a provider compare lists: an exact-content move is a rename."""
-    removed = [path for path in old if path not in new]
-    renamed: dict[str, str] = {}
-    for path in (path for path in new if path not in old):
-        source = next(
-            (item for item in removed if old[item] == new[path] and item not in renamed.values()),
-            None,
-        )
-        if source is not None:
-            renamed[path] = source
-    changes = []
-    for path in sorted(set(old) | set(new)):
-        if path in renamed:
-            changes.append(ChangedPath(path, ChangeStatus.RENAMED, renamed[path]))
-        elif path in renamed.values():
-            continue
-        elif path not in old:
-            changes.append(ChangedPath(path, ChangeStatus.ADDED))
-        elif path not in new:
-            changes.append(ChangedPath(path, ChangeStatus.REMOVED))
-        elif old[path] != new[path]:
-            changes.append(ChangedPath(path, ChangeStatus.MODIFIED))
-    return tuple(changes)
-
-
-def _tarball(sha: str, tree: Tree) -> bytes:
-    """A GitHub-like tarball: a global pax header with the commit, then one root."""
-    buffer = io.BytesIO()
-    root = f"octo-repo-{sha[:7]}"
-    with tarfile.open(
-        fileobj=buffer,
-        mode="w:gz",
-        format=tarfile.PAX_FORMAT,
-        pax_headers={"comment": sha},
-        compresslevel=1,
-    ) as archive:
-        directory = tarfile.TarInfo(root)
-        directory.type = tarfile.DIRTYPE
-        archive.addfile(directory)
-        for path, value in tree.items():
-            info = tarfile.TarInfo(f"{root}/{path}")
-            if isinstance(value, Link):
-                info.type = tarfile.SYMTYPE
-                info.linkname = value.target
-                archive.addfile(info)
-            else:
-                info.size = len(value)
-                archive.addfile(info, io.BytesIO(value))
-    return buffer.getvalue()
-
-
-@dataclass
-class Vcs:
-    """`RepositorySnapshotSource` of one job over a `Branch`."""
-
-    branch: Branch
-    requests: int = 0
-    compares: int = 0
-
-    @property
-    def request_count(self) -> int:
-        return self.requests
-
-    async def head(self) -> BranchHead | None:
-        # As the GitHub source counts them: the repository, then its branch commit.
-        self.requests += 2
-        head = self.branch.head
-        return None if head is None else BranchHead("main", head)
-
-    async def compare(self, base_sha: str, head_sha: str) -> Comparison | None:
-        self.requests += 1
-        self.compares += 1
-        base, head = self.branch.position(base_sha), self.branch.position(head_sha)
-        if base is None or head is None:
-            return None
-        ancestry = Ancestry.AHEAD if base < head else Ancestry.BEHIND
-        if base == head:
-            ancestry = Ancestry.IDENTICAL
-        changes = _changes(self.branch.tree(base_sha), self.branch.tree(head_sha))
-        return Comparison(ancestry, changes, complete=True)
-
-    async def rules_document(self, commit_sha: str) -> PolicyDocument:
-        # Mirror real GitHub requests, including proof of absence via complete trees.
-        tree = self.branch.tree(commit_sha)
-        self.requests += 1
-        if commit_sha in self.branch.policy_errors:
-            raise self.branch.policy_errors[commit_sha]
-        if ".review" in tree:
-            raise PolicyError(PolicyErrorCode.DOCUMENT_TYPE_UNSUPPORTED, "nonregular parent")
-        if not any(path.startswith(".review/") for path in tree):
-            return missing_document(".review/rules.md")
-        self.requests += 1
-        raw = tree.get(".review/rules.md")
-        if isinstance(raw, Link):
-            raise PolicyError(PolicyErrorCode.DOCUMENT_TYPE_UNSUPPORTED, "nonregular policy")
-        if raw is None:
-            return missing_document(".review/rules.md")
-        self.requests += 1
-        return normalize_document(
-            ".review/rules.md",
-            raw,
-            blob_oid=hashlib.sha1(b"blob %d\0" % len(raw) + raw).hexdigest(),
-            policy_base_sha=commit_sha,
-        )
-
-    async def archive(self, commit_sha: str, *, max_bytes: int) -> SourceArchive:
-        # The tarball request and its codeload redirect.
-        self.requests += 2
-        original = self.branch.tree(commit_sha)
-        archive_tree = {
-            path: value
-            for path, value in original.items()
-            if not any(
-                path == excluded or path.startswith(excluded.rstrip("/") + "/")
-                for excluded in self.branch.export_ignored
-            )
-        }
-        content = _tarball(commit_sha, archive_tree)
-        if len(content) > max_bytes:
-            raise IndexLimitExceeded("download_bytes")
-        return SourceArchive(commit_sha, content)
-
-
-@dataclass
-class Wakeups:
-    woken: list[tuple[UUID, int]] = field(default_factory=list)
-
-    async def wake(self, repository_id: UUID, generation: int) -> None:
-        self.woken.append((repository_id, generation))
-
-
-# --- the indexer over PostgreSQL -------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Snapshot:
-    """The visible rows of a repository's index, normalized: rows carry paths only."""
-
-    files: frozenset[tuple[str, str]]
-    symbols: frozenset[IndexedSymbol]
-    edges: frozenset[IndexedEdge]
-    imports: frozenset[ImportRecord]
-
-
-@dataclass
-class Indexer:
-    database: _Database
-    parser: SourceParser
-    branch: Branch = field(default_factory=Branch)
-    limits: IndexLimits = _LIMITS
-    settings: IndexBuildSettings = _SETTINGS
-    jobs: list[Vcs] = field(default_factory=list)
-    wakeups: Wakeups = field(default_factory=Wakeups)
-
-    def uow(self) -> SqlAlchemyCodeIndexUnitOfWork:
-        return SqlAlchemyCodeIndexUnitOfWork(self.database.factory)
-
-    def _source(self, repository: IndexedRepository) -> Vcs:
-        job = Vcs(self.branch)
-        self.jobs.append(job)
-        return job
-
-    async def state(self, repository_id: UUID) -> IndexState:
-        async with self.uow() as uow:
-            state = await uow.index.get_state(repository_id)
-        assert state is not None
-        return state
-
-    async def enable(self, repository_id: UUID) -> None:
-        async with self.uow() as uow:
-            await uow.index.enable(repository_id)
-            await uow.commit()
-
-    async def purge(self, repository_id: UUID) -> None:
-        async with self.uow() as uow:
-            await uow.index.purge(repository_id, PurgeReason.DISABLED)
-            await uow.commit()
-
-    async def build(self, repository_id: UUID, generation: int | None = None) -> BuildOutcome:
-        """A job for the current generation, or for `generation` (an old message)."""
-        use_case = BuildRepositoryIndex(
-            uow=self.uow,
-            repositories=SqlAlchemyIndexRepositoryReader(self.database.factory),
-            sources=self._source,
-            archives=TarArchiveReader(self.limits),
-            parser=self.parser,
-            wakeups=self.wakeups,
-            versions=replace(_VERSIONS, limits_profile_version=limits_profile_version(self.limits)),
-            limits=self.limits,
-            settings=self.settings,
-        )
-        if generation is None:
-            generation = (await self.state(repository_id)).generation
-        return await use_case.execute(repository_id, generation)
-
-    async def fresh_full(self, repository_id: UUID) -> BuildOutcome:
-        """A full build from scratch: the toggle off and on again."""
-        await self.purge(repository_id)
-        await self.enable(repository_id)
-        outcome = await self.build(repository_id)
-        assert (outcome.status, outcome.mode) == (BuildStatus.PUBLISHED, BuildMode.FULL)
-        return outcome
-
-    async def snapshot(self, repository_id: UUID) -> Snapshot:
-        files: list[tuple[str, str]] = []
-        symbols: set[IndexedSymbol] = set()
-        edges: set[IndexedEdge] = set()
-        imports: set[ImportRecord] = set()
-        async with self.uow() as uow:
-            after = None
-            while page := await uow.index.iter_files(repository_id, after, 100):
-                files.extend(page)
-                after = page[-1][0]
-            for path, _ in files:
-                file = await uow.index.get_file(repository_id, path)
-                assert file is not None
-                symbols.update(file.symbols)
-                edges.update(file.edges)
-                imports.update(file.imports)
-        return Snapshot(frozenset(files), frozenset(symbols), frozenset(edges), frozenset(imports))
-
-    async def incremental_equals_full(self, outcome: BuildOutcome, before: Snapshot) -> Snapshot:
-        """AC6: A built incrementally, and a fresh full build of B at HEAD equals it."""
-        assert (outcome.status, outcome.mode) == (BuildStatus.PUBLISHED, BuildMode.INCREMENTAL)
-        assert self.jobs[-1].compares == 1
-        incremental = await self.snapshot(self.database.a)
-        await self.fresh_full(self.database.b)
-        assert incremental == await self.snapshot(self.database.b)
-        assert incremental.edges or incremental.imports
-        assert incremental != before
-        state = await self.state(self.database.a)
-        assert state.indexed_commit_sha == self.branch.head
-        return incremental
-
-    async def start(self, tree: Tree) -> Snapshot:
-        """Push the first commit and build A in full; B is enabled for comparisons."""
-        await self.enable(self.database.a)
-        await self.enable(self.database.b)
-        self.branch.push(tree)
-        outcome = await self.build(self.database.a)
-        assert (outcome.status, outcome.mode) == (BuildStatus.PUBLISHED, BuildMode.FULL)
-        return await self.snapshot(self.database.a)
-
-
-def _run(
-    database: _Database,
-    scenario: Callable[[Indexer], Awaitable[None]],
-    *,
-    limits: IndexLimits = _LIMITS,
-    settings: IndexBuildSettings = _SETTINGS,
-    parser: Callable[[SourceParser], SourceParser] | None = None,
-) -> None:
-    async def run() -> None:
-        # The indexer's own parser: no CPU budget per attempt, only the per-file limit.
-        real = SubprocessSourceParser(attempt_cpu_seconds=None)
-        try:
-            used = parser(real) if parser is not None else real
-            await scenario(Indexer(database, used, limits=limits, settings=settings))
-        finally:
-            await real.aclose()
-
-    asyncio.run(run())
-
-
-def _imports(path: str, target: str) -> IndexedEdge:
-    return IndexedEdge(path, EdgeKind.IMPORTS, target, "")
-
-
-def _uses(path: str, target: str, name: str) -> IndexedEdge:
-    return IndexedEdge(path, EdgeKind.USES_IMPORTED, target, name)
-
-
-def _record(
-    path: str, specifier: str, resolution: ImportResolution, target: str | None = None
-) -> ImportRecord:
-    return ImportRecord(path, specifier, resolution, target)
-
-
-RESOLVED = ImportResolution.RESOLVED
-EXTERNAL = ImportResolution.EXTERNAL
-
-
 # --- AC6: incremental = full ------------------------------------------------------------
 
-_USER = b"from lib import target\n\n\ndef use():\n    return target()\n"
 _GO_MOD = b"module example.com/m\n"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("importer", "target", "import_source", "target_source"),
+    [
+        pytest.param(
+            "pkg/app.py",
+            "pkg/models.py",
+            b"from .models import User\n\ndef run():\n    return User()\n",
+            b"class User:\n    pass\n\ndef broken(:\n    pass\n",
+            id="py",
+        ),
+        pytest.param(
+            "pkg/app.py",
+            "pkg/models.py",
+            b"from .models import User\n\ndef run():\n    return User()\n",
+            b"class User(:\n    pass\n",
+            id="py-overlap",
+        ),
+        *(
+            pytest.param(
+                f"src/app{extension}",
+                f"src/models{extension}",
+                b'import { User } from "./models";\nexport function run() { return new User(); }\n',
+                b"export class User {}\nexport function broken( { }\n",
+                id=extension[1:],
+            )
+            for extension in (".ts", ".tsx", ".js", ".jsx")
+        ),
+        pytest.param(
+            "src/app.ts",
+            "src/models.ts",
+            b'import { User } from "./models";\nexport function run() { return new User(); }\n',
+            b"export class User { x = ; }\n",
+            id="ts-overlap",
+        ),
+    ],
+)
+def test_broken_target_symbol_does_not_join_on_index_read(
+    database: _Database,
+    importer: str,
+    target: str,
+    import_source: bytes,
+    target_source: bytes,
+) -> None:
+    async def scenario(indexer: Indexer) -> None:
+        snapshot = await indexer.start({importer: import_source, target: target_source})
+        assert _uses(importer, target, "User") in snapshot.edges
+        assert all(symbol.key.path != target for symbol in snapshot.symbols)
+
+        async with indexer.uow() as uow:
+            outgoing = await uow.index.outgoing_edges(database.a, importer)
+        matched = [item for item in outgoing if item.edge == _uses(importer, target, "User")]
+        assert len(matched) == 1
+        assert matched[0].target_symbols == ()
+
+    _run(database, scenario)
 
 
 @pytest.mark.integration
@@ -923,8 +605,10 @@ def test_a_file_that_became_too_large_binary_or_a_symlink_loses_its_rows(
 
 
 @pytest.mark.integration
-def test_a_nul_character_after_the_binary_check_drops_only_its_rows(database: _Database) -> None:
-    # The binary check reads the first 8 KiB; PostgreSQL text cannot hold U+0000.
+def test_a_nul_character_after_the_binary_check_keeps_file_without_partial_symbols(
+    database: _Database,
+) -> None:
+    # The binary check reads the first 8 KiB; the later NUL gives a parse error.
     source = (
         "// " + "x" * 9_000 + "\n"
         'import { a } from "./a\0b";\n'
@@ -936,27 +620,11 @@ def test_a_nul_character_after_the_binary_check_drops_only_its_rows(database: _D
         snapshot = await indexer.start({"src/run.ts": source})
 
         assert {path for path, _ in snapshot.files} == {"src/run.ts"}
-        assert {symbol.key.qualified_name for symbol in snapshot.symbols} == {"A", "run"}
+        assert snapshot.symbols == frozenset()
         assert snapshot.imports == frozenset()
         assert snapshot.edges == frozenset()
 
     _run(database, scenario)
-
-
-# --- AC7, AC12 ---------------------------------------------------------------------------
-
-
-async def _raw_rows(database: _Database, repository_id: UUID) -> tuple[int, ...]:
-    async with database.factory() as session:
-        counts = []
-        for table in ("files", "symbols", "edges", "imports"):
-            counts.append(
-                await session.scalar(
-                    text(f"SELECT count(*) FROM code_index_{table} WHERE repository_id = :id"),
-                    {"id": repository_id},
-                )
-            )
-        return tuple(counts)
 
 
 @pytest.mark.integration
@@ -1360,198 +1028,3 @@ def test_two_live_builds_of_one_workspace_never_commit_over_its_quota(
         assert 2 * per_file <= admission.repository_storage_bytes
 
     _run(database, scenario, parser=acting)
-
-
-# --- authoritative policy excluded from source archives (#207) ----------------------------
-
-_HIDDEN_RULES = b"```review-ignore\nignored.py\n```\n"
-
-
-def _hidden_policy_tree(*, target: int = 1, rules: bytes = _HIDDEN_RULES) -> Tree:
-    return {
-        "lib.py": f"def target():\n    return {target}\n".encode(),
-        "user.py": _USER,
-        "ignored.py": f"def must_not_be_stored():\n    return {target + 98}\n".encode(),
-        ".review/rules.md": rules,
-        ".review/notes.md": b"policy notes\n",
-    }
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize(
-    "hidden", [".review/rules.md", ".review"], ids=["hidden-rules", "hidden-parent"]
-)
-def test_hidden_unchanged_policy_incremental_rows_equal_fresh_full(
-    database: _Database, hidden: str
-) -> None:
-    async def scenario(indexer: Indexer) -> None:
-        indexer.branch.export_ignored = frozenset({hidden})
-        before = await indexer.start(_hidden_policy_tree())
-        head = indexer.branch.push(_hidden_policy_tree(target=2))
-
-        outcome = await indexer.build(database.a)
-        incremental_job = indexer.jobs[-1]
-        after = await indexer.incremental_equals_full(outcome, before)
-
-        assert outcome.commit_sha == head
-        assert (incremental_job.requests, outcome.github_request_count) == (8, 8)
-        assert indexer.jobs[-1].request_count == 7
-        assert {path for path, _ in after.files} == {"lib.py", "user.py"}
-        assert len(after.symbols) == 2
-        assert after.edges == frozenset(
-            {_imports("user.py", "lib.py"), _uses("user.py", "lib.py", "target")}
-        )
-        assert after.imports == frozenset({_record("user.py", "lib", RESOLVED, "lib.py")})
-        state = await indexer.state(database.a)
-        full_state = await indexer.state(database.b)
-        assert (state.file_count, state.symbol_count, state.edge_count, state.pending_bytes) == (
-            2,
-            2,
-            2,
-            0,
-        )
-        assert state.stored_bytes == full_state.stored_bytes
-        assert state.stored_bytes > 0
-        # The changed ignored source is examined but contributes no stored rows.
-        assert outcome.exclusions[ExclusionClass.IGNORED] == 1
-
-    _run(database, scenario)
-
-
-@pytest.mark.integration
-def test_hidden_policy_change_forces_full_and_matches_fresh_full(database: _Database) -> None:
-    async def scenario(indexer: Indexer) -> None:
-        indexer.branch.export_ignored = frozenset({".review"})
-        before = await indexer.start(_hidden_policy_tree(rules=b"policy without ignore masks\n"))
-        assert {path for path, _ in before.files} == {"lib.py", "user.py", "ignored.py"}
-        head = indexer.branch.push(_hidden_policy_tree(target=2))
-
-        outcome = await indexer.build(database.a)
-
-        assert (outcome.status, outcome.mode, outcome.full_reason) == (
-            BuildStatus.PUBLISHED,
-            BuildMode.FULL,
-            FullBuildReason.EXCLUSIONS_CHANGED,
-        )
-        assert outcome.commit_sha == head
-        assert indexer.jobs[-1].compares == 1
-        assert outcome.github_request_count == 8
-        after = await indexer.snapshot(database.a)
-        await indexer.fresh_full(database.b)
-        assert after == await indexer.snapshot(database.b)
-        assert {path for path, _ in after.files} == {"lib.py", "user.py"}
-        a, b = await indexer.state(database.a), await indexer.state(database.b)
-        assert (a.file_count, a.symbol_count, a.edge_count, a.pending_bytes) == (2, 2, 2, 0)
-        assert a.stored_bytes == b.stored_bytes
-
-    _run(database, scenario)
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize(
-    ("notes", "requests"), [(False, 5), (True, 6)], ids=["no-review-directory", "no-rules-blob"]
-)
-def test_proven_missing_policy_indexes_with_empty_custom_masks(
-    database: _Database, notes: bool, requests: int
-) -> None:
-    async def scenario(indexer: Indexer) -> None:
-        tree = {"lib.py": b"def target():\n    return 1\n", "user.py": _USER}
-        if notes:
-            tree[".review/notes.md"] = b"notes\n"
-        snapshot = await indexer.start(tree)
-
-        assert {path for path, _ in snapshot.files} == {"lib.py", "user.py"}
-        assert indexer.jobs[-1].request_count == requests
-        published = await indexer.state(database.a)
-        assert (await indexer.build(database.a)).status is BuildStatus.UNCHANGED
-        unchanged = await indexer.state(database.a)
-        assert unchanged.published_publication == published.published_publication
-        assert unchanged.stored_bytes == published.stored_bytes
-        assert unchanged.stats.github_request_count == 2
-        assert await indexer.snapshot(database.a) == snapshot
-
-    _run(database, scenario)
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize(
-    ("rules", "code", "requests"),
-    [
-        (b"\xff", "policy_document_decode_error", 6),
-        (b"```review-ignore\nignored.py\n", "policy_ignore_block_unclosed", 6),
-        (Link("../rules.md"), "policy_document_type_unsupported", 5),
-        (None, "policy_revision_unavailable", 4),
-    ],
-    ids=["invalid-utf8", "unclosed-mask", "symlink", "unreadable-root"],
-)
-def test_hidden_policy_failure_keeps_previous_published_rows(
-    database: _Database, rules: bytes | Link | None, code: str, requests: int
-) -> None:
-    async def scenario(indexer: Indexer) -> None:
-        indexer.branch.export_ignored = frozenset({".review"})
-        before = await indexer.start(_hidden_policy_tree())
-        published = await indexer.state(database.a)
-        rows = await _raw_rows(database, database.a)
-        tree = dict(_hidden_policy_tree(target=2))
-        if rules is not None:
-            tree[".review/rules.md"] = rules
-        head = indexer.branch.push(tree)
-        if rules is None:
-            indexer.branch.policy_errors[head] = PolicyError(
-                PolicyErrorCode.REVISION_UNAVAILABLE, "unreadable pinned tree"
-            )
-
-        outcome = await indexer.build(database.a)
-
-        assert (outcome.status, outcome.error_code) == (BuildStatus.RELEASED, code)
-        state = await indexer.state(database.a)
-        assert state.status is IndexStatus.READY
-        assert state.last_error_code == code
-        assert state.indexed_commit_sha == published.indexed_commit_sha
-        assert state.published_publication == published.published_publication
-        assert (state.file_count, state.symbol_count, state.edge_count, state.stored_bytes) == (
-            published.file_count,
-            published.symbol_count,
-            published.edge_count,
-            published.stored_bytes,
-        )
-        assert state.pending_bytes == 0
-        assert (state.stats.downloaded_bytes, state.stats.github_request_count) == (0, requests)
-        assert await indexer.snapshot(database.a) == before
-        assert await _raw_rows(database, database.a) == rows
-
-    _run(database, scenario)
-
-
-@pytest.mark.integration
-def test_same_commit_v1_index_rebuilds_with_hidden_policy(
-    database: _Database, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def scenario(indexer: Indexer) -> None:
-        indexer.branch.export_ignored = frozenset({".review"})
-        monkeypatch.setattr(build_index, "INDEX_EXCLUSIONS_VERSION", "index-exclusions/v1")
-        await indexer.start(_hidden_policy_tree())
-        before = await indexer.state(database.a)
-        monkeypatch.setattr(build_index, "INDEX_EXCLUSIONS_VERSION", "index-exclusions/v2")
-
-        outcome = await indexer.build(database.a)
-
-        assert (outcome.status, outcome.mode, outcome.full_reason) == (
-            BuildStatus.PUBLISHED,
-            BuildMode.FULL,
-            FullBuildReason.PROFILE_CHANGED,
-        )
-        assert outcome.commit_sha == before.indexed_commit_sha
-        assert outcome.github_request_count == 7
-        assert indexer.jobs[-1].compares == 0
-        state = await indexer.state(database.a)
-        assert state.published_publication > before.published_publication
-        assert state.profile is not None
-        assert before.profile is not None
-        assert state.profile.limits_profile_version != before.profile.limits_profile_version
-        assert {path for path, _ in (await indexer.snapshot(database.a)).files} == {
-            "lib.py",
-            "user.py",
-        }
-
-    _run(database, scenario)

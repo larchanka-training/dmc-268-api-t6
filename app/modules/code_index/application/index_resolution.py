@@ -8,7 +8,10 @@ facts are read, each under its own rule: the members of a Go package (alias, bui
 constraints, package clause and which member declares a name; rule G), and a package
 `__init__.py` that decides whether `from package import name` binds a symbol or a
 submodule (rule I). A Go record points at the package directory, its edges at the member
-files.
+files. A parse error in any Go member makes rule G `unsupported`/`ast_failed` with no
+member edges; a broken `__init__.py` makes rule I guess neither symbol nor submodule.
+Python and TypeScript/JavaScript target symbols from files with parse errors are not
+stored, so their name edges do not join to a symbol on read.
 
 The #130 resolver of the review is reused path by path, but without its per-run caps:
 every import of an indexed file gets a record, resolved or not, and every name it binds
@@ -56,7 +59,7 @@ from app.modules.reviews.application.ast_symbols import (
     language_for_path,
 )
 
-INDEX_RESOLVER_VERSION = f"{RESOLVER_VERSION}+index/v1"
+INDEX_RESOLVER_VERSION = f"{RESOLVER_VERSION}+index/v2"
 
 _GO_MODULE_FILES = frozenset({"go.mod", "go.work"})
 
@@ -259,12 +262,12 @@ class IndexImportResolver:
         """`from package import name`: a symbol of `__init__.py`, else the submodule."""
         submodule = python_submodule_files(package_init, name, self._tree)
         symbol = [IndexedEdge(path, EdgeKind.USES_IMPORTED, package_init, name)]
-        if len(submodule) != 1:
-            return symbol if _uses(reads, alias) else []
         init = await self._facts.facts_for(package_init)
-        if isinstance(init, FileUnavailable):
+        if isinstance(init, FileUnavailable) or init.has_errors:
             # A symbol cannot be told from the submodule: neither is guessed.
             return []
+        if len(submodule) != 1:
+            return symbol if _uses(reads, alias) else []
         if exported_symbols(init, name):
             return symbol if _uses(reads, alias) else []
         module = submodule[0]
@@ -304,6 +307,8 @@ class IndexImportResolver:
                     ImportResolution.EXCLUDED if excluded_content else ImportResolution.UNSUPPORTED
                 )
                 return _GoPackage(resolution, facts.reason, directory, None)
+            if facts.has_errors:
+                return _GoPackage(ImportResolution.UNSUPPORTED, "ast_failed", directory, None)
             loaded.append(facts)
         if any(facts.build_constrained for facts in loaded):
             return _GoPackage(ImportResolution.UNSUPPORTED, "build_constrained", directory, None)

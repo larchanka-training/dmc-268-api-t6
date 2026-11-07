@@ -76,6 +76,34 @@ def test_python_names_follow_the_enclosing_chain() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("path", "source"),
+    [
+        pytest.param(
+            "pkg/models.py",
+            "class User:\n    pass\n\ndef broken(:\n    pass\n",
+            id="py",
+        ),
+        pytest.param("pkg/models.py", "class User(:\n    pass\n", id="py-overlap"),
+        *(
+            pytest.param(
+                f"src/models{extension}",
+                "export class User {}\nexport function broken( { }\n",
+                id=extension[1:],
+            )
+            for extension in (".ts", ".tsx", ".js", ".jsx")
+        ),
+        pytest.param("src/models.ts", "export class User { x = ; }\n", id="ts-overlap"),
+    ],
+)
+def test_broken_script_target_has_no_indexed_symbols(path: str, source: str) -> None:
+    facts = _facts(path, source)
+    assert facts.has_errors
+    assert any(symbol.name == "User" for symbol in facts.symbols)
+
+    assert symbol_rows(path, facts) == ()
+
+
 def test_duplicate_declarations_get_disambiguators_in_source_order() -> None:
     source = "def f():\n    return 1\n\nclass f:\n    pass\n\ndef f():\n    return 2\n"
 
