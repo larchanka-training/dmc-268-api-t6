@@ -508,6 +508,9 @@ paths:
       operationId: listBitbucketConnections
       tags: [bitbucket]
       summary: List active Bitbucket repository bindings in one portal workspace
+      description: >-
+        Returns all active bindings for this workspace. The response's `nextCursor` is always
+        null; internal binding scans use bounded pages without exposing a public cursor.
       x-service: portal-api
       responses:
         "200":
@@ -565,6 +568,11 @@ paths:
       operationId: rotateBitbucketCredential
       tags: [bitbucket]
       summary: Replace a shared API token after checking every active repository
+      description: >-
+        Provider validation has a 30-second overall deadline and checks at most four
+        repositories concurrently. A repository-specific 409, 422, 429 or 502 response
+        includes `X-Bitbucket-Repository-UUID` with the failing repository UUID;
+        the JSON `detail` remains a safe error code. No credential or provider URL is returned.
       x-service: portal-api
       requestBody:
         required: true
@@ -580,10 +588,48 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { $ref: "#/components/responses/BitbucketConflict" }
-        "422": { $ref: "#/components/responses/BitbucketValidationFailed" }
-        "429": { $ref: "#/components/responses/BitbucketRateLimited" }
-        "502": { $ref: "#/components/responses/BitbucketProviderFailure" }
+        "409":
+          description: Repository or credential state conflicts with the requested operation.
+          headers:
+            X-Bitbucket-Repository-UUID:
+              description: Failing repository UUID, when the conflict is repository-specific.
+              schema: { type: string, format: uuid }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "422":
+          description: Request validation failure or a provider scope/access refusal.
+          headers:
+            X-Bitbucket-Repository-UUID:
+              description: Failing repository UUID, when validation reached a repository.
+              schema: { type: string, format: uuid }
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/BitbucketHTTPValidationError"
+                  - $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Bitbucket rate limit. Retry-After is present when supplied by the provider.
+          headers:
+            Retry-After:
+              description: Delay in whole seconds before retrying, when available.
+              schema: { type: string }
+            X-Bitbucket-Repository-UUID:
+              description: Failing repository UUID, when the rate limit reached a repository.
+              schema: { type: string, format: uuid }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "502":
+          description: Bitbucket provider failure.
+          headers:
+            X-Bitbucket-Repository-UUID:
+              description: Failing repository UUID, when the failure reached a repository.
+              schema: { type: string, format: uuid }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
         "503": { $ref: "#/components/responses/BitbucketUnavailable" }
   /api/workspaces/{workspace_id}/bitbucket/connections/{installation_id}/repositories/{repository_id}:
     parameters:

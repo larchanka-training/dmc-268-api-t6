@@ -15,42 +15,18 @@ import pytest
 from tests.deploy_host_fakes import (
     CI_SECRETS,
     IMAGE_A,
-    REPO_ROOT,
     STAGING_COMPOSE,
     WORKFLOW,
-    _bundle,
     _keyring,
     _mode,
     _read_env_file,
     _run_bundle_step,
     _run_ci_gitlab_pipeline,
     _workflow_step,
+    _write_application_bundle,
 )
 
 # --- GitLab configuration recipients (#335) ---------------------------------------------------
-
-
-def _write_application_bundle(directory: Path, values: Mapping[str, str]) -> None:
-    result = subprocess.run(
-        [
-            "bash",
-            "-eo",
-            "pipefail",
-            "-c",
-            'source "$ENV_HELPER"; write_app_env_files "$APP_DIR" "$APP_SECRETS_B64"',
-        ],
-        env={
-            "PATH": os.environ["PATH"],
-            "ENV_HELPER": str(REPO_ROOT / "deploy" / "scripts" / "env-file.sh"),
-            "APP_DIR": str(directory),
-            "APP_SECRETS_B64": _bundle(values),
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
 
 
 @pytest.mark.parametrize("private_origins", [None, "", "[]"])

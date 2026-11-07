@@ -182,12 +182,17 @@ def test_repository_ownership_tuple_is_a_referenceable_project_key(
             )
 
 
-def _legacy_rows(connection: Connection) -> dict[str, list[tuple[object, ...]]]:
+def _legacy_rows(
+    connection: Connection, columns: dict[str, tuple[str, ...]]
+) -> dict[str, list[tuple[object, ...]]]:
     return {
         table: [
-            tuple(row) for row in connection.execute(text(f"SELECT * FROM {table} ORDER BY id"))
+            tuple(row)
+            for row in connection.execute(
+                text(f"SELECT {', '.join(columns[table])} FROM {table} ORDER BY id")
+            )
         ]
-        for table in ("workspaces", "provider_installations", "repositories")
+        for table in columns
     }
 
 
@@ -199,7 +204,11 @@ def test_ownership_key_migration_preserves_legacy_rows_keys_and_metadata(
     config = _config(connection)
     command.upgrade(config, "20261017_0034")
     _seed(connection)
-    legacy = _legacy_rows(connection)
+    legacy_columns = {
+        table: tuple(column["name"] for column in inspect(connection).get_columns(table))
+        for table in ("workspaces", "provider_installations", "repositories")
+    }
+    legacy = _legacy_rows(connection, legacy_columns)
     connection.commit()
 
     for _ in range(2):
@@ -225,7 +234,7 @@ def test_ownership_key_migration_preserves_legacy_rows_keys_and_metadata(
         ]
         assert ["provider", "external_id"] in installation_keys.values()
         assert ["provider_installation_id", "external_id"] in repository_keys.values()
-        assert _legacy_rows(connection) == legacy
+        assert _legacy_rows(connection, legacy_columns) == legacy
         # Natural IDs remain unique independently of the newly referenceable UUID tuples.
         with pytest.raises(IntegrityError), connection.begin_nested():
             connection.execute(
@@ -252,11 +261,11 @@ def test_ownership_key_migration_preserves_legacy_rows_keys_and_metadata(
         assert "uq_repositories_owner" not in {
             key["name"] for key in inspect(connection).get_unique_constraints("repositories")
         }
-        assert _legacy_rows(connection) == legacy
+        assert _legacy_rows(connection, legacy_columns) == legacy
         connection.commit()
 
     command.upgrade(config, "head")
-    assert _legacy_rows(connection) == legacy
+    assert _legacy_rows(connection, legacy_columns) == legacy
     context = MigrationContext.configure(
         connection, opts={"compare_type": True, "compare_server_default": True}
     )

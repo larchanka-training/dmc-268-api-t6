@@ -22,9 +22,9 @@ from app.modules.reviews.application.publish_run_review import ObsoletePublicati
 from app.modules.reviews.infrastructure.bitbucket_publication_claims import (
     SqlAlchemyBitbucketPublicationClaimUnitOfWork,
 )
-from tests.test_bitbucket_connections_postgres import _config
+from tests.bitbucket_connection_postgres_support import _config
 
-pytest_plugins = ("tests.test_bitbucket_connections_postgres",)
+pytest_plugins = ("tests.bitbucket_connection_postgres_support",)
 
 
 class FakeClaimUnitOfWork:

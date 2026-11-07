@@ -7,9 +7,13 @@ import re
 from typing import Protocol
 from uuid import UUID
 
+from app.modules.integrations.bitbucket.application.provider_error import BitbucketProviderError
 from app.modules.integrations.bitbucket.infrastructure.commit_hash import (
     pr_commit_hash,
     resolved_commit_hash,
+)
+from app.modules.integrations.bitbucket.infrastructure.provider_validation import (
+    parse_bitbucket_uuid,
 )
 from app.modules.reviews.application.diff_map import is_supported_path
 from app.modules.reviews.application.publish_run_review import (
@@ -41,11 +45,9 @@ class BitbucketCommentPort(Protocol):
 
 
 def _uuid(value: object) -> UUID:
-    if not isinstance(value, str):
-        raise PublishError("retryable", "Bitbucket PR identity is malformed")
     try:
-        return UUID(value.strip("{}"))
-    except ValueError:
+        return parse_bitbucket_uuid(value)
+    except BitbucketProviderError:
         raise PublishError("retryable", "Bitbucket PR identity is malformed") from None
 
 

@@ -10,13 +10,18 @@ from typing import Protocol
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.integrations.bitbucket.application.provider_error import (
+    BitbucketPullRequestFetchError,
+    BitbucketPullRequestResponseError,
+)
 from app.modules.integrations.bitbucket.application.request_credentials import (
     BoundBitbucketTarget,
 )
 from app.modules.reviews.application.determine_ci_eligibility import WebhookRunIdentity
-from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult
+from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult, EnqueueStatus
 
 _LOGGER = logging.getLogger(__name__)
+BITBUCKET_PUSH_BATCH_SIZE = 5
 
 
 class BitbucketPullRequestIdentityMismatch(ValueError):
@@ -32,6 +37,18 @@ class BitbucketPullRequestStale(ValueError):
 class BitbucketPullRequestUntrackedClosed(ValueError):
     def __init__(self) -> None:
         super().__init__("bitbucket_pull_request_untracked_closed")
+
+
+class BitbucketPushContinuationPending(Exception):
+    """A completed push page was checkpointed and another worker pass is needed."""
+
+
+class BitbucketPushRetryPending(Exception):
+    """All candidates were visited, but a run admission still needs a later retry."""
+
+
+class BitbucketPushCandidatesFailed(Exception):
+    """A PR exhausted bounded retries; mark the receipt failed with its candidate reason."""
 
 
 @dataclass(frozen=True)
@@ -113,6 +130,17 @@ class BitbucketProjectionStore(Protocol):
 
 
 class BitbucketPushCandidateReader(Protocol):
+    async def matching_open_pr_page(
+        self,
+        installation_id: UUID,
+        repository_id: UUID,
+        repository_uuid: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+        branches: frozenset[str],
+        after_number: int | None,
+    ) -> tuple[int, ...]: ...
+
     async def matching_open_pr_numbers(
         self,
         installation_id: UUID,
@@ -141,6 +169,64 @@ class BitbucketProjectionUnitOfWork(UnitOfWork, Protocol):
 
     @property
     def pull_requests(self) -> BitbucketProjectionStore: ...
+
+    @property
+    def push_continuation(self) -> BitbucketPushContinuationStore: ...
+
+
+class BitbucketPushContinuationStore(Protocol):
+    async def position(
+        self,
+        delivery_id: str,
+        repository_id: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+    ) -> int | None: ...
+
+    async def advance(
+        self,
+        delivery_id: str,
+        repository_id: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+        expected: int | None,
+        next_number: int,
+        deferred_numbers: tuple[tuple[int, str], ...],
+    ) -> None: ...
+
+    async def pending_numbers(
+        self,
+        delivery_id: str,
+        repository_id: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+    ) -> tuple[int, ...]: ...
+
+    async def has_pending(
+        self,
+        delivery_id: str,
+        repository_id: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+    ) -> bool: ...
+
+    async def has_failed(
+        self,
+        delivery_id: str,
+        repository_id: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+    ) -> bool: ...
+
+    async def settle_pending(
+        self,
+        delivery_id: str,
+        repository_id: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+        completed: tuple[int, ...],
+        deferred: tuple[tuple[int, str], ...],
+    ) -> tuple[bool, bool, bool]: ...
 
 
 class BitbucketRunEnqueuer(Protocol):
@@ -238,8 +324,15 @@ class ProjectBitbucketPullRequest:
         branches: frozenset[str],
         binding_generation: int,
         webhook_generation: int,
+        delivery_id: str | None = None,
     ) -> tuple[EnqueueResult, ...]:
-        if self._index_refresh is not None:
+        after_number: int | None = None
+        if delivery_id is not None:
+            async with self._uow_factory() as uow:
+                after_number = await uow.push_continuation.position(
+                    delivery_id, repository_id, binding_generation, webhook_generation
+                )
+        if self._index_refresh is not None and after_number is None:
             try:
                 await self._index_refresh.execute(
                     installation_id,
@@ -254,24 +347,175 @@ class ProjectBitbucketPullRequest:
                     "Bitbucket index refresh failed for repository %s; continuing PR reevaluation",
                     repository_id,
                 )
-        numbers = await self._push_candidates.matching_open_pr_numbers(
+        if delivery_id is None:
+            numbers = await self._push_candidates.matching_open_pr_numbers(
+                installation_id,
+                repository_id,
+                repository_uuid,
+                binding_generation,
+                webhook_generation,
+                branches,
+            )
+            legacy_outcomes: list[EnqueueResult] = []
+            for number in numbers:
+                outcome = await self.pull_request(
+                    installation_id,
+                    repository_id,
+                    repository_uuid,
+                    number,
+                    binding_generation,
+                    webhook_generation,
+                )
+                if outcome is not None:
+                    legacy_outcomes.append(outcome)
+            return tuple(legacy_outcomes)
+
+        numbers = await self._push_candidates.matching_open_pr_page(
             installation_id,
             repository_id,
             repository_uuid,
             binding_generation,
             webhook_generation,
             branches,
+            after_number,
         )
-        outcomes: list[EnqueueResult] = []
+        if not numbers:
+            async with self._uow_factory() as uow:
+                pending = await uow.push_continuation.pending_numbers(
+                    delivery_id, repository_id, binding_generation, webhook_generation
+                )
+            if not pending:
+                async with self._uow_factory() as uow:
+                    waiting = await uow.push_continuation.has_pending(
+                        delivery_id, repository_id, binding_generation, webhook_generation
+                    )
+                    failed = await uow.push_continuation.has_failed(
+                        delivery_id, repository_id, binding_generation, webhook_generation
+                    )
+                if waiting:
+                    raise BitbucketPushRetryPending()
+                if failed:
+                    raise BitbucketPushCandidatesFailed()
+                return ()
+            completed: list[int] = []
+            deferred: list[tuple[int, str]] = []
+            retry_outcomes: list[EnqueueResult] = []
+            for number in pending:
+                try:
+                    outcome = await self.pull_request(
+                        installation_id,
+                        repository_id,
+                        repository_uuid,
+                        number,
+                        binding_generation,
+                        webhook_generation,
+                    )
+                except BitbucketPullRequestStale:
+                    deferred.append((number, "canonical_stale"))
+                    continue
+                except (BitbucketPullRequestResponseError, BitbucketPullRequestFetchError) as error:
+                    deferred.append((number, error.code))
+                    continue
+                if outcome is not None:
+                    retry_outcomes.append(outcome)
+                if outcome is not None and outcome.status == EnqueueStatus.DEFERRED:
+                    deferred.append((number, "run_admission_deferred"))
+                elif outcome is not None and outcome.status == EnqueueStatus.STALE:
+                    deferred.append((number, "run_admission_stale"))
+                else:
+                    completed.append(number)
+            target = await self._authority.resolve(
+                BitbucketPullRequestCommand(
+                    installation_id,
+                    repository_id,
+                    repository_uuid,
+                    pending[-1],
+                    binding_generation,
+                    webhook_generation,
+                )
+            )
+            async with self._uow_factory() as uow:
+                await uow.lock_target(target, webhook_generation)
+                remaining, due, failed = await uow.push_continuation.settle_pending(
+                    delivery_id,
+                    repository_id,
+                    binding_generation,
+                    webhook_generation,
+                    tuple(completed),
+                    tuple(deferred),
+                )
+                await uow.commit()
+            if remaining:
+                if due:
+                    raise BitbucketPushContinuationPending()
+                raise BitbucketPushRetryPending()
+            if failed:
+                raise BitbucketPushCandidatesFailed()
+            return tuple(retry_outcomes)
+        page_outcomes: list[EnqueueResult] = []
+        deferred_numbers: list[tuple[int, str]] = []
         for number in numbers:
-            outcome = await self.pull_request(
+            try:
+                outcome = await self.pull_request(
+                    installation_id,
+                    repository_id,
+                    repository_uuid,
+                    number,
+                    binding_generation,
+                    webhook_generation,
+                )
+            except BitbucketPullRequestStale:
+                deferred_numbers.append((number, "canonical_stale"))
+                continue
+            except (BitbucketPullRequestResponseError, BitbucketPullRequestFetchError) as error:
+                deferred_numbers.append((number, error.code))
+                continue
+            if outcome is not None:
+                page_outcomes.append(outcome)
+                if outcome.status == EnqueueStatus.DEFERRED:
+                    deferred_numbers.append((number, "run_admission_deferred"))
+                elif outcome.status == EnqueueStatus.STALE:
+                    deferred_numbers.append((number, "run_admission_stale"))
+        # Remote reads and run admissions have ended. Persist only a completed
+        # page; replay of a partial page uses PR/head run uniqueness.
+        target = await self._authority.resolve(
+            BitbucketPullRequestCommand(
                 installation_id,
                 repository_id,
                 repository_uuid,
-                number,
+                numbers[-1],
                 binding_generation,
                 webhook_generation,
             )
-            if outcome is not None:
-                outcomes.append(outcome)
-        return tuple(outcomes)
+        )
+        async with self._uow_factory() as uow:
+            await uow.lock_target(target, webhook_generation)
+            await uow.push_continuation.advance(
+                delivery_id,
+                repository_id,
+                binding_generation,
+                webhook_generation,
+                after_number,
+                numbers[-1],
+                tuple(deferred_numbers),
+            )
+            await uow.commit()
+        if len(numbers) == BITBUCKET_PUSH_BATCH_SIZE:
+            raise BitbucketPushContinuationPending()
+        async with self._uow_factory() as uow:
+            pending = await uow.push_continuation.pending_numbers(
+                delivery_id, repository_id, binding_generation, webhook_generation
+            )
+            waiting = await uow.push_continuation.has_pending(
+                delivery_id, repository_id, binding_generation, webhook_generation
+            )
+            failed = await uow.push_continuation.has_failed(
+                delivery_id, repository_id, binding_generation, webhook_generation
+            )
+        if pending:
+            raise BitbucketPushContinuationPending()
+        if waiting:
+            raise BitbucketPushRetryPending()
+        if failed:
+            raise BitbucketPushCandidatesFailed()
+        return tuple(page_outcomes)

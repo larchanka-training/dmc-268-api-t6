@@ -64,6 +64,7 @@ from app.modules.reviews.infrastructure.bitbucket_ci import (
     BitbucketBuildStatusPublisher,
     BitbucketStatusReconciler,
     SqlAlchemyBitbucketStatusSource,
+    SqlAlchemyRunProvider,
 )
 from app.modules.reviews.infrastructure.bitbucket_policy_source import BitbucketPolicyDocumentSource
 from app.modules.reviews.infrastructure.bitbucket_publication_resources import (
@@ -187,6 +188,7 @@ class BitbucketReviewWorkerResources:
             self._credentials,
             transport_factory=transport_factory,
             ledger=status_ledger,
+            run_provider=SqlAlchemyRunProvider(session_factory),
         )
         self.status_reconciler = BitbucketStatusReconciler(status_ledger, self.statuses)
 

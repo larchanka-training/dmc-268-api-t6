@@ -92,11 +92,11 @@ from app.worker import (
     execution_profile_of,
     process_review_run,
 )
-from tests.test_bitbucket_connections_postgres import _config
+from tests.bitbucket_connection_postgres_support import _config
 from tests.test_llm_gateway import PRIMARY, completion
 from tests.test_prompt_builder import _metadata_context
 
-pytest_plugins = ("tests.test_bitbucket_connections_postgres",)
+pytest_plugins = ("tests.bitbucket_connection_postgres_support",)
 
 _HEAD = "a" * 40
 # The changed export was renamed, while user.py still imports its old name.

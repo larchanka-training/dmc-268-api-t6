@@ -9,6 +9,10 @@ from uuid import UUID
 import httpx
 import pytest
 
+from app.modules.integrations.bitbucket.application.provider_error import (
+    BitbucketPullRequestFetchError,
+    BitbucketPullRequestResponseError,
+)
 from app.modules.integrations.bitbucket.application.request_credentials import (
     BitbucketRequestCredential,
     BoundBitbucketTarget,
@@ -39,6 +43,171 @@ class Credentials:
         assert target == TARGET
         self.calls += 1
         return BitbucketRequestCredential(target, "test-token")
+
+
+@pytest.mark.parametrize(
+    ("malformed_stage", "pr_local"),
+    [("repository", False), ("pull_request", True)],
+)
+def test_malformed_shared_repository_response_is_not_a_pr_local_error(
+    malformed_stage: str, pr_local: bool
+) -> None:
+    async def scenario() -> None:
+        paths: list[str] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            if "/pullrequests/" in request.url.path:
+                return httpx.Response(200, json={"id": 17})
+            if malformed_stage == "repository":
+                return httpx.Response(200, json={"uuid": "invalid"})
+            return httpx.Response(
+                200,
+                json={
+                    "uuid": "{" + str(TARGET.repository_uuid) + "}",
+                    "workspace": {
+                        "uuid": "{" + str(TARGET.bitbucket_workspace_uuid) + "}",
+                        "slug": "team",
+                    },
+                    "slug": "repo",
+                    "full_name": "team/repo",
+                    "name": "Repo",
+                    "is_private": True,
+                    "mainbranch": {"name": "main"},
+                    "links": {"html": {"href": "https://bitbucket.org/team/repo"}},
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            with pytest.raises(BitbucketProviderError) as error:
+                await BitbucketCurrentPullRequestProvider(client, Credentials()).get_current(
+                    TARGET, 17
+                )
+        assert isinstance(error.value, BitbucketPullRequestResponseError) is pr_local
+        assert len(paths) == (2 if pr_local else 1)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "status", "expected_local", "expected_code"),
+    [
+        ("repository", 503, False, "provider_unavailable"),
+        ("repository", None, False, "provider_unavailable"),
+        ("pull_request", 404, True, "pull_request_missing"),
+        ("pull_request", 503, True, "pull_request_unavailable"),
+        ("pull_request", None, True, "pull_request_unavailable"),
+        ("base_commit", 404, True, "pull_request_missing"),
+        ("base_commit", 503, True, "pull_request_unavailable"),
+        ("base_commit", None, True, "pull_request_unavailable"),
+        ("pull_request", 429, False, "provider_rate_limited"),
+        ("pull_request", 403, False, "repository_inaccessible"),
+        ("base_commit", 429, False, "provider_rate_limited"),
+        ("base_commit", 403, False, "repository_inaccessible"),
+    ],
+)
+def test_pr_read_failure_is_scoped_after_repository_lookup(
+    failure_stage: str, status: int | None, expected_local: bool, expected_code: str
+) -> None:
+    async def scenario() -> None:
+        paths: list[str] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            paths.append(path)
+            stage = (
+                "pull_request"
+                if path.endswith("/pullrequests/17")
+                else "base_commit"
+                if path.endswith("/commit/bbbbbbbbbbbb")
+                else "repository"
+            )
+            if stage == failure_stage:
+                if status is None:
+                    raise httpx.ConnectError("unavailable", request=request)
+                return httpx.Response(status, headers={"Retry-After": "120"})
+            if stage == "repository":
+                return httpx.Response(
+                    200,
+                    json={
+                        "uuid": "{" + str(TARGET.repository_uuid) + "}",
+                        "workspace": {
+                            "uuid": "{" + str(TARGET.bitbucket_workspace_uuid) + "}",
+                            "slug": "team",
+                        },
+                        "slug": "repo",
+                        "full_name": "team/repo",
+                        "name": "Repo",
+                        "is_private": True,
+                        "mainbranch": {"name": "main"},
+                        "links": {"html": {"href": "https://bitbucket.org/team/repo"}},
+                    },
+                )
+            if stage == "pull_request":
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": 17,
+                        "state": "OPEN",
+                        "title": "Fix",
+                        "updated_on": "2026-10-26T10:00:00+00:00",
+                        "source": {
+                            "branch": {"name": "feature"},
+                            "commit": {"hash": "a" * 40},
+                        },
+                        "destination": {
+                            "branch": {"name": "main"},
+                            "commit": {"hash": "b" * 12},
+                            "repository": {"uuid": "{" + str(TARGET.repository_uuid) + "}"},
+                        },
+                    },
+                )
+            return httpx.Response(200, json={"hash": "b" * 40})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            with pytest.raises(BitbucketProviderError) as error:
+                await BitbucketCurrentPullRequestProvider(client, Credentials()).get_current(
+                    TARGET, 17
+                )
+        assert error.value.code == expected_code
+        assert isinstance(error.value, BitbucketPullRequestFetchError) is expected_local
+        assert len(paths) == {"repository": 1, "pull_request": 2, "base_commit": 3}[failure_stage]
+        if status == 429:
+            assert error.value.retry_after == 120
+
+    asyncio.run(scenario())
+
+
+def test_oversized_pr_response_is_classified_as_pr_local_invalid_response() -> None:
+    async def scenario() -> None:
+        def respond(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/pullrequests/17"):
+                return httpx.Response(200, content=b"x" * (2 * 1024 * 1024 + 1))
+            return httpx.Response(
+                200,
+                json={
+                    "uuid": "{" + str(TARGET.repository_uuid) + "}",
+                    "workspace": {
+                        "uuid": "{" + str(TARGET.bitbucket_workspace_uuid) + "}",
+                        "slug": "team",
+                    },
+                    "slug": "repo",
+                    "full_name": "team/repo",
+                    "name": "Repo",
+                    "is_private": True,
+                    "mainbranch": {"name": "main"},
+                    "links": {"html": {"href": "https://bitbucket.org/team/repo"}},
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            with pytest.raises(BitbucketPullRequestResponseError) as error:
+                await BitbucketCurrentPullRequestProvider(client, Credentials()).get_current(
+                    TARGET, 17
+                )
+        assert error.value.code == "invalid_provider_response"
+
+    asyncio.run(scenario())
 
 
 def test_reads_current_pr_after_uuid_lookup_and_rejects_redirects() -> None:

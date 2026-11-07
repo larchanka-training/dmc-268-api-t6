@@ -4,77 +4,341 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
-from uuid import UUID
 
 import httpx
 import pytest
 
 from app.modules.code_index.application.vcs import (
     Ancestry,
+    ArchiveEntry,
+    ChangedPath,
+    ChangeStatus,
+    Comparison,
     IndexLimitExceeded,
     VcsAccessDenied,
     VcsUnavailable,
 )
 from app.modules.code_index.domain.limits import IndexLimits
-from app.modules.code_index.infrastructure import bitbucket_snapshot_source
 from app.modules.code_index.infrastructure.bitbucket_snapshot_source import (
-    BitbucketRepositorySnapshotSource,
+    BitbucketSourceBudgets,
 )
 from app.modules.code_index.infrastructure.tar_archive import TarArchiveReader
 from app.modules.integrations.bitbucket.application.request_credentials import (
-    BitbucketRequestCredential,
     BoundBitbucketTarget,
 )
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import DocumentPresence
-
-_SHA = "a" * 40
-_REPO_UUID = UUID("11111111-1111-4111-8111-111111111111")
-_TARGET = BoundBitbucketTarget(
-    UUID("22222222-2222-4222-8222-222222222222"),
-    UUID("33333333-3333-4333-8333-333333333333"),
-    UUID("44444444-4444-4444-8444-444444444444"),
+from tests.bitbucket_snapshot_fakes import (
+    _PREFIX,
     _REPO_UUID,
-    2,
-    3,
+    _SHA,
+    _TARGET,
+    _Credentials,
+    _source,
 )
-_PREFIX = f"/2.0/repositories/%7B%7D/%7B{_REPO_UUID}%7D"
 
 
-class _Credentials:
-    def __init__(self) -> None:
-        self.active = True
-        self.checks = 0
+def test_published_manifest_rename_delete_and_untrusted_compare_fallback() -> None:
+    base = "b" * 40
+    previous = {f"f{i:03}.py": ArchiveEntry(f"f{i:03}.py", 1) for i in range(201)}
+    current = {name for name in previous if name not in {"f000.py", "f001.py"}}
+    current.add("renamed.py")
+    listing_requests = 0
+    metadata_requests = 0
+    raw_requests = 0
 
-    async def credential_for(self, target: BoundBitbucketTarget) -> BitbucketRequestCredential:
-        assert target == _TARGET
-        if not self.active:
-            raise ValueError("revoked")
-        return BitbucketRequestCredential(target, "private-test-token")
+    class Published:
+        async def load(
+            self, target: BoundBitbucketTarget, base_sha: str
+        ) -> Mapping[str, ArchiveEntry] | None:
+            assert target == _TARGET
+            return previous if base_sha == base else None
 
-    async def checkpoint(self, target: BoundBitbucketTarget) -> None:
-        assert target == _TARGET
-        self.checks += 1
-        if not self.active:
-            raise ValueError("revoked")
+        async def save(
+            self, target: BoundBitbucketTarget, commit_sha: str, entries: Mapping[str, ArchiveEntry]
+        ) -> bool:
+            raise AssertionError("the test does not publish")
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal listing_requests, metadata_requests, raw_requests
+        path = request.url.path
+        if request.url.params.get("format") == "meta":
+            metadata_requests += 1
+            assert path.endswith(f"/src/{_SHA}/renamed.py")
+            return httpx.Response(
+                200,
+                json={
+                    "path": "renamed.py",
+                    "commit": {"hash": _SHA},
+                    "type": "commit_file",
+                    "size": 1,
+                    "attributes": [],
+                },
+            )
+        if path.endswith(f"/src/{_SHA}/"):
+            listing_requests += 1
+            page = int(request.url.params.get("page", "1"))
+            names = sorted(current)[(page - 1) * 100 : page * 100]
+            payload: dict[str, object] = {
+                "size": 200,
+                "values": [
+                    {
+                        "path": name,
+                        "commit": {"hash": _SHA},
+                        "type": "commit_file",
+                        "size": 1,
+                    }
+                    for name in names
+                ],
+            }
+            if page == 1:
+                payload["next"] = f"https://api.bitbucket.org{_PREFIX}/src/{_SHA}/?page=2"
+            return httpx.Response(200, json=payload)
+        if path.endswith(f"/src/{_SHA}/renamed.py"):
+            raw_requests += 1
+            return httpx.Response(200, content=b"x")
+        raise AssertionError(path)
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            complete = Comparison(
+                Ancestry.AHEAD,
+                (
+                    ChangedPath("renamed.py", ChangeStatus.RENAMED, "f000.py"),
+                    ChangedPath("f001.py", ChangeStatus.REMOVED),
+                ),
+                True,
+            )
+            source = _source(_Credentials(), client, published_manifest=Published())
+            assert await source.prepare_incremental_manifest(base, _SHA, complete)
+            manifest = await source.manifest(_SHA)
+            assert len(manifest) == 200
+            assert "renamed.py" in manifest
+            assert "f000.py" not in manifest and "f001.py" not in manifest
+            await source.archive_paths(_SHA, {"renamed.py"}, max_bytes=100_000)
+            assert (source.listing_request_count, source.raw_read_count) == (0, 1)
+
+            fallback = _source(_Credentials(), client, published_manifest=Published())
+            assert not await fallback.prepare_incremental_manifest(
+                base, _SHA, Comparison(None, complete.files, False)
+            )
+            assert len(await fallback.manifest(_SHA)) == 200
+            assert fallback.listing_request_count == 2
+
+    asyncio.run(exercise())
+    assert (listing_requests, metadata_requests, raw_requests) == (2, 1, 1)
 
 
-def _source(
-    credentials: _Credentials,
-    client: httpx.AsyncClient,
-    limits: IndexLimits | None = None,
-) -> BitbucketRepositorySnapshotSource:
-    async def target() -> BoundBitbucketTarget:
-        return _TARGET
+def test_incremental_metadata_requests_are_bounded_by_changed_paths() -> None:
+    base = "b" * 40
+    seen: list[str] = []
 
-    return BitbucketRepositorySnapshotSource(
-        client=client,
-        target_for_repository=target,
-        credentials=credentials,
-        limits=limits,
-    )
+    class Published:
+        async def load(
+            self, target: BoundBitbucketTarget, base_sha: str
+        ) -> Mapping[str, ArchiveEntry] | None:
+            return {} if target == _TARGET and base_sha == base else None
+
+        async def save(
+            self, target: BoundBitbucketTarget, commit_sha: str, entries: Mapping[str, ArchiveEntry]
+        ) -> bool:
+            raise AssertionError("the test does not publish")
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.params.get("format") == "meta"
+        path = request.url.path.rsplit("/", 1)[-1]
+        seen.append(path)
+        return httpx.Response(
+            200,
+            json={
+                "path": path,
+                "commit": {"hash": _SHA},
+                "type": "commit_file",
+                "size": 1,
+                "attributes": [],
+            },
+        )
+
+    async def exercise() -> None:
+        comparison = Comparison(
+            Ancestry.AHEAD,
+            (
+                ChangedPath("a.py", ChangeStatus.ADDED),
+                ChangedPath("b.py", ChangeStatus.ADDED),
+            ),
+            True,
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            exact = _source(
+                _Credentials(),
+                client,
+                budgets=BitbucketSourceBudgets(metadata_requests=2),
+                published_manifest=Published(),
+            )
+            assert await exact.prepare_incremental_manifest(base, _SHA, comparison)
+            assert (
+                exact.listing_request_count,
+                exact.metadata_request_count,
+                exact.raw_read_count,
+            ) == (0, 2, 0)
+            exhausted = _source(
+                _Credentials(),
+                client,
+                budgets=BitbucketSourceBudgets(metadata_requests=1),
+                published_manifest=Published(),
+            )
+            with pytest.raises(IndexLimitExceeded) as error:
+                await exhausted.prepare_incremental_manifest(base, _SHA, comparison)
+            assert error.value.code == "limit_exceeded:provider_requests"
+            assert exhausted.metadata_request_count == 1
+
+    asyncio.run(exercise())
+    assert seen == ["a.py", "b.py", "a.py"]
+
+
+def test_more_than_160_entries_complete_with_separate_listing_and_raw_budgets() -> None:
+    listings = 0
+    raw_reads = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal listings, raw_reads
+        assert request.url.host == "api.bitbucket.org"
+        if request.url.path.endswith(f"/src/{_SHA}/"):
+            listings += 1
+            page = int(request.url.params.get("page", "1"))
+            start = (page - 1) * 100
+            return httpx.Response(
+                200,
+                json={
+                    "size": 161,
+                    "values": [
+                        {
+                            "path": f"f{i:03}.py",
+                            "type": "commit_file",
+                            "size": 1,
+                            "commit": {"hash": _SHA},
+                        }
+                        for i in range(start, min(start + 100, 161))
+                    ],
+                    **(
+                        {"next": f"https://api.bitbucket.org{_PREFIX}/src/{_SHA}/?page=2"}
+                        if page == 1
+                        else {}
+                    ),
+                },
+            )
+        raw_reads += 1
+        return httpx.Response(200, content=b"x")
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            source = _source(
+                _Credentials(),
+                client,
+                budgets=BitbucketSourceBudgets(
+                    listing_requests=2,
+                    raw_requests=161,
+                    entries=161,
+                    read_bytes=100_000,
+                    deadline_seconds=60,
+                ),
+            )
+            archive = await source.archive(_SHA, max_bytes=100_000)
+            scan = await TarArchiveReader(IndexLimits()).scan(
+                archive, documents=set(), deadline=time.monotonic() + 5
+            )
+            assert len(scan.entries) == 161
+            assert source.request_count == 163
+
+    asyncio.run(exercise())
+    assert (listings, raw_reads) == (2, 161)
+
+
+@pytest.mark.parametrize(
+    ("budget", "limit"),
+    [
+        ("listing_requests", "provider_requests"),
+        ("raw_requests", "provider_requests"),
+        ("entries", "archive_entries"),
+        ("read_bytes", "download_bytes"),
+    ],
+)
+def test_source_budget_exhaustion_fails_with_stable_code_without_archive(
+    budget: str, limit: str
+) -> None:
+    calls = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if request.url.path.endswith(f"/src/{_SHA}/"):
+            listing_limited = budget == "listing_requests"
+            return httpx.Response(
+                200,
+                json={
+                    "size": 2,
+                    "values": [
+                        {
+                            "path": f"f{i}.py",
+                            "type": "commit_file",
+                            "size": 1,
+                            "commit": {"hash": _SHA},
+                        }
+                        for i in range(1 if listing_limited else 2)
+                    ],
+                    **(
+                        {"next": f"https://api.bitbucket.org{_PREFIX}/src/{_SHA}/?page=2"}
+                        if listing_limited
+                        else {}
+                    ),
+                },
+            )
+        return httpx.Response(200, content=b"x")
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            values = {
+                "listing_requests": 2,
+                "raw_requests": 2,
+                "entries": 2,
+                "read_bytes": 100_000,
+                "deadline_seconds": 60,
+            }
+            values[budget] = 1
+            source = _source(_Credentials(), client, budgets=BitbucketSourceBudgets(**values))
+            with pytest.raises(IndexLimitExceeded) as error:
+                await source.archive(_SHA, max_bytes=100_000)
+            assert error.value.code == f"limit_exceeded:{limit}"
+
+    asyncio.run(exercise())
+    assert calls <= 2
+
+
+def test_source_deadline_exhaustion_is_retryable_after_a_slow_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    def handle(_: httpx.Request) -> httpx.Response:
+        clock[0] = 2.0
+        return httpx.Response(200, json={"values": []})
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            source = _source(
+                _Credentials(),
+                client,
+                budgets=BitbucketSourceBudgets(deadline_seconds=1),
+            )
+            with pytest.raises(VcsUnavailable) as error:
+                await source.manifest(_SHA)
+            assert error.value.retry_after == timedelta(minutes=1)
+
+    asyncio.run(exercise())
 
 
 def test_listing_limits_fail_before_any_raw_download() -> None:
@@ -257,12 +521,7 @@ def test_archive_preflights_total_size_before_raw_reads() -> None:
     assert raw_reads == 0
 
 
-def test_archive_preflights_remaining_request_count(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from app.modules.code_index.infrastructure import bitbucket_snapshot_source
-
-    monkeypatch.setattr(bitbucket_snapshot_source, "_MAX_REQUESTS", 2)
+def test_archive_preflights_remaining_raw_read_budget() -> None:
     raw_reads = 0
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -288,9 +547,10 @@ def test_archive_preflights_remaining_request_count(
 
     async def exercise() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-            source = _source(_Credentials(), client)
-            with pytest.raises(IndexLimitExceeded, match="provider_requests"):
+            source = _source(_Credentials(), client, budgets=BitbucketSourceBudgets(raw_requests=1))
+            with pytest.raises(IndexLimitExceeded) as error:
                 await source.archive(_SHA, max_bytes=100_000)
+            assert error.value.code == "limit_exceeded:provider_requests"
 
     asyncio.run(exercise())
     assert raw_reads == 0
@@ -305,7 +565,7 @@ def test_changed_head_large_repository_stops_before_raw_downloads() -> None:
         paths.append(request.url.path)
         if request.url.path.endswith(f"/merge-base/{base}..{_SHA}"):
             return httpx.Response(200, json={"hash": base})
-        if request.url.path.endswith(f"/diffstat/{base}..{_SHA}"):
+        if request.url.path.endswith(f"/diffstat/{_SHA}..{base}"):
             return httpx.Response(
                 200,
                 json={
@@ -340,7 +600,7 @@ def test_changed_head_large_repository_stops_before_raw_downloads() -> None:
 
     async def exercise() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-            source = _source(_Credentials(), client)
+            source = _source(_Credentials(), client, IndexLimits(archive_entries=160))
             comparison = await source.compare(base, _SHA)
             assert comparison is not None and comparison.complete
             with pytest.raises(IndexLimitExceeded, match="archive_entries"):
@@ -363,7 +623,7 @@ def test_rules_lookup_preserves_repository_size_limit() -> None:
 
     async def exercise() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-            source = _source(_Credentials(), client)
+            source = _source(_Credentials(), client, IndexLimits(archive_entries=160))
             with pytest.raises(IndexLimitExceeded, match="archive_entries"):
                 await source.rules_document(_SHA)
             assert source.request_count == 1
@@ -382,7 +642,7 @@ def test_changed_head_supported_repository_has_measurable_full_snapshot_budget()
         paths.append(path)
         if path.endswith(f"/merge-base/{base}..{_SHA}"):
             return httpx.Response(200, json={"hash": base})
-        if path.endswith(f"/diffstat/{base}..{_SHA}"):
+        if path.endswith(f"/diffstat/{_SHA}..{base}"):
             return httpx.Response(
                 200,
                 json={
@@ -468,6 +728,7 @@ def test_sparse_snapshot_reads_only_selected_blob_from_100_file_tree() -> None:
             )
             assert set(scan.entries) == {"f000.py"}
             assert source.request_count == 2
+            assert (source.listing_request_count, source.raw_read_count) == (1, 1)
 
     asyncio.run(exercise())
     assert len(raw_paths) == 1
@@ -591,7 +852,7 @@ def test_compare_requires_merge_base_proof_before_incremental_files() -> None:
         seen.append(request.url.path)
         if request.url.path.endswith(f"/merge-base/{base}..{_SHA}"):
             return httpx.Response(200, json={"hash": base})
-        if request.url.path.endswith(f"/diffstat/{base}..{_SHA}"):
+        if request.url.path.endswith(f"/diffstat/{_SHA}..{base}"):
             return httpx.Response(
                 200,
                 json={
@@ -616,6 +877,31 @@ def test_compare_requires_merge_base_proof_before_incremental_files() -> None:
     assert len(seen) == 2
 
 
+def test_diffstat_without_declared_size_cannot_authorize_incremental_manifest() -> None:
+    base = "b" * 40
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(f"/merge-base/{base}..{_SHA}"):
+            return httpx.Response(200, json={"hash": base})
+        assert request.url.path.endswith(f"/diffstat/{_SHA}..{base}")
+        return httpx.Response(
+            200,
+            json={
+                "values": [{"status": "modified", "old": {"path": "a.py"}, "new": {"path": "a.py"}}]
+            },
+        )
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            source = _source(_Credentials(), client)
+            comparison = await source.compare(base, _SHA)
+            assert comparison is not None
+            assert comparison.ancestry is Ancestry.AHEAD
+            assert not comparison.complete
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize("unsafe_path", ["bad\\name.py", "bad\x01name.py", "x" * 1025])
 @pytest.mark.parametrize("status", ["added", "removed", "renamed"])
 def test_unsafe_diffstat_path_uses_full_snapshot(unsafe_path: str, status: str) -> None:
@@ -624,7 +910,7 @@ def test_unsafe_diffstat_path_uses_full_snapshot(unsafe_path: str, status: str) 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith(f"/merge-base/{base}..{_SHA}"):
             return httpx.Response(200, json={"hash": base})
-        if request.url.path.endswith(f"/diffstat/{base}..{_SHA}"):
+        if request.url.path.endswith(f"/diffstat/{_SHA}..{base}"):
             return httpx.Response(
                 200,
                 json={
@@ -658,7 +944,7 @@ def test_unsafe_diffstat_path_can_fall_back_to_skip_safe_full_walk() -> None:
         path = request.url.path
         if path.endswith(f"/merge-base/{base}..{_SHA}"):
             return httpx.Response(200, json={"hash": base})
-        if path.endswith(f"/diffstat/{base}..{_SHA}"):
+        if path.endswith(f"/diffstat/{_SHA}..{base}"):
             return httpx.Response(
                 200,
                 json={"size": 1, "values": [{"status": "added", "new": {"path": "bad\\x"}}]},
@@ -965,19 +1251,58 @@ def test_oversized_source_listing_is_unavailable_not_an_invalid_rules_file() -> 
     assert error.retryable is True
 
 
-def test_exhausted_total_source_budget_is_unavailable_not_invalid(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(bitbucket_snapshot_source, "_MAX_TOTAL_SOURCE_BYTES", 10)
-
-    async def exercise() -> PolicyError:
+def test_exhausted_total_source_budget_is_terminal_during_rules_listing() -> None:
+    async def exercise() -> IndexLimitExceeded:
         transport = httpx.MockTransport(lambda _: httpx.Response(200, json={"values": []}))
         async with httpx.AsyncClient(transport=transport) as client:
-            with pytest.raises(PolicyError) as caught:
-                await _source(_Credentials(), client).rules_document(_SHA)
+            with pytest.raises(IndexLimitExceeded) as caught:
+                await _source(
+                    _Credentials(), client, budgets=BitbucketSourceBudgets(read_bytes=10)
+                ).rules_document(_SHA)
         return caught.value
 
-    assert asyncio.run(exercise()).code is PolicyErrorCode.FETCH_TRANSIENT
+    assert asyncio.run(exercise()).limit == "download_bytes"
+
+
+def test_small_rules_file_over_aggregate_source_budget_is_terminal() -> None:
+    root = httpx.Response(
+        200,
+        json={
+            "values": [{"path": ".review", "type": "commit_directory", "commit": {"hash": _SHA}}]
+        },
+    )
+    review = httpx.Response(
+        200,
+        json={
+            "values": [
+                {
+                    "path": ".review/rules.md",
+                    "type": "commit_file",
+                    "size": 1,
+                    "commit": {"hash": _SHA},
+                }
+            ]
+        },
+    )
+    budget = len(root.content) + len(review.content)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(f"/src/{_SHA}/"):
+            return root
+        if request.url.path.endswith(f"/src/{_SHA}/.review/"):
+            return review
+        assert request.url.path.endswith(f"/src/{_SHA}/.review/rules.md")
+        return httpx.Response(200, content=b"#")
+
+    async def exercise() -> IndexLimitExceeded:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            with pytest.raises(IndexLimitExceeded) as caught:
+                await _source(
+                    _Credentials(), client, budgets=BitbucketSourceBudgets(read_bytes=budget)
+                ).rules_document(_SHA)
+        return caught.value
+
+    assert asyncio.run(exercise()).limit == "download_bytes"
 
 
 def test_complete_empty_rules_listing_proves_missing() -> None:
@@ -1145,3 +1470,31 @@ def test_rules_file_size_mismatch_is_unavailable(declared_size: int, body: bytes
         return caught.value
 
     assert asyncio.run(exercise()).code is PolicyErrorCode.FETCH_TRANSIENT
+
+
+def test_empty_ahead_diff_cannot_reuse_published_manifest() -> None:
+    base = "b" * 40
+
+    class Published:
+        async def load(
+            self, target: BoundBitbucketTarget, base_sha: str
+        ) -> Mapping[str, ArchiveEntry] | None:
+            assert target == _TARGET and base_sha == base
+            return {"a.py": ArchiveEntry("a.py", 1)}
+
+        async def save(
+            self,
+            target: BoundBitbucketTarget,
+            commit_sha: str,
+            entries: Mapping[str, ArchiveEntry],
+        ) -> bool:
+            raise AssertionError("An unproven manifest must not be published")
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient() as client:
+            source = _source(_Credentials(), client, published_manifest=Published())
+            assert not await source.prepare_incremental_manifest(
+                base, _SHA, Comparison(Ancestry.AHEAD, (), True)
+            )
+
+    asyncio.run(exercise())

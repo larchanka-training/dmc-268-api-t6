@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import bindparam, func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import WaitForCi
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.integrations.bitbucket.application.manage_connection import (
+    BindingPosition,
     BitbucketManagementError,
     EncryptedCredentialLike,
     InstallationSnapshot,
@@ -186,46 +188,169 @@ class SqlAlchemyBitbucketConnectionStore:
         await self._session.flush()
         return connection.credential_generation
 
-    async def list_bindings(self, *, workspace_id: UUID) -> tuple[RepositoryBinding, ...]:
-        rows = (
-            await self._session.execute(
-                select(
-                    ProviderInstallation.id,
-                    Repository.id,
-                    BitbucketRepositoryIdentity.repository_uuid,
-                    Repository.full_name,
-                    Repository.web_url,
-                    BitbucketConnection.credential_generation,
-                    BitbucketRepositoryWebhookSecret.binding_generation,
-                    BitbucketRepositoryWebhookSecret.confirmed_at,
-                )
-                .select_from(BitbucketRepositoryIdentity)
-                .join(Repository, Repository.id == BitbucketRepositoryIdentity.repository_id)
-                .join(
-                    BitbucketRepositoryWebhookSecret,
-                    BitbucketRepositoryWebhookSecret.repository_id == Repository.id,
-                )
-                .join(
-                    ProviderInstallation,
-                    ProviderInstallation.id == Repository.provider_installation_id,
-                )
-                .join(
-                    BitbucketConnection,
-                    BitbucketConnection.provider_installation_id == ProviderInstallation.id,
-                )
-                .where(
-                    BitbucketRepositoryIdentity.workspace_id == workspace_id,
-                    ProviderInstallation.workspace_id == workspace_id,
-                    ProviderInstallation.provider == "bitbucket",
-                    ProviderInstallation.deleted_at.is_(None),
-                    BitbucketConnection.workspace_id == workspace_id,
-                    BitbucketConnection.revoked_at.is_(None),
-                    Repository.installation_available.is_(True),
-                )
-                .order_by(Repository.full_name, Repository.id)
+    async def list_bindings_page(
+        self,
+        *,
+        workspace_id: UUID,
+        installation_id: UUID | None,
+        after: BindingPosition | None,
+        limit: int,
+    ) -> tuple[RepositoryBinding, ...]:
+        if not 1 <= limit <= 100 or (
+            after is not None
+            and (
+                after.workspace_id != workspace_id
+                or (installation_id is not None and after.installation_id != installation_id)
             )
-        ).all()
-        return tuple(RepositoryBinding(*row) for row in rows)
+        ):
+            raise ValueError("invalid_binding_position")
+        details = (
+            select(
+                ProviderInstallation.id,
+                Repository.id,
+                BitbucketRepositoryIdentity.repository_uuid,
+                Repository.full_name,
+                Repository.web_url,
+                BitbucketConnection.credential_generation,
+                BitbucketRepositoryWebhookSecret.binding_generation,
+                BitbucketRepositoryWebhookSecret.confirmed_at,
+            )
+            .select_from(BitbucketRepositoryIdentity)
+            .join(Repository, Repository.id == BitbucketRepositoryIdentity.repository_id)
+            .join(
+                BitbucketRepositoryWebhookSecret,
+                BitbucketRepositoryWebhookSecret.repository_id == Repository.id,
+            )
+            .join(
+                ProviderInstallation,
+                ProviderInstallation.id == Repository.provider_installation_id,
+            )
+            .join(
+                BitbucketConnection,
+                BitbucketConnection.provider_installation_id == ProviderInstallation.id,
+            )
+            .where(
+                BitbucketRepositoryIdentity.workspace_id == workspace_id,
+                ProviderInstallation.workspace_id == workspace_id,
+                ProviderInstallation.provider == "bitbucket",
+                ProviderInstallation.deleted_at.is_(None),
+                BitbucketConnection.workspace_id == workspace_id,
+                BitbucketConnection.revoked_at.is_(None),
+                Repository.installation_available.is_(True),
+                Repository.workspace_id == workspace_id,
+            )
+        )
+        if installation_id is not None:
+            details = details.where(
+                ProviderInstallation.id == installation_id,
+                BitbucketRepositoryIdentity.provider_installation_id == installation_id,
+            )
+        bindings: list[RepositoryBinding] = []
+        position = after
+        while len(bindings) <= limit:
+            page_limit = limit + 1 - len(bindings)
+            candidate = select(
+                Repository.id, Repository.full_name, Repository.provider_installation_id
+            ).where(
+                Repository.workspace_id == workspace_id,
+                Repository.installation_available.is_(True),
+            )
+            if installation_id is not None:
+                candidate = candidate.where(Repository.provider_installation_id == installation_id)
+            if position is not None:
+                candidate = candidate.where(
+                    tuple_(Repository.full_name, Repository.id)
+                    > tuple_(
+                        bindparam("binding_full_name", position.full_name),
+                        bindparam("binding_repository_id", position.repository_id),
+                    )
+                )
+            candidate = candidate.order_by(Repository.full_name, Repository.id).limit(page_limit)
+            candidates = (await self._session.execute(candidate)).all()
+            if not candidates:
+                break
+            rows = (
+                await self._session.execute(
+                    details.where(Repository.id.in_(row[0] for row in candidates))
+                )
+            ).all()
+            details_by_id = {row[1]: RepositoryBinding(*row) for row in rows}
+            bindings.extend(
+                replace(details_by_id[row[0]], position_full_name=row[1])
+                for row in candidates
+                if row[0] in details_by_id
+            )
+            if len(candidates) < page_limit:
+                break
+            last = candidates[-1]
+            position = BindingPosition(workspace_id, last[2], last[1], last[0])
+        return tuple(bindings[: limit + 1])
+
+    async def list_bindings(
+        self, *, workspace_id: UUID, installation_id: UUID | None = None
+    ) -> tuple[RepositoryBinding, ...]:
+        bindings: list[RepositoryBinding] = []
+        seen_ids: set[UUID] = set()
+        after: BindingPosition | None = None
+        while True:
+            page = await self.list_bindings_page(
+                workspace_id=workspace_id,
+                installation_id=installation_id,
+                after=after,
+                limit=100,
+            )
+            for binding in page[:100]:
+                if binding.repository_id not in seen_ids:
+                    bindings.append(binding)
+                    seen_ids.add(binding.repository_id)
+            if len(page) <= 100:
+                return tuple(bindings)
+            last = page[99]
+            after = BindingPosition(
+                workspace_id,
+                last.installation_id,
+                last.position_full_name if last.position_full_name is not None else last.full_name,
+                last.repository_id,
+            )
+
+    async def is_webhook_confirmed(
+        self, *, workspace_id: UUID, installation_id: UUID, repository_id: UUID
+    ) -> bool:
+        confirmed_id = await self._session.scalar(
+            select(BitbucketRepositoryWebhookSecret.repository_id)
+            .join(
+                Repository,
+                Repository.id == BitbucketRepositoryWebhookSecret.repository_id,
+            )
+            .join(
+                BitbucketRepositoryIdentity,
+                BitbucketRepositoryIdentity.repository_id == Repository.id,
+            )
+            .join(
+                ProviderInstallation,
+                ProviderInstallation.id == Repository.provider_installation_id,
+            )
+            .join(
+                BitbucketConnection,
+                BitbucketConnection.provider_installation_id == ProviderInstallation.id,
+            )
+            .where(
+                Repository.id == repository_id,
+                Repository.workspace_id == workspace_id,
+                Repository.provider_installation_id == installation_id,
+                Repository.installation_available.is_(True),
+                BitbucketRepositoryIdentity.workspace_id == workspace_id,
+                BitbucketRepositoryIdentity.provider_installation_id == installation_id,
+                BitbucketRepositoryWebhookSecret.confirmed_at.is_not(None),
+                ProviderInstallation.id == installation_id,
+                ProviderInstallation.workspace_id == workspace_id,
+                ProviderInstallation.provider == "bitbucket",
+                ProviderInstallation.deleted_at.is_(None),
+                BitbucketConnection.workspace_id == workspace_id,
+                BitbucketConnection.revoked_at.is_(None),
+            )
+        )
+        return confirmed_id is not None
 
     async def create_connection(
         self,
@@ -326,6 +451,7 @@ class SqlAlchemyBitbucketConnectionStore:
                     raise RuntimeError("bitbucket_repository_binding_missing")
                 binding.binding_generation += 1
             repository.installation_available = True
+            repository.workspace_id = workspace_id
             repository.full_name = full_name
             repository.default_branch = default_branch
             repository.web_url = web_url
@@ -341,6 +467,7 @@ class SqlAlchemyBitbucketConnectionStore:
             Repository(
                 id=repository_id,
                 provider_installation_id=installation_id,
+                workspace_id=workspace_id,
                 external_id=external_id,
                 full_name=full_name,
                 default_branch=default_branch,
@@ -482,6 +609,7 @@ class SqlAlchemyBitbucketConnectionStore:
         parent, connection = await self._active_connection(workspace_id, installation_id)
         if parent is None or connection is None:
             raise BitbucketManagementError("bitbucket_connection_inactive")
+        # A validated API token does not undo a previously confirmed signed webhook.
         connection.token_ciphertext = token.ciphertext
         connection.token_key_id = token.key_id
         connection.credential_generation += 1
@@ -516,46 +644,6 @@ class SqlAlchemyBitbucketConnectionStore:
         repository.default_branch = default_branch
         repository.web_url = web_url
         await self._session.flush()
-
-    async def revoke_connection(self, *, workspace_id: UUID, installation_id: UUID) -> bool:
-        parent, connection = await self._active_connection(workspace_id, installation_id)
-        if parent is None or connection is None:
-            return False
-        now = datetime.now(UTC)
-        parent.deleted_at = now
-        connection.revoked_at = now
-        connection.credential_generation += 1
-        connection.token_ciphertext = None
-        connection.token_key_id = None
-        connection.intake_enabled = False
-        repositories = await self._session.scalars(
-            select(Repository)
-            .where(Repository.provider_installation_id == installation_id)
-            .order_by(Repository.id)
-            .with_for_update()
-        )
-        for repository in repositories:
-            repository.installation_available = False
-        webhook_credentials = await self._session.scalars(
-            select(BitbucketRepositoryWebhookSecret)
-            .join(
-                BitbucketRepositoryIdentity,
-                BitbucketRepositoryIdentity.repository_id
-                == BitbucketRepositoryWebhookSecret.repository_id,
-            )
-            .where(BitbucketRepositoryIdentity.provider_installation_id == installation_id)
-            .order_by(BitbucketRepositoryWebhookSecret.repository_id)
-            .with_for_update()
-        )
-        for webhook in webhook_credentials:
-            webhook.secret_ciphertext = None
-            webhook.secret_key_id = None
-            webhook.confirmed_at = None
-            webhook.revoked_at = now
-            webhook.generation += 1
-            webhook.binding_generation += 1
-        await self._session.flush()
-        return True
 
     async def _active_connection(
         self, workspace_id: UUID, installation_id: UUID

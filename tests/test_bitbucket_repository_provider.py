@@ -299,7 +299,7 @@ def test_provider_bounds_discovery_cursor_and_response_body() -> None:
 
 @pytest.mark.parametrize(
     ("header", "expected"),
-    [("37", 37), ("999999", 3600), ("not-a-date", None)],
+    [("37", 37), ("999999", 86400), ("not-a-date", None)],
 )
 def test_provider_preserves_bounded_retry_after(header: str, expected: int | None) -> None:
     def limited(_request: httpx.Request) -> httpx.Response:

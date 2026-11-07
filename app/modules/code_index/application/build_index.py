@@ -73,6 +73,7 @@ from app.modules.code_index.application.vcs import (
     BranchHead,
     ChangeStatus,
     Comparison,
+    IncrementalRepositorySnapshotSource,
     IndexLimitExceeded,
     RepositorySnapshotSource,
     SourceArchive,
@@ -230,6 +231,9 @@ class BuildOutcome:
     written_files: int = 0
     deleted_files: int = 0
     github_request_count: int = 0
+    listing_request_count: int = 0
+    metadata_request_count: int = 0
+    raw_read_count: int = 0
     downloaded_bytes: int = 0
     duration_ms: int = 0
 
@@ -430,6 +434,7 @@ class BuildRepositoryIndex:
                 limits=self._limits,
                 settings=self._settings,
                 repository_id=repository.repository_id,
+                provider=repository.provider,
                 claim=claim,
                 source=self._sources(repository),
                 started=started,
@@ -508,7 +513,7 @@ def _log(repository_id: UUID, generation: int, outcome: BuildOutcome) -> None:
     _LOGGER.info(
         "code_index build repository_id=%s generation=%d status=%s mode=%s reason=%s "
         "error=%s http_status=%s parsed=%d written=%d deleted=%d skipped=%s "
-        "provider_skipped=%s requests=%d "
+        "provider_skipped=%s requests=%d listing_requests=%d metadata_requests=%d raw_reads=%d "
         "downloaded_bytes=%d duration_ms=%d",
         repository_id,
         generation,
@@ -523,6 +528,9 @@ def _log(repository_id: UUID, generation: int, outcome: BuildOutcome) -> None:
         skipped or "-",
         provider_skipped or "-",
         outcome.github_request_count,
+        outcome.listing_request_count,
+        outcome.metadata_request_count,
+        outcome.raw_read_count,
         outcome.downloaded_bytes,
         outcome.duration_ms,
     )
@@ -542,6 +550,7 @@ class _Job:
         limits: IndexLimits,
         settings: IndexBuildSettings,
         repository_id: UUID,
+        provider: str,
         claim: LeaseClaim,
         source: RepositorySnapshotSource,
         started: float,
@@ -554,6 +563,7 @@ class _Job:
         self._limits = limits
         self._settings = settings
         self._id = repository_id
+        self._provider = provider
         self._claim = claim
         self._fence = claim.fence
         self._source = source
@@ -617,6 +627,9 @@ class _Job:
             written_files=self._written,
             deleted_files=self._deleted,
             github_request_count=self._source.request_count,
+            listing_request_count=getattr(self._source, "listing_request_count", 0),
+            metadata_request_count=getattr(self._source, "metadata_request_count", 0),
+            raw_read_count=getattr(self._source, "raw_read_count", 0),
             downloaded_bytes=self._downloaded,
         )
 
@@ -711,10 +724,30 @@ class _Job:
             await self._wake_if_the_target_moved()
             return self._outcome(BuildStatus.UNCHANGED)
         comparison = await self._comparison(state, head)
+        if (
+            comparison is not None
+            and state.indexed_commit_sha is not None
+            and isinstance(self._source, IncrementalRepositorySnapshotSource)
+        ):
+            incremental_source = self._source
+            base_sha = state.indexed_commit_sha
+            verified_comparison = comparison
+            await self._network(
+                lambda: incremental_source.prepare_incremental_manifest(
+                    base_sha, head.commit_sha, verified_comparison
+                )
+            )
         document = await self._network(lambda: self._source.rules_document(head.commit_sha))
         policy = parse_review_ignore(document.text)
         exclusions = IndexExclusions(IgnoreMatcher(policy), self._limits)
         self._exclusions = exclusions
+        if (
+            comparison is not None
+            and profile is not None
+            and profile.exclusions_digest != policy.digest
+            and isinstance(self._source, IncrementalRepositorySnapshotSource)
+        ):
+            self._source.discard_incremental_manifest(head.commit_sha)
         sparse = None
         plan: _Plan | None = None
         if (
@@ -727,6 +760,8 @@ class _Job:
                 self._source, state, comparison, head.commit_sha, exclusions
             )
         if sparse is None:
+            if isinstance(self._source, IncrementalRepositorySnapshotSource):
+                self._source.discard_incremental_manifest(head.commit_sha)
             archive = await self._network(
                 lambda: self._source.archive(head.commit_sha, max_bytes=self._limits.download_bytes)
             )
@@ -776,6 +811,15 @@ class _Job:
             # A compare-and-set miss spent the lease; a new wake-up retries (ADR §6.2).
             await self._wake()
             return self._outcome(BuildStatus.REWAKE)
+        if isinstance(self._source, IncrementalRepositorySnapshotSource):
+            try:
+                await self._source.publish_manifest(head.commit_sha)
+            except Exception:
+                _LOGGER.warning(
+                    "code_index published manifest cache write failed repository_id=%s",
+                    self._id,
+                    exc_info=True,
+                )
         await self._wake_if_the_target_moved()
         return self._outcome(BuildStatus.PUBLISHED)
 
@@ -871,15 +915,23 @@ class _Job:
     async def _network[T](self, call: Callable[[], Awaitable[T]]) -> T:
         remaining = self._deadline - time.monotonic()
         if remaining <= 0:
-            raise IndexLimitExceeded("deadline")
+            raise self._source_deadline_error()
         scope = asyncio.timeout(remaining)
         try:
             async with scope:
                 return await call()
         except TimeoutError:
             if scope.expired():
-                raise IndexLimitExceeded("deadline") from None
+                raise self._source_deadline_error() from None
             raise
+
+    def _source_deadline_error(self) -> VcsUnavailable | IndexLimitExceeded:
+        if self._provider == "bitbucket":
+            return VcsUnavailable(
+                "Bitbucket source work exceeded the index deadline",
+                retry_after=timedelta(minutes=1),
+            )
+        return IndexLimitExceeded("deadline")
 
     async def _discard_abandoned(self) -> bool:
         """T3 in portions; `False` when it outlasts the soft cutoff (ADR §6.2)."""

@@ -69,6 +69,8 @@ from app.modules.code_index.domain.enums import EdgeKind, IndexStatus, PurgeReas
 from app.modules.code_index.domain.keys import MAX_INDEX_KEY_BYTES, SymbolKey
 from app.modules.code_index.domain.storage import COLUMN_WEIGHTS, ROW_OVERHEAD_BYTES, row_bytes
 from app.modules.code_index.infrastructure.models import (
+    BitbucketRawCheckpointBlob,
+    BitbucketTreeCheckpointPage,
     CodeIndexEdge,
     CodeIndexFile,
     CodeIndexImport,
@@ -519,6 +521,17 @@ class SqlAlchemyCodeIndexStore:
         state = await self._state(repository_id, lock=True)
         if state is None:
             return
+        await self._session.execute(
+            delete(BitbucketTreeCheckpointPage).where(
+                BitbucketTreeCheckpointPage.repository_id == repository_id
+            )
+        )
+        await self._session.execute(
+            delete(BitbucketRawCheckpointBlob).where(
+                BitbucketRawCheckpointBlob.repository_id == repository_id
+            )
+        )
+        state.raw_checkpoint_bytes = 0
         if state.purge_reason is not None:
             # Only a TTL reason yields, keeping the generation. After a TTL purge the leader
             # leaves the `empty` row alone and the next review request (or an enable) brings

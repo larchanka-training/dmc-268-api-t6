@@ -8,6 +8,7 @@ from collections.abc import Iterator
 
 import pytest
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -183,11 +184,10 @@ def test_downgrade_rewrites_empty_file_to_missing_patch_before_restoring_old_con
                     )
                 )
             connection.commit()
+            heads = ScriptDirectory.from_config(config).get_heads()
+            assert len(heads) == 1
             command.upgrade(config, "head")
-            assert (
-                connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "20261027_0052"
-            )
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == heads[0]
             assert tuple(connection.execute(throttle_schema).one()) == (2, 1, 1)
             assert connection.execute(throttle_row, {"repository": REPO_A}).one() == throttle_before
             assert tuple(connection.execute(manifest_schema).one()) == (1, 4)

@@ -4,96 +4,37 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Iterator
-from pathlib import Path
-from typing import cast
+from collections.abc import Mapping
+from typing import Any, cast
 from uuid import UUID, uuid4
 
-import httpx
 import pytest
 from alembic.autogenerate import compare_metadata
-from alembic.config import Config
 from alembic.migration import MigrationContext
-from fastapi.testclient import TestClient
-from sqlalchemy import Connection, create_engine, select, text
+from sqlalchemy import Connection, event, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.schema import CreateSchema, DropSchema
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from alembic import command
-from app.bootstrap.bitbucket import get_bitbucket_management
 from app.bootstrap.db_metadata import metadata
-from app.bootstrap.portal_auth import get_auth_scope
-from app.bootstrap.reviews_api import ReviewsApiResources
-from app.main import app
-from app.modules.auth.application.scope import AuthScope
 from app.modules.integrations.bitbucket.application.manage_connection import (
-    BitbucketRepositoryProvider,
-    ManageBitbucketConnection,
-)
-from app.modules.integrations.bitbucket.application.request_credentials import (
-    BitbucketBindingGenerationChanged,
-    BitbucketCredentialGenerationChanged,
-    BitbucketTargetInactive,
+    BindingPosition,
 )
 from app.modules.integrations.bitbucket.infrastructure.connection_store import (
     SqlAlchemyBitbucketConnectionStore,
-    SqlAlchemyBitbucketManagementUnitOfWork,
 )
 from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
     BitbucketCredentialCipher,
     CredentialContext,
     CredentialPurpose,
 )
-from app.modules.integrations.bitbucket.infrastructure.credential_codec import (
-    BitbucketCredentialCodecAdapter,
-)
-from app.modules.integrations.bitbucket.infrastructure.models import (
-    BitbucketRepositoryIdentity,
-    BitbucketRepositoryWebhookSecret,
-    bitbucket_repository_external_id_seq,
-)
-from app.modules.integrations.bitbucket.infrastructure.repository_provider import (
-    BitbucketCloudRepositoryProvider,
-    BitbucketRepositorySnapshot,
-)
-from app.modules.integrations.bitbucket.infrastructure.request_credentials import (
-    BitbucketHttpClient,
-    BitbucketRequestCredentials,
-    SqlAlchemyBitbucketTargetReader,
-)
-from app.modules.repositories.application.onboard_repository import load_default_rule_sets
-from app.modules.repositories.infrastructure.models import Repository
+from tests.bitbucket_connection_postgres_support import _config
+
+pytest_plugins = ("tests.bitbucket_connection_postgres_support",)
 
 
-@pytest.fixture
-def bitbucket_connection_schema() -> Iterator[Connection]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL connection tests")
-    schema = f"test_bitbucket_connection_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                yield connection
-            finally:
-                connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
-    finally:
-        engine.dispose()
-
-
-def _config(connection: Connection) -> Config:
-    config = Config("alembic.ini")
-    config.attributes["connection"] = connection
-    return config
+def test_connection_store_exposes_repository_disconnect_without_bulk_revoke() -> None:
+    assert not hasattr(SqlAlchemyBitbucketConnectionStore, "revoke_connection")
 
 
 @pytest.mark.integration
@@ -120,1102 +61,118 @@ def test_bitbucket_connection_migration_matches_metadata(
 
 
 @pytest.mark.integration
-def test_two_workspace_credentials_rotate_and_revoke_independently(
+def test_binding_page_migration_backfills_only_bitbucket_workspace(
     bitbucket_connection_schema: Connection,
 ) -> None:
     db = bitbucket_connection_schema
-    command.upgrade(_config(db), "head")
-    first_workspace, second_workspace = uuid4(), uuid4()
-    for workspace in (first_workspace, second_workspace):
+    command.upgrade(_config(db), "20261027_0052")
+    workspace_id, bitbucket_installation, github_installation = uuid4(), uuid4(), uuid4()
+    bitbucket_repository, github_repository = uuid4(), uuid4()
+    db.execute(
+        text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, :name, 7)"),
+        {"id": workspace_id, "name": str(workspace_id)},
+    )
+    for installation, provider, external_id in (
+        (bitbucket_installation, "bitbucket", 800001),
+        (github_installation, "github", 800002),
+    ):
         db.execute(
-            text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, :name, 7)"),
-            {"id": str(workspace), "name": str(workspace)},
+            text("""
+                INSERT INTO provider_installations
+                    (id, workspace_id, provider, external_id, "metadata")
+                VALUES (:id, :workspace_id, :provider, :external_id, '{}'::jsonb)
+            """),
+            {
+                "id": installation,
+                "workspace_id": workspace_id,
+                "provider": provider,
+                "external_id": external_id,
+            },
         )
-    schema = str(db.scalar(text("SELECT current_schema()")))
+    db.execute(
+        text("""
+            INSERT INTO bitbucket_installation_identities
+                (provider_installation_id, workspace_id, bitbucket_workspace_uuid)
+            VALUES (:installation_id, :workspace_id, :remote_workspace_id)
+        """),
+        {
+            "installation_id": bitbucket_installation,
+            "workspace_id": workspace_id,
+            "remote_workspace_id": uuid4(),
+        },
+    )
+    for repository, installation, name in (
+        (bitbucket_repository, bitbucket_installation, "team/bitbucket"),
+        (github_repository, github_installation, "team/github"),
+    ):
+        db.execute(
+            text("""
+                INSERT INTO repositories
+                    (id, provider_installation_id, external_id, full_name,
+                     default_branch, web_url)
+                VALUES (:id, :installation_id, 1, :name, 'main', :url)
+            """),
+            {
+                "id": repository,
+                "installation_id": installation,
+                "name": name,
+                "url": f"https://example.test/{name}",
+            },
+        )
+    db.execute(
+        text("""
+            INSERT INTO bitbucket_repository_identities
+                (repository_id, provider_installation_id, workspace_id,
+                 repository_external_id, repository_uuid)
+            VALUES (:repository_id, :installation_id, :workspace_id, 1, :remote_repository_id)
+        """),
+        {
+            "repository_id": bitbucket_repository,
+            "installation_id": bitbucket_installation,
+            "workspace_id": workspace_id,
+            "remote_repository_id": uuid4(),
+        },
+    )
     db.commit()
-    first_installation, second_installation = uuid4(), uuid4()
-    remote_workspace = UUID("b2d0d95e-1f8d-4990-9fb2-f09f87ae5f60")
-    cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
-
-    async def scenario() -> None:
-        database_url = make_url(os.environ["TEST_DATABASE_URL"]).set(
-            drivername="postgresql+psycopg_async"
+    command.upgrade(_config(db), "head")
+    assert (
+        db.scalar(
+            text("SELECT workspace_id FROM repositories WHERE id = :id"),
+            {"id": bitbucket_repository},
         )
-        engine = create_async_engine(database_url)
-        try:
-            async with engine.connect() as connection:
-                await connection.execute(text(f'SET search_path TO "{schema}"'))
-                await connection.commit()
-                async with AsyncSession(bind=connection) as session:
-                    store = SqlAlchemyBitbucketConnectionStore(session)
-                    for workspace, installation, token in (
-                        (first_workspace, first_installation, "first-token"),
-                        (second_workspace, second_installation, "second-token"),
-                    ):
-                        context = CredentialContext(installation, workspace)
-                        await store.create_connection(
-                            workspace_id=workspace,
-                            installation_id=installation,
-                            bitbucket_workspace_uuid=remote_workspace,
-                            token=cipher.encrypt(
-                                token, context=context, purpose=CredentialPurpose.TOKEN
-                            ),
-                        )
-                        await store.bind_repository(
-                            workspace_id=workspace,
-                            installation_id=installation,
-                            repository_uuid=remote_workspace,
-                            full_name=f"{workspace}/private",
-                            default_branch="main",
-                            web_url=f"https://bitbucket.org/{workspace}/private",
-                        )
-                    await session.commit()
-                    first_bindings = await store.list_bindings(workspace_id=first_workspace)
-                    second_bindings = await store.list_bindings(workspace_id=second_workspace)
-                    assert len(first_bindings) == len(second_bindings) == 1
-                    assert first_bindings[0].installation_id == first_installation
-                    assert second_bindings[0].installation_id == second_installation
-                    assert first_bindings[0].repository_id != second_bindings[0].repository_id
-                    rows = (
-                        await session.execute(
-                            text(
-                                "SELECT provider_installation_id, workspace_id, "
-                                "credential_generation, token_ciphertext "
-                                "FROM bitbucket_connections "
-                                "ORDER BY workspace_id"
-                            )
-                        )
-                    ).all()
-                    assert len(rows) == 2
-                    assert all(row[2] == 1 for row in rows)
-                    assert all(b"token" not in row[3] for row in rows)
-                    for table, key, identity, uuid_columns in (
-                        (
-                            "bitbucket_installation_identities",
-                            "provider_installation_id",
-                            first_installation,
-                            (
-                                "provider_installation_id",
-                                "workspace_id",
-                                "bitbucket_workspace_uuid",
-                            ),
-                        ),
-                        (
-                            "bitbucket_repository_identities",
-                            "repository_id",
-                            first_bindings[0].repository_id,
-                            (
-                                "repository_id",
-                                "provider_installation_id",
-                                "workspace_id",
-                                "repository_uuid",
-                            ),
-                        ),
-                    ):
-                        for column in uuid_columns:
-                            with pytest.raises(IntegrityError) as immutable:
-                                async with session.begin_nested():
-                                    await session.execute(
-                                        text(
-                                            f"UPDATE {table} SET {column}=:changed "
-                                            f"WHERE {key}=:identity"
-                                        ),
-                                        {"changed": uuid4(), "identity": identity},
-                                    )
-                            assert getattr(immutable.value.orig, "sqlstate", None) == "23514"
-                    with pytest.raises(IntegrityError) as error:
-                        async with session.begin_nested():
-                            await session.execute(
-                                text(
-                                    "UPDATE bitbucket_connections SET revoked_at=now() "
-                                    "WHERE provider_installation_id=:id"
-                                ),
-                                {"id": first_installation},
-                            )
-                    assert getattr(error.value.orig, "sqlstate", None) == "23514"
-                    with pytest.raises(ValueError, match="connection_inactive"):
-                        await store.rotate_token(
-                            workspace_id=first_workspace,
-                            installation_id=second_installation,
-                            token=cipher.encrypt(
-                                "cross-workspace-token",
-                                context=CredentialContext(second_installation, second_workspace),
-                                purpose=CredentialPurpose.TOKEN,
-                            ),
-                        )
-                    assert not await store.revoke_connection(
-                        workspace_id=first_workspace, installation_id=second_installation
-                    )
-                    assert (
-                        await store.rotate_token(
-                            workspace_id=first_workspace,
-                            installation_id=first_installation,
-                            token=cipher.encrypt(
-                                "rotated-token",
-                                context=CredentialContext(first_installation, first_workspace),
-                                purpose=CredentialPurpose.TOKEN,
-                            ),
-                        )
-                        == 2
-                    )
-                    await session.commit()
-                    assert await store.revoke_connection(
-                        workspace_id=first_workspace, installation_id=first_installation
-                    )
-                    await session.commit()
-                    first = (
-                        await session.execute(
-                            text(
-                                "SELECT credential_generation, token_ciphertext, revoked_at "
-                                "FROM bitbucket_connections "
-                                "WHERE provider_installation_id=:id"
-                            ),
-                            {"id": str(first_installation)},
-                        )
-                    ).one()
-                    second = (
-                        await session.execute(
-                            text(
-                                "SELECT credential_generation, token_ciphertext, revoked_at "
-                                "FROM bitbucket_connections "
-                                "WHERE provider_installation_id=:id"
-                            ),
-                            {"id": str(second_installation)},
-                        )
-                    ).one()
-                    assert first[0] == 3 and first[1] is None and first[2] is not None
-                    assert second[0] == 1 and second[1] is not None and second[2] is None
-        finally:
-            await engine.dispose()
-
-    asyncio.run(scenario())
+        == workspace_id
+    )
+    assert (
+        db.scalar(
+            text("SELECT workspace_id FROM repositories WHERE id = :id"),
+            {"id": github_repository},
+        )
+        is None
+    )
 
 
 @pytest.mark.integration
-def test_two_repositories_share_credential_and_disconnect_independently(
+def test_binding_pages_keep_database_collation_order(
     bitbucket_connection_schema: Connection,
 ) -> None:
     db = bitbucket_connection_schema
     command.upgrade(_config(db), "head")
-    workspace, installation = uuid4(), uuid4()
-    remote_workspace = UUID("b2d0d95e-1f8d-4990-9fb2-f09f87ae5f60")
-    first_remote, second_remote = uuid4(), uuid4()
-    db.execute(
-        text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'test', 7)"),
-        {"id": workspace},
-    )
-    schema = str(db.scalar(text("SELECT current_schema()")))
-    db.commit()
-    cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
-    context = CredentialContext(installation, workspace)
-
-    async def scenario() -> None:
-        database_url = make_url(os.environ["TEST_DATABASE_URL"]).set(
-            drivername="postgresql+psycopg_async"
-        )
-        engine = create_async_engine(database_url)
-        try:
-            async with engine.connect() as connection:
-                await connection.execute(text(f'SET search_path TO "{schema}"'))
-                await connection.commit()
-                async with AsyncSession(bind=connection) as session:
-                    store = SqlAlchemyBitbucketConnectionStore(session)
-                    await store.create_connection(
-                        workspace_id=workspace,
-                        installation_id=installation,
-                        bitbucket_workspace_uuid=remote_workspace,
-                        token=cipher.encrypt(
-                            "shared-token", context=context, purpose=CredentialPurpose.TOKEN
-                        ),
-                    )
-                    first, first_created = await store.bind_repository(
-                        workspace_id=workspace,
-                        installation_id=installation,
-                        repository_uuid=first_remote,
-                        full_name="nvdovnar/first",
-                        default_branch="main",
-                        web_url="https://bitbucket.org/nvdovnar/first",
-                    )
-                    second, second_created = await store.bind_repository(
-                        workspace_id=workspace,
-                        installation_id=installation,
-                        repository_uuid=second_remote,
-                        full_name="nvdovnar/second",
-                        default_branch="main",
-                        web_url="https://bitbucket.org/nvdovnar/second",
-                    )
-                    for repository_id in (first, second):
-                        await store.set_repository_webhook_secret(
-                            workspace_id=workspace,
-                            installation_id=installation,
-                            repository_id=repository_id,
-                            secret=cipher.encrypt(
-                                "h" * 40,
-                                context=CredentialContext(installation, workspace, repository_id),
-                                purpose=CredentialPurpose.WEBHOOK_SECRET,
-                            ),
-                        )
-                    await session.commit()
-                    reader = SqlAlchemyBitbucketTargetReader(lambda: AsyncSession(bind=connection))
-                    first_target = await reader.resolve_target(
-                        workspace_id=workspace,
-                        installation_id=installation,
-                        repository_uuid=first_remote,
-                    )
-                    second_target = await reader.resolve_target(
-                        workspace_id=workspace,
-                        installation_id=installation,
-                        repository_uuid=second_remote,
-                    )
-                    assert first_target.workspace_id == workspace
-                    assert first_target.bitbucket_workspace_uuid == remote_workspace
-                    assert first_target.workspace_id != first_target.bitbucket_workspace_uuid
-                    assert first_created and second_created
-                    assert first != second
-                    assert (
-                        await session.scalar(
-                            text(
-                                "SELECT credential_generation FROM bitbucket_connections "
-                                "WHERE provider_installation_id=:id"
-                            ),
-                            {"id": installation},
-                        )
-                        == 1
-                    )
-                    assert await store.disconnect_repository(
-                        workspace_id=workspace,
-                        installation_id=installation,
-                        repository_id=first,
-                    )
-                    await session.commit()
-                    rows = (
-                        await session.execute(
-                            select(Repository.id, Repository.installation_available)
-                            .where(Repository.provider_installation_id == installation)
-                            .order_by(Repository.id)
-                        )
-                    ).all()
-                    assert {row[0]: row[1] for row in rows} == {first: False, second: True}
-                    await reader.checkpoint(second_target)
-                    with pytest.raises(BitbucketTargetInactive):
-                        await reader.checkpoint(first_target)
-                    rebound, newly_active = await store.bind_repository(
-                        workspace_id=workspace,
-                        installation_id=installation,
-                        repository_uuid=first_remote,
-                        full_name="nvdovnar/first",
-                        default_branch="main",
-                        web_url="https://bitbucket.org/nvdovnar/first",
-                    )
-                    assert rebound == first and newly_active
-                    await store.set_repository_webhook_secret(
-                        workspace_id=workspace,
-                        installation_id=installation,
-                        repository_id=first,
-                        secret=cipher.encrypt(
-                            "n" * 40,
-                            context=CredentialContext(installation, workspace, first),
-                            purpose=CredentialPurpose.WEBHOOK_SECRET,
-                        ),
-                    )
-                    await session.commit()
-                    await reader.checkpoint(second_target)
-                    with pytest.raises(BitbucketBindingGenerationChanged):
-                        await reader.checkpoint(first_target)
-                    assert (
-                        await reader.resolve_target(
-                            workspace_id=workspace,
-                            installation_id=installation,
-                            repository_uuid=first_remote,
-                        )
-                    ).repository_id == first
-                    assert await store.disconnect_repository(
-                        workspace_id=workspace,
-                        installation_id=installation,
-                        repository_id=first,
-                    )
-                    await session.commit()
-                    assert (
-                        await session.scalar(
-                            text(
-                                "SELECT revoked_at FROM bitbucket_connections "
-                                "WHERE provider_installation_id=:id"
-                            ),
-                            {"id": installation},
-                        )
-                        is None
-                    )
-                    assert await store.disconnect_repository(
-                        workspace_id=workspace,
-                        installation_id=installation,
-                        repository_id=second,
-                    )
-                    await session.commit()
-                    assert (
-                        await session.scalar(
-                            text(
-                                "SELECT revoked_at FROM bitbucket_connections "
-                                "WHERE provider_installation_id=:id"
-                            ),
-                            {"id": installation},
-                        )
-                        is not None
-                    )
-        finally:
-            await engine.dispose()
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
-def test_bitbucket_repository_enters_common_list_only_for_current_workspace_member(
-    bitbucket_connection_schema: Connection,
-) -> None:
-    db = bitbucket_connection_schema
-    command.upgrade(_config(db), "head")
-    workspace, installation, remote_workspace, remote_repo, other_workspace, other_installation = (
-        uuid4(),
-        uuid4(),
-        uuid4(),
-        uuid4(),
-        uuid4(),
-        uuid4(),
-    )
-    for portal_workspace in (workspace, other_workspace):
-        db.execute(
-            text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'test', 7)"),
-            {"id": portal_workspace},
-        )
-    for user_id in (42, 43):
-        db.execute(
-            text("INSERT INTO github_user_profiles (id, login, name) VALUES (:id, :login, :login)"),
-            {"id": user_id, "login": f"user-{user_id}"},
-        )
-    for portal_workspace in (workspace, other_workspace):
-        db.execute(
-            text(
-                "INSERT INTO github_user_workspace_access (github_user_id, workspace_id) "
-                "VALUES (42, :workspace)"
-            ),
-            {"workspace": portal_workspace},
-        )
-    schema = str(db.scalar(text("SELECT current_schema()")))
-    db.commit()
-    cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
-    context = CredentialContext(installation, workspace)
-    database_url = make_url(os.environ["TEST_DATABASE_URL"]).set(
-        drivername="postgresql+psycopg_async"
-    )
-    engine = create_async_engine(database_url, connect_args={"options": f"-csearch_path={schema}"})
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-
-    async def setup() -> tuple[UUID, UUID]:
-        async with factory.begin() as session:
-            store = SqlAlchemyBitbucketConnectionStore(session)
-            await store.create_connection(
-                workspace_id=workspace,
-                installation_id=installation,
-                bitbucket_workspace_uuid=remote_workspace,
-                token=cipher.encrypt(
-                    "shared-token", context=context, purpose=CredentialPurpose.TOKEN
-                ),
-            )
-            repository_id, created = await store.bind_repository(
-                workspace_id=workspace,
-                installation_id=installation,
-                repository_uuid=remote_repo,
-                full_name="nvdovnar/private",
-                default_branch="main",
-                web_url="https://bitbucket.org/nvdovnar/private",
-            )
-            assert created
-            await store.create_connection(
-                workspace_id=other_workspace,
-                installation_id=other_installation,
-                bitbucket_workspace_uuid=remote_workspace,
-                token=cipher.encrypt(
-                    "other-token",
-                    context=CredentialContext(other_installation, other_workspace),
-                    purpose=CredentialPurpose.TOKEN,
-                ),
-            )
-            other_repository_id, other_created = await store.bind_repository(
-                workspace_id=other_workspace,
-                installation_id=other_installation,
-                repository_uuid=remote_repo,
-                full_name="other/private",
-                default_branch="main",
-                web_url="https://bitbucket.org/other/private",
-            )
-            assert other_created
-            return repository_id, other_repository_id
-
-    repository_id, other_repository_id = asyncio.run(setup())
-    manager = ManageBitbucketConnection(
-        uow_factory=lambda: SqlAlchemyBitbucketManagementUnitOfWork(factory),
-        cipher=BitbucketCredentialCodecAdapter(cipher),
-        provider=cast(BitbucketRepositoryProvider, object()),
-        rule_sets={},
-        webhook_base_url="https://portal.example",
-    )
-    app.state.reviews_api_resources = ReviewsApiResources(engine, factory)
-    app.dependency_overrides[get_bitbucket_management] = lambda: manager
-    try:
-        client = TestClient(app)
-        app.dependency_overrides[get_auth_scope] = lambda: AuthScope(
-            42, (workspace, other_workspace)
-        )
-        assert {item["id"] for item in client.get("/api/repos").json()} == {
-            str(repository_id),
-            str(other_repository_id),
-        }
-        app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (workspace,))
-        own_connections = client.get(f"/api/workspaces/{workspace}/bitbucket/connections")
-        assert own_connections.status_code == 200
-        assert [item["repositoryId"] for item in own_connections.json()["connections"]] == [
-            str(repository_id)
-        ]
-        assert (
-            client.get(f"/api/workspaces/{other_workspace}/bitbucket/connections").status_code
-            == 404
-        )
-        assert client.get(f"/api/repos/{other_repository_id}").status_code == 404
-        app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (other_workspace,))
-        other_connections = client.get(f"/api/workspaces/{other_workspace}/bitbucket/connections")
-        assert other_connections.status_code == 200
-        assert [item["repositoryId"] for item in other_connections.json()["connections"]] == [
-            str(other_repository_id)
-        ]
-        assert client.get(f"/api/workspaces/{workspace}/bitbucket/connections").status_code == 404
-        assert client.get(f"/api/repos/{repository_id}").status_code == 404
-        app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (workspace,))
-        visible = client.get("/api/repos")
-        assert visible.status_code == 200
-        assert [item["id"] for item in visible.json()] == [str(repository_id)]
-        assert visible.json()[0]["provider"] == "bitbucket"
-        app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (other_workspace,))
-        assert [item["id"] for item in client.get("/api/repos").json()] == [
-            str(other_repository_id)
-        ]
-        app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (workspace,))
-        for body, field in (
-            ({"waitForCi": "auto"}, "waitForCi"),
-            ({"waitForCi": "always"}, "waitForCi"),
-            ({"reviewEvent": "REQUEST_CHANGES"}, "reviewEvent"),
-        ):
-            rejected = client.patch(f"/api/repos/{repository_id}", json=body)
-            assert rejected.status_code == 422
-            assert rejected.json()["detail"][0]["loc"] == ["body", field]
-        assert tuple(
-            db.execute(
-                text("SELECT wait_for_ci, review_event FROM repositories WHERE id=:id"),
-                {"id": repository_id},
-            ).one()
-        ) == ("never", "comment")
-        accepted = client.patch(
-            f"/api/repos/{repository_id}",
-            json={"waitForCi": "never", "reviewEvent": "COMMENT"},
-        )
-        assert accepted.status_code == 200
-        assert (accepted.json()["waitForCi"], accepted.json()["reviewEvent"]) == (
-            "never",
-            "COMMENT",
-        )
-        app.dependency_overrides[get_auth_scope] = lambda: AuthScope(43, (workspace,))
-        assert client.get("/api/repos").json() == []
-        app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (workspace,))
-        db.execute(
-            text(
-                "DELETE FROM github_user_workspace_access "
-                "WHERE github_user_id=42 AND workspace_id=:workspace"
-            ),
-            {"workspace": workspace},
-        )
-        db.commit()
-        assert client.get("/api/repos").json() == []
-    finally:
-        app.dependency_overrides.clear()
-        del app.state.reviews_api_resources
-        asyncio.run(engine.dispose())
-
-
-@pytest.mark.integration
-def test_browser_connect_reuses_one_credential_and_disconnects_one_repository(
-    bitbucket_connection_schema: Connection,
-) -> None:
-    db = bitbucket_connection_schema
-    command.upgrade(_config(db), "head")
-    workspace, remote_workspace, first_uuid, second_uuid = uuid4(), uuid4(), uuid4(), uuid4()
-    db.execute(
-        text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'test', 7)"),
-        {"id": workspace},
-    )
-    db.execute(
-        text("INSERT INTO github_user_profiles (id, login, name) VALUES (42, 'alice', 'Alice')")
-    )
+    if db.scalar(text("SELECT 1 FROM pg_collation WHERE collname = 'en-US-x-icu'")) is None:
+        pytest.skip("PostgreSQL ICU English collation is unavailable")
     db.execute(
         text(
-            "INSERT INTO github_user_workspace_access (github_user_id, workspace_id) "
-            "VALUES (42, :workspace)"
-        ),
-        {"workspace": workspace},
+            "ALTER TABLE repositories ALTER COLUMN full_name TYPE VARCHAR(512) "
+            'COLLATE "en-US-x-icu"'
+        )
     )
-    schema = str(db.scalar(text("SELECT current_schema()")))
-    db.commit()
-    database_url = make_url(os.environ["TEST_DATABASE_URL"]).set(
-        drivername="postgresql+psycopg_async"
-    )
-    engine = create_async_engine(database_url, connect_args={"options": f"-csearch_path={schema}"})
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    rotated_repositories: list[str] = []
-    probe_requests: list[str] = []
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        assert request.headers["Authorization"] in {
-            "Bearer shared-token",
-            "Bearer different-token",
-            "Bearer rotated-token",
-            "Bearer transferred-token",
-            "Bearer repository-only-token",
-        }
-        if request.url.path == "/2.0/user":
-            return httpx.Response(200, json={"uuid": "{00000000-0000-4000-8000-000000000555}"})
-        if request.url.path.endswith("/pullrequests"):
-            probe_requests.append(str(request.url))
-            if request.headers["Authorization"] == "Bearer repository-only-token":
-                return httpx.Response(403, json={"error": {"message": "scope denied"}})
-            return httpx.Response(200, json={"values": [], "size": 0, "pagelen": 1})
-        if request.url.path == "/2.0/repositories/other-space/first":
-            return httpx.Response(
-                200,
-                json={
-                    "uuid": "{" + str(first_uuid) + "}",
-                    "full_name": "other-space/first",
-                    "slug": "first",
-                    "name": "first",
-                    "is_private": True,
-                    "workspace": {
-                        "uuid": "{d9fb570e-22f0-4d8e-868c-0474ab37ce68}",
-                        "slug": "other-space",
-                    },
-                    "links": {"html": {"href": "https://bitbucket.org/other-space/first"}},
-                    "mainbranch": {"name": "main"},
-                },
-            )
-        if request.url.path == "/2.0/repositories/nvdovnar":
-            return httpx.Response(
-                200,
-                json={
-                    "values": [
-                        {
-                            "uuid": "{" + str(first_uuid) + "}",
-                            "full_name": "nvdovnar/first",
-                            "slug": "first",
-                            "name": "first",
-                            "is_private": True,
-                            "workspace": {
-                                "uuid": "{" + str(remote_workspace) + "}",
-                                "slug": "nvdovnar",
-                            },
-                            "links": {"html": {"href": "https://bitbucket.org/nvdovnar/first"}},
-                            "mainbranch": {"name": "main"},
-                            "language": "Python",
-                        }
-                    ]
-                },
-            )
-        slug = request.url.path.rsplit("/", 1)[-1]
-        if request.url.path.startswith(f"/2.0/repositories/{{{remote_workspace}}}/"):
-            remote_uuid = UUID(slug.strip("{}"))
-            assert remote_uuid in {first_uuid, second_uuid}
-            slug = "first-renamed" if remote_uuid == first_uuid else "second-renamed"
-            if request.headers["Authorization"] == "Bearer rotated-token":
-                rotated_repositories.append(slug)
-        elif request.headers["Authorization"] == "Bearer rotated-token":
-            assert slug == "first-renamed"
-            remote_uuid = first_uuid
-        else:
-            assert slug in {"first", "second"}
-            remote_uuid = first_uuid if slug == "first" else second_uuid
-        returned_workspace = (
-            UUID("d9fb570e-22f0-4d8e-868c-0474ab37ce68")
-            if request.headers["Authorization"] == "Bearer transferred-token"
-            else remote_workspace
-        )
-        return httpx.Response(
-            200,
-            json={
-                "uuid": "{" + str(remote_uuid) + "}",
-                "full_name": f"nvdovnar/{slug}",
-                "slug": slug,
-                "name": slug,
-                "is_private": True,
-                "workspace": {"uuid": "{" + str(returned_workspace) + "}", "slug": "nvdovnar"},
-                "links": {"html": {"href": f"https://bitbucket.org/nvdovnar/{slug}"}},
-                "mainbranch": {"name": "main"},
-                "language": "Python",
-            },
-        )
-
-    class RacingProvider(BitbucketCloudRepositoryProvider):
-        race_target: tuple[UUID, UUID] | None = None
-
-        async def fetch_repository_by_uuid(
-            self, *, repository_uuid: UUID, token: str, workspace_uuid: UUID | None = None
-        ) -> BitbucketRepositorySnapshot:
-            if self.race_target is not None:
-                installation_id, repository_id = self.race_target
-                self.race_target = None
-                async with factory() as session:
-                    store = SqlAlchemyBitbucketConnectionStore(session)
-                    assert await store.disconnect_repository(
-                        workspace_id=workspace,
-                        installation_id=installation_id,
-                        repository_id=repository_id,
-                    )
-                    rebound, newly_active = await store.bind_repository(
-                        workspace_id=workspace,
-                        installation_id=installation_id,
-                        repository_uuid=first_uuid,
-                        full_name="nvdovnar/first",
-                        default_branch="main",
-                        web_url="https://bitbucket.org/nvdovnar/first",
-                    )
-                    assert rebound == repository_id and newly_active
-                    await store.set_repository_webhook_secret(
-                        workspace_id=workspace,
-                        installation_id=installation_id,
-                        repository_id=repository_id,
-                        secret=BitbucketCredentialCipher(
-                            active_key_id="test", keys={"test": b"a" * 32}
-                        ).encrypt(
-                            "r" * 40,
-                            context=CredentialContext(installation_id, workspace, repository_id),
-                            purpose=CredentialPurpose.WEBHOOK_SECRET,
-                        ),
-                    )
-                    await session.commit()
-            return await super().fetch_repository_by_uuid(
-                repository_uuid=repository_uuid, token=token, workspace_uuid=workspace_uuid
-            )
-
-    provider_http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-    racing_provider = RacingProvider(provider_http)
-    manager = ManageBitbucketConnection(
-        uow_factory=lambda: SqlAlchemyBitbucketManagementUnitOfWork(factory),
-        cipher=BitbucketCredentialCodecAdapter(
-            BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
-        ),
-        provider=racing_provider,
-        rule_sets=load_default_rule_sets(Path(__file__).resolve().parents[1] / "review" / "rules"),
-        webhook_base_url="https://portal.example",
-    )
-    app.state.reviews_api_resources = ReviewsApiResources(engine, factory)
-    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (workspace,))
-    app.dependency_overrides[get_bitbucket_management] = lambda: manager
-    try:
-        client = TestClient(app)
-        url = f"/api/workspaces/{workspace}/bitbucket/connections"
-        discovery = client.post(
-            f"/api/workspaces/{workspace}/bitbucket/discovery",
-            json={"bitbucketWorkspace": "nvdovnar", "apiToken": "shared-token"},
-        )
-        assert discovery.status_code == 200
-        assert discovery.json()["repositories"][0]["uuid"] == str(first_uuid)
-        assert discovery.json()["repositories"][0]["isPrivate"] is True
-        assert "shared-token" not in discovery.text
-        first = client.post(
-            url,
-            json={
-                "bitbucketWorkspace": "nvdovnar",
-                "repositorySlug": "first",
-                "repositoryUuid": str(first_uuid),
-                "apiToken": "shared-token",
-            },
-        )
-        assert first.status_code == 201
-        assert first.json()["repositoryUuid"] == str(first_uuid)
-        assert first.json()["webhook"]["secret"]
-        second = client.post(
-            url,
-            json={
-                "bitbucketWorkspace": "nvdovnar",
-                "repositorySlug": "second",
-                "repositoryUuid": str(second_uuid),
-                "apiToken": "shared-token",
-            },
-        )
-        assert second.status_code == 201
-        missing_pr_scope_on_connect = client.post(
-            url,
-            json={
-                "bitbucketWorkspace": "other-space",
-                "repositorySlug": "first",
-                "repositoryUuid": str(first_uuid),
-                "apiToken": "repository-only-token",
-            },
-        )
-        assert missing_pr_scope_on_connect.status_code == 422
-        assert missing_pr_scope_on_connect.json() == {"detail": "repository_inaccessible"}
-        other_workspace_same_repository = client.post(
-            url,
-            json={
-                "bitbucketWorkspace": "other-space",
-                "repositorySlug": "first",
-                "repositoryUuid": str(first_uuid),
-                "apiToken": "shared-token",
-            },
-        )
-        assert other_workspace_same_repository.status_code == 409
-        assert other_workspace_same_repository.json() == {"detail": "repository_uuid_conflict"}
-        assert len(client.get(url).json()["connections"]) == 2
-        assert len(probe_requests) == 4
-        assert all("pullrequests?pagelen=1" in request for request in probe_requests)
-        missing_pr_scope = client.put(
-            f"{url}/{first.json()['id']}/credential",
-            json={"apiToken": "repository-only-token"},
-        )
-        assert missing_pr_scope.status_code == 422
-        assert missing_pr_scope.json() == {"detail": "repository_inaccessible"}
-        assert client.get(url).json()["connections"][0]["credentialGeneration"] == 1
-        transferred = client.put(
-            f"{url}/{first.json()['id']}/credential",
-            json={"apiToken": "transferred-token"},
-        )
-        assert transferred.status_code == 409
-        assert transferred.json() == {"detail": "repository_uuid_conflict"}
-        assert client.get(url).json()["connections"][0]["credentialGeneration"] == 1
-        assert second.json()["id"] == first.json()["id"]
-        assert second.json()["webhook"]["secret"]
-        assert second.json()["webhook"]["secret"] != first.json()["webhook"]["secret"]
-        for connected in (first, second):
-            assert (
-                db.scalar(
-                    text(
-                        "SELECT refresh_requested_at FROM repository_rules_status "
-                        "WHERE repository_id=:id"
-                    ),
-                    {"id": connected.json()["repositoryId"]},
-                )
-                is not None
-            )
-        assert first.json()["repositoryId"] in first.json()["webhook"]["url"]
-        assert second.json()["repositoryId"] in second.json()["webhook"]["url"]
-        first_secret_before = db.scalar(
-            text(
-                "SELECT secret_ciphertext FROM bitbucket_repository_webhook_secrets "
-                "WHERE repository_id=:id"
-            ),
-            {"id": first.json()["repositoryId"]},
-        )
-        assert first_secret_before is not None
-        rotated_hook = client.post(
-            f"{url}/{second.json()['id']}/repositories/"
-            f"{second.json()['repositoryId']}/webhook-secret"
-        )
-        assert rotated_hook.status_code == 200
-        assert rotated_hook.json()["secret"] != second.json()["webhook"]["secret"]
-        assert (
-            db.scalar(
-                text(
-                    "SELECT secret_ciphertext FROM bitbucket_repository_webhook_secrets "
-                    "WHERE repository_id=:id"
-                ),
-                {"id": first.json()["repositoryId"]},
-            )
-            == first_secret_before
-        )
-        racing_provider.race_target = (UUID(first.json()["id"]), UUID(first.json()["repositoryId"]))
-        stale_rotation = client.put(
-            f"{url}/{first.json()['id']}/credential",
-            json={"apiToken": "rotated-token"},
-        )
-        assert stale_rotation.status_code == 409
-        assert stale_rotation.json()["detail"] == "connection_changed"
-        rotated_credential = client.put(
-            f"{url}/{first.json()['id']}/credential",
-            json={"apiToken": "rotated-token"},
-        )
-        assert rotated_credential.status_code == 200
-        assert rotated_credential.json()["credentialGeneration"] == 2
-        assert set(rotated_repositories) == {"first-renamed", "second-renamed"}
-        assert {item["repositorySlug"] for item in client.get(url).json()["connections"]} == {
-            "first-renamed",
-            "second-renamed",
-        }
-        assert {item["repositoryId"] for item in client.get(url).json()["connections"]} == {
-            first.json()["repositoryId"],
-            second.json()["repositoryId"],
-        }
-        assert {item["id"] for item in client.get("/api/repos").json()} == {
-            first.json()["repositoryId"],
-            second.json()["repositoryId"],
-        }
-        target_reader = SqlAlchemyBitbucketTargetReader(factory)
-        sibling_target = asyncio.run(
-            target_reader.resolve_target(
-                workspace_id=workspace,
-                installation_id=UUID(first.json()["id"]),
-                repository_uuid=second_uuid,
-            )
-        )
-        disconnected_target = asyncio.run(
-            target_reader.resolve_target(
-                workspace_id=workspace,
-                installation_id=UUID(first.json()["id"]),
-                repository_uuid=first_uuid,
-            )
-        )
-        disconnect = client.delete(
-            f"{url}/{first.json()['id']}/repositories/{first.json()['repositoryId']}"
-        )
-        assert disconnect.status_code == 204
-        repeated_disconnect = client.delete(
-            f"{url}/{first.json()['id']}/repositories/{first.json()['repositoryId']}"
-        )
-        assert repeated_disconnect.status_code == 204
-        assert [item["repositoryId"] for item in client.get(url).json()["connections"]] == [
-            second.json()["repositoryId"]
-        ]
-        assert [item["id"] for item in client.get("/api/repos").json()] == [
-            second.json()["repositoryId"]
-        ]
-        asyncio.run(target_reader.checkpoint(sibling_target))
-        with pytest.raises(BitbucketTargetInactive):
-            asyncio.run(target_reader.checkpoint(disconnected_target))
-        assert (
-            db.scalar(
-                text(
-                    "SELECT secret_ciphertext FROM bitbucket_repository_webhook_secrets "
-                    "WHERE repository_id=:id"
-                ),
-                {"id": first.json()["repositoryId"]},
-            )
-            is None
-        )
-        conflicting = client.post(
-            url,
-            json={
-                "bitbucketWorkspace": "nvdovnar",
-                "repositorySlug": "first",
-                "repositoryUuid": str(first_uuid),
-                "apiToken": "different-token",
-            },
-        )
-        assert conflicting.status_code == 409
-        assert conflicting.json() == {"detail": "credential_rotation_required"}
-        # The final disconnect must count only this installation's repositories,
-        # even while another Bitbucket installation and other providers stay live.
-        other_workspace = uuid4()
-        db.execute(
-            text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'other', 7)"),
-            {"id": other_workspace},
-        )
-        unrelated_repositories: list[UUID] = []
-        for provider, owner, external_id in (
-            ("github", workspace, 900001),
-            ("gitlab", other_workspace, 900002),
-        ):
-            other_installation, other_repository = uuid4(), uuid4()
-            db.execute(
-                text(
-                    "INSERT INTO provider_installations "
-                    '(id, workspace_id, provider, external_id, "metadata") '
-                    "VALUES (:id, :workspace, :provider, :external_id, '{}'::jsonb)"
-                ),
-                {
-                    "id": other_installation,
-                    "workspace": owner,
-                    "provider": provider,
-                    "external_id": external_id,
-                },
-            )
-            db.execute(
-                text(
-                    "INSERT INTO repositories "
-                    "(id, provider_installation_id, external_id, full_name, "
-                    "default_branch, web_url) "
-                    "VALUES (:id, :installation, :external_id, :name, 'main', :url)"
-                ),
-                {
-                    "id": other_repository,
-                    "installation": other_installation,
-                    "external_id": external_id,
-                    "name": f"{provider}/unrelated",
-                    "url": f"https://example.test/{provider}/unrelated",
-                },
-            )
-            unrelated_repositories.append(other_repository)
-        db.commit()
-        peer_installation = uuid4()
-        peer_remote_workspace = uuid4()
-        peer_remote_repository = uuid4()
-
-        async def create_peer_bitbucket_connection() -> UUID:
-            peer_cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
-            async with factory() as session:
-                store = SqlAlchemyBitbucketConnectionStore(session)
-                await store.create_connection(
-                    workspace_id=workspace,
-                    installation_id=peer_installation,
-                    bitbucket_workspace_uuid=peer_remote_workspace,
-                    token=peer_cipher.encrypt(
-                        "peer-token",
-                        context=CredentialContext(peer_installation, workspace),
-                        purpose=CredentialPurpose.TOKEN,
-                    ),
-                )
-                peer_repository, created = await store.bind_repository(
-                    workspace_id=workspace,
-                    installation_id=peer_installation,
-                    repository_uuid=peer_remote_repository,
-                    full_name="peer/active",
-                    default_branch="main",
-                    web_url="https://bitbucket.org/peer/active",
-                )
-                assert created
-                await store.set_repository_webhook_secret(
-                    workspace_id=workspace,
-                    installation_id=peer_installation,
-                    repository_id=peer_repository,
-                    secret=peer_cipher.encrypt(
-                        "h" * 40,
-                        context=CredentialContext(peer_installation, workspace, peer_repository),
-                        purpose=CredentialPurpose.WEBHOOK_SECRET,
-                    ),
-                )
-                await session.commit()
-                return peer_repository
-
-        peer_repository = asyncio.run(create_peer_bitbucket_connection())
-        assert (
-            client.delete(
-                f"{url}/{second.json()['id']}/repositories/{second.json()['repositoryId']}"
-            ).status_code
-            == 204
-        )
-        revoked_connection = db.execute(
-            text(
-                "SELECT revoked_at, token_ciphertext FROM bitbucket_connections "
-                "WHERE provider_installation_id=:installation"
-            ),
-            {"installation": first.json()["id"]},
-        ).one()
-        assert revoked_connection.revoked_at is not None
-        assert revoked_connection.token_ciphertext is None
-        peer_connection = db.execute(
-            text(
-                "SELECT revoked_at, token_ciphertext FROM bitbucket_connections "
-                "WHERE provider_installation_id=:installation"
-            ),
-            {"installation": peer_installation},
-        ).one()
-        assert peer_connection.revoked_at is None
-        assert peer_connection.token_ciphertext is not None
-        assert db.scalar(
-            text("SELECT installation_available FROM repositories WHERE id=:id"),
-            {"id": peer_repository},
-        )
-        assert (
-            db.scalar(
-                text(
-                    "SELECT count(*) FROM repositories "
-                    "WHERE id IN (:first, :second) AND installation_available"
-                ),
-                {"first": unrelated_repositories[0], "second": unrelated_repositories[1]},
-            )
-            == 2
-        )
-        db.execute(
-            text(
-                "UPDATE repository_rules_status SET refresh_requested_at=NULL "
-                "WHERE repository_id=:id"
-            ),
-            {"id": first.json()["repositoryId"]},
-        )
-        db.commit()
-        reconnected = client.post(
-            url,
-            json={
-                "bitbucketWorkspace": "nvdovnar",
-                "repositorySlug": "first-renamed",
-                "repositoryUuid": str(first_uuid),
-                "apiToken": "rotated-token",
-            },
-        )
-        assert reconnected.status_code == 201
-        assert reconnected.json()["id"] == first.json()["id"]
-        assert reconnected.json()["webhook"]["secret"] != first.json()["webhook"]["secret"]
-        assert (
-            db.scalar(
-                text(
-                    "SELECT refresh_requested_at FROM repository_rules_status "
-                    "WHERE repository_id=:id"
-                ),
-                {"id": first.json()["repositoryId"]},
-            )
-            is not None
-        )
-        db.execute(
-            text(
-                "DELETE FROM github_user_workspace_access "
-                "WHERE github_user_id=42 AND workspace_id=:workspace"
-            ),
-            {"workspace": workspace},
-        )
-        db.commit()
-        assert client.get(url).status_code == 404
-        assert (
-            client.post(
-                f"/api/workspaces/{workspace}/bitbucket/discovery",
-                json={"bitbucketWorkspace": "nvdovnar", "apiToken": "shared-token"},
-            ).status_code
-            == 404
-        )
-        assert (
-            client.put(
-                f"{url}/{first.json()['id']}/credential",
-                json={"apiToken": "rotated-token"},
-            ).status_code
-            == 404
-        )
-        assert (
-            client.delete(
-                f"{url}/{first.json()['id']}/repositories/{first.json()['repositoryId']}"
-            ).status_code
-            == 404
-        )
-        assert (
-            client.post(
-                f"{url}/{first.json()['id']}/repositories/"
-                f"{first.json()['repositoryId']}/webhook-secret"
-            ).status_code
-            == 404
-        )
-    finally:
-        app.dependency_overrides.clear()
-        del app.state.reviews_api_resources
-        asyncio.run(provider_http.aclose())
-        asyncio.run(engine.dispose())
-
-
-@pytest.mark.integration
-def test_request_target_is_fenced_after_rotation_and_revocation(
-    bitbucket_connection_schema: Connection,
-) -> None:
-    db = bitbucket_connection_schema
-    command.upgrade(_config(db), "head")
-    workspace, installation, repository_id = uuid4(), uuid4(), uuid4()
-    remote_workspace = UUID("b2d0d95e-1f8d-4990-9fb2-f09f87ae5f60")
-    remote_repo = UUID("3791f4cc-f59a-4412-9a52-f34a7829ba1c")
+    workspace_id, installation_id = uuid4(), uuid4()
     db.execute(
-        text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'test', 7)"),
-        {"id": str(workspace)},
+        text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, :name, 7)"),
+        {"id": workspace_id, "name": str(workspace_id)},
     )
     schema = str(db.scalar(text("SELECT current_schema()")))
     db.commit()
     cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
-    context = CredentialContext(installation, workspace)
 
     async def scenario() -> None:
         database_url = make_url(os.environ["TEST_DATABASE_URL"]).set(
@@ -1229,87 +186,688 @@ def test_request_target_is_fenced_after_rotation_and_revocation(
                 async with AsyncSession(bind=connection) as session:
                     store = SqlAlchemyBitbucketConnectionStore(session)
                     await store.create_connection(
-                        workspace_id=workspace,
-                        installation_id=installation,
-                        bitbucket_workspace_uuid=remote_workspace,
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        bitbucket_workspace_uuid=uuid4(),
                         token=cipher.encrypt(
-                            "original-token", context=context, purpose=CredentialPurpose.TOKEN
+                            "token",
+                            context=CredentialContext(installation_id, workspace_id),
+                            purpose=CredentialPurpose.TOKEN,
                         ),
                     )
-                    external_id = await session.scalar(
-                        select(bitbucket_repository_external_id_seq.next_value())
-                    )
-                    session.add(
-                        Repository(
-                            id=repository_id,
-                            provider_installation_id=installation,
-                            external_id=external_id,
-                            full_name="nvdovnar/test-ai-review",
+                    for name in ("Team/A", "team/a", "team/á", "team/z", "team/B", "TEAM/c"):
+                        await store.bind_repository(
+                            workspace_id=workspace_id,
+                            installation_id=installation_id,
+                            repository_uuid=uuid4(),
+                            full_name=name,
                             default_branch="main",
-                            web_url="https://bitbucket.org/nvdovnar/test-ai-review",
+                            web_url=f"https://bitbucket.org/{name}",
                         )
-                    )
-                    await session.flush()
-                    session.add(
-                        BitbucketRepositoryIdentity(
-                            repository_id=repository_id,
-                            provider_installation_id=installation,
-                            workspace_id=workspace,
-                            repository_external_id=external_id,
-                            repository_uuid=remote_repo,
-                        )
-                    )
-                    session.add(BitbucketRepositoryWebhookSecret(repository_id=repository_id))
                     await session.commit()
-                    reader = SqlAlchemyBitbucketTargetReader(lambda: AsyncSession(bind=connection))
-                    authority = BitbucketRequestCredentials(reader, cipher)
-                    target = await reader.resolve_target(
-                        workspace_id=workspace,
-                        installation_id=installation,
-                        repository_uuid=remote_repo,
-                    )
-                    assert (await authority.credential_for(target)).token == "original-token"
-                    assert not connection.in_transaction()
-                    sent: list[str] = []
-
-                    def provider(request: httpx.Request) -> httpx.Response:
-                        assert not connection.in_transaction()
-                        sent.append(str(request.url))
-                        return httpx.Response(200)
-
-                    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
-                        response = await BitbucketHttpClient(http, authority).get(
-                            target, "/2.0/repositories/nvdovnar/test-ai-review"
+                    expected = (
+                        (
+                            await session.execute(
+                                text("""
+                                SELECT full_name FROM repositories
+                                WHERE workspace_id = :workspace_id
+                                ORDER BY full_name, id
+                            """),
+                                {"workspace_id": workspace_id},
+                            )
                         )
-                        assert response.status_code == 200
-                    assert sent == [
-                        "https://api.bitbucket.org/2.0/repositories/nvdovnar/test-ai-review"
-                    ]
-                    await store.rotate_token(
-                        workspace_id=workspace,
-                        installation_id=installation,
+                        .scalars()
+                        .all()
+                    )
+                    assert expected != sorted(expected)
+                    seen: list[str] = []
+                    after: BindingPosition | None = None
+                    for _ in range(4):
+                        page = await store.list_bindings_page(
+                            workspace_id=workspace_id,
+                            installation_id=None,
+                            after=after,
+                            limit=2,
+                        )
+                        seen.extend(item.full_name for item in page[:2])
+                        if len(page) <= 2:
+                            break
+                        last = page[1]
+                        after = BindingPosition(
+                            workspace_id,
+                            last.installation_id,
+                            last.full_name,
+                            last.repository_id,
+                        )
+                    assert seen == expected
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_binding_pages_break_equal_names_by_repository_id(
+    bitbucket_connection_schema: Connection,
+) -> None:
+    db = bitbucket_connection_schema
+    command.upgrade(_config(db), "head")
+    workspace_id, installation_id = uuid4(), uuid4()
+    db.execute(
+        text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'test', 7)"),
+        {"id": workspace_id},
+    )
+    schema = str(db.scalar(text("SELECT current_schema()")))
+    db.commit()
+    cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
+
+    async def scenario() -> None:
+        engine = create_async_engine(
+            make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql+psycopg_async")
+        )
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text(f'SET search_path TO "{schema}"'))
+                await connection.commit()
+                async with AsyncSession(bind=connection) as session:
+                    store = SqlAlchemyBitbucketConnectionStore(session)
+                    await store.create_connection(
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        bitbucket_workspace_uuid=uuid4(),
                         token=cipher.encrypt(
-                            "rotated-token", context=context, purpose=CredentialPurpose.TOKEN
+                            "token",
+                            context=CredentialContext(installation_id, workspace_id),
+                            purpose=CredentialPurpose.TOKEN,
                         ),
                     )
-                    await session.commit()
-                    with pytest.raises(BitbucketCredentialGenerationChanged):
-                        await authority.credential_for(target)
-                    fresh = await reader.resolve_target(
-                        workspace_id=workspace,
-                        installation_id=installation,
-                        repository_uuid=remote_repo,
+                    duplicate_ids = [
+                        (
+                            await store.bind_repository(
+                                workspace_id=workspace_id,
+                                installation_id=installation_id,
+                                repository_uuid=uuid4(),
+                                full_name="team/same",
+                                default_branch="main",
+                                web_url="https://bitbucket.org/team/same",
+                            )
+                        )[0]
+                        for _ in range(3)
+                    ]
+                    tail_id, _ = await store.bind_repository(
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        repository_uuid=uuid4(),
+                        full_name="team/z",
+                        default_branch="main",
+                        web_url="https://bitbucket.org/team/z",
                     )
-                    assert (await authority.credential_for(fresh)).token == "rotated-token"
-                    assert not connection.in_transaction()
-                    await store.revoke_connection(
-                        workspace_id=workspace, installation_id=installation
+                    await session.commit()
+                    seen: list[UUID] = []
+                    after: BindingPosition | None = None
+                    for _ in range(4):
+                        page = await store.list_bindings_page(
+                            workspace_id=workspace_id,
+                            installation_id=installation_id,
+                            after=after,
+                            limit=1,
+                        )
+                        assert page
+                        seen.append(page[0].repository_id)
+                        after = BindingPosition(
+                            workspace_id,
+                            installation_id,
+                            page[0].full_name,
+                            page[0].repository_id,
+                        )
+                    assert seen == [*sorted(duplicate_ids), tail_id]
+                    assert (
+                        await store.list_bindings_page(
+                            workspace_id=workspace_id,
+                            installation_id=installation_id,
+                            after=after,
+                            limit=1,
+                        )
+                        == ()
+                    )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_webhook_confirmation_lookup_is_scoped_to_one_active_binding(
+    bitbucket_connection_schema: Connection,
+) -> None:
+    db = bitbucket_connection_schema
+    command.upgrade(_config(db), "head")
+    workspace_id, other_workspace_id = uuid4(), uuid4()
+    for tenant in (workspace_id, other_workspace_id):
+        db.execute(
+            text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'test', 7)"),
+            {"id": tenant},
+        )
+    schema = str(db.scalar(text("SELECT current_schema()")))
+    db.commit()
+    installation_id, other_installation_id = uuid4(), uuid4()
+    cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
+
+    async def scenario() -> None:
+        engine = create_async_engine(
+            make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql+psycopg_async")
+        )
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text(f'SET search_path TO "{schema}"'))
+                await connection.commit()
+                async with AsyncSession(bind=connection) as session:
+                    store = SqlAlchemyBitbucketConnectionStore(session)
+                    repository_ids = []
+                    for tenant, installation in (
+                        (workspace_id, installation_id),
+                        (other_workspace_id, other_installation_id),
+                    ):
+                        await store.create_connection(
+                            workspace_id=tenant,
+                            installation_id=installation,
+                            bitbucket_workspace_uuid=uuid4(),
+                            token=cipher.encrypt(
+                                "token",
+                                context=CredentialContext(installation, tenant),
+                                purpose=CredentialPurpose.TOKEN,
+                            ),
+                        )
+                        repository_id, _ = await store.bind_repository(
+                            workspace_id=tenant,
+                            installation_id=installation,
+                            repository_uuid=uuid4(),
+                            full_name="team/same",
+                            default_branch="main",
+                            web_url="https://bitbucket.org/team/same",
+                        )
+                        repository_ids.append(repository_id)
+                    await store.set_repository_webhook_secret(
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        repository_id=repository_ids[0],
+                        secret=cipher.encrypt(
+                            "h" * 40,
+                            context=CredentialContext(
+                                installation_id, workspace_id, repository_ids[0]
+                            ),
+                            purpose=CredentialPurpose.WEBHOOK_SECRET,
+                        ),
+                    )
+                    await session.execute(
+                        text(
+                            "UPDATE bitbucket_repository_webhook_secrets "
+                            "SET confirmed_at=now() WHERE repository_id=:id"
+                        ),
+                        {"id": repository_ids[0]},
                     )
                     await session.commit()
-                    with pytest.raises(BitbucketTargetInactive):
-                        await reader.checkpoint(fresh)
-                    with pytest.raises(BitbucketTargetInactive):
-                        await reader.checkpoint_in_session(session, fresh)
+                    assert await store.is_webhook_confirmed(
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        repository_id=repository_ids[0],
+                    )
+                    for tenant, installation, repository in (
+                        (other_workspace_id, installation_id, repository_ids[0]),
+                        (workspace_id, other_installation_id, repository_ids[0]),
+                        (workspace_id, installation_id, repository_ids[1]),
+                        (other_workspace_id, other_installation_id, repository_ids[1]),
+                    ):
+                        assert not await store.is_webhook_confirmed(
+                            workspace_id=tenant,
+                            installation_id=installation,
+                            repository_id=repository,
+                        )
+                    await store.disconnect_repository(
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        repository_id=repository_ids[0],
+                    )
+                    assert not await store.is_webhook_confirmed(
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        repository_id=repository_ids[0],
+                    )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_binding_pages_are_scoped_and_stable_across_writes(
+    bitbucket_connection_schema: Connection,
+) -> None:
+    db = bitbucket_connection_schema
+    command.upgrade(_config(db), "head")
+    workspace_id, other_workspace_id = uuid4(), uuid4()
+    for identifier in (workspace_id, other_workspace_id):
+        db.execute(
+            text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, :name, 7)"),
+            {"id": identifier, "name": str(identifier)},
+        )
+    schema = str(db.scalar(text("SELECT current_schema()")))
+    db.commit()
+    installation_id, second_installation_id, foreign_installation_id = uuid4(), uuid4(), uuid4()
+    cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
+
+    async def scenario() -> None:
+        database_url = make_url(os.environ["TEST_DATABASE_URL"]).set(
+            drivername="postgresql+psycopg_async"
+        )
+        engine = create_async_engine(database_url)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text(f'SET search_path TO "{schema}"'))
+                await connection.commit()
+                async with AsyncSession(bind=connection) as session:
+                    store = SqlAlchemyBitbucketConnectionStore(session)
+                    for tenant, installation in (
+                        (workspace_id, installation_id),
+                        (workspace_id, second_installation_id),
+                        (other_workspace_id, foreign_installation_id),
+                    ):
+                        await store.create_connection(
+                            workspace_id=tenant,
+                            installation_id=installation,
+                            bitbucket_workspace_uuid=uuid4(),
+                            token=cipher.encrypt(
+                                "token",
+                                context=CredentialContext(installation, tenant),
+                                purpose=CredentialPurpose.TOKEN,
+                            ),
+                        )
+                    for name, tenant, installation in (
+                        ("team/a", workspace_id, installation_id),
+                        ("team/b", workspace_id, second_installation_id),
+                        ("team/c", workspace_id, installation_id),
+                        ("team/d", workspace_id, installation_id),
+                        ("team/private", other_workspace_id, foreign_installation_id),
+                    ):
+                        await store.bind_repository(
+                            workspace_id=tenant,
+                            installation_id=installation,
+                            repository_uuid=uuid4(),
+                            full_name=name,
+                            default_branch="main",
+                            web_url=f"https://bitbucket.org/{name}",
+                        )
+                    await session.commit()
+                    first = await store.list_bindings_page(
+                        workspace_id=workspace_id, installation_id=None, after=None, limit=2
+                    )
+                    assert [item.full_name for item in first] == ["team/a", "team/b", "team/c"]
+                    after = BindingPosition(
+                        workspace_id,
+                        first[1].installation_id,
+                        first[1].full_name,
+                        first[1].repository_id,
+                    )
+                    await store.bind_repository(
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        repository_uuid=uuid4(),
+                        full_name="team/aa",
+                        default_branch="main",
+                        web_url="https://bitbucket.org/team/aa",
+                    )
+                    await store.disconnect_repository(
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        repository_id=first[0].repository_id,
+                    )
+                    second = await store.list_bindings_page(
+                        workspace_id=workspace_id, installation_id=None, after=after, limit=2
+                    )
+                    assert [item.full_name for item in second] == ["team/c", "team/d"]
+                    assert (
+                        await store.list_bindings_page(
+                            workspace_id=workspace_id,
+                            installation_id=None,
+                            after=BindingPosition(
+                                workspace_id,
+                                second[-1].installation_id,
+                                second[-1].full_name,
+                                second[-1].repository_id,
+                            ),
+                            limit=2,
+                        )
+                        == ()
+                    )
+                    scoped = await store.list_bindings_page(
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        after=None,
+                        limit=2,
+                    )
+                    assert [item.full_name for item in scoped] == ["team/aa", "team/c", "team/d"]
+                    with pytest.raises(ValueError, match="invalid_binding_position"):
+                        await store.list_bindings_page(
+                            workspace_id=workspace_id,
+                            installation_id=None,
+                            after=BindingPosition(
+                                other_workspace_id, foreign_installation_id, "team/private", uuid4()
+                            ),
+                            limit=2,
+                        )
+                    with pytest.raises(ValueError, match="invalid_binding_position"):
+                        await store.list_bindings_page(
+                            workspace_id=workspace_id,
+                            installation_id=installation_id,
+                            after=BindingPosition(
+                                workspace_id, second_installation_id, "team/b", uuid4()
+                            ),
+                            limit=2,
+                        )
+                    for invalid_limit in (0, 101):
+                        with pytest.raises(ValueError, match="invalid_binding_position"):
+                            await store.list_bindings_page(
+                                workspace_id=workspace_id,
+                                installation_id=None,
+                                after=None,
+                                limit=invalid_limit,
+                            )
+                    other_provider_installation = uuid4()
+                    await session.execute(
+                        text("""
+                            INSERT INTO provider_installations
+                                (id, workspace_id, provider, external_id, "metadata")
+                            VALUES (:id, :workspace_id, 'github', 900001, '{}'::jsonb)
+                        """),
+                        {"id": other_provider_installation, "workspace_id": workspace_id},
+                    )
+                    await session.execute(
+                        text("""
+                            INSERT INTO repositories
+                                (id, provider_installation_id, workspace_id, external_id,
+                                 full_name, default_branch, web_url)
+                            VALUES (:id, :installation_id, :workspace_id, 900001,
+                                    'team/bb', 'main', 'https://example.test/team/bb')
+                        """),
+                        {
+                            "id": uuid4(),
+                            "installation_id": other_provider_installation,
+                            "workspace_id": workspace_id,
+                        },
+                    )
+                    page_past_non_bitbucket = await store.list_bindings_page(
+                        workspace_id=workspace_id, installation_id=None, after=None, limit=2
+                    )
+                    assert [item.full_name for item in page_past_non_bitbucket] == [
+                        "team/aa",
+                        "team/b",
+                        "team/c",
+                    ]
+                    for index in range(101):
+                        await store.bind_repository(
+                            workspace_id=workspace_id,
+                            installation_id=installation_id,
+                            repository_uuid=uuid4(),
+                            full_name=f"batch/{index:03}",
+                            default_branch="main",
+                            web_url=f"https://bitbucket.org/batch/{index:03}",
+                        )
+                    page_statements: list[str] = []
+                    page_limits: list[int] = []
+
+                    def capture_page(
+                        _connection: Connection,
+                        _cursor: object,
+                        statement: str,
+                        parameters: object,
+                        _context: object,
+                        _executemany: bool,
+                    ) -> None:
+                        if "FROM repositories" in statement and "LIMIT" in statement.upper():
+                            page_statements.append(statement)
+                            assert isinstance(parameters, Mapping)
+                            page_limits.extend(
+                                value for value in parameters.values() if value == 101
+                            )
+
+                    event.listen(engine.sync_engine, "before_cursor_execute", capture_page)
+                    try:
+                        all_scoped = await store.list_bindings(
+                            workspace_id=workspace_id, installation_id=installation_id
+                        )
+                    finally:
+                        event.remove(engine.sync_engine, "before_cursor_execute", capture_page)
+                    assert len(all_scoped) == 104
+                    assert [item.full_name for item in all_scoped[:2]] == ["batch/000", "batch/001"]
+                    assert all(item.installation_id == installation_id for item in all_scoped)
+                    assert len(page_statements) == 2
+                    assert all("LIMIT" in statement.upper() for statement in page_statements)
+                    assert page_limits == [101, 101]
+                    await session.commit()
+                    renamed_id = next(
+                        item.repository_id for item in all_scoped if item.full_name == "batch/099"
+                    )
+                    renamed = False
+
+                    def rename_before_details(
+                        _connection: Connection,
+                        _cursor: object,
+                        statement: str,
+                        _parameters: object,
+                        _context: object,
+                        _executemany: bool,
+                    ) -> None:
+                        nonlocal renamed
+                        if renamed or "FROM bitbucket_repository_identities" not in statement:
+                            return
+                        renamed = True
+                        db.execute(
+                            text("UPDATE repositories SET full_name='batch/zzz' WHERE id=:id"),
+                            {"id": renamed_id},
+                        )
+                        db.commit()
+
+                    event.listen(engine.sync_engine, "before_cursor_execute", rename_before_details)
+                    try:
+                        after_rename = await store.list_bindings(
+                            workspace_id=workspace_id, installation_id=installation_id
+                        )
+                    finally:
+                        event.remove(
+                            engine.sync_engine, "before_cursor_execute", rename_before_details
+                        )
+                    assert renamed
+                    assert len(after_rename) == len(all_scoped)
+                    assert {item.repository_id for item in after_rename} == {
+                        item.repository_id for item in all_scoped
+                    }
+                    renamed_binding = next(
+                        item for item in after_rename if item.repository_id == renamed_id
+                    )
+                    assert renamed_binding.full_name == "batch/zzz"
+                    assert renamed_binding.position_full_name == "batch/099"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_large_binding_pages_use_scoped_ordered_indexes(
+    bitbucket_connection_schema: Connection,
+) -> None:
+    db = bitbucket_connection_schema
+    command.upgrade(_config(db), "head")
+    workspace_id, foreign_workspace_id = uuid4(), uuid4()
+    installation_id, second_installation_id, foreign_installation_id = uuid4(), uuid4(), uuid4()
+    for tenant in (workspace_id, foreign_workspace_id):
+        db.execute(
+            text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, :name, 7)"),
+            {"id": tenant, "name": str(tenant)},
+        )
+    schema = str(db.scalar(text("SELECT current_schema()")))
+    db.commit()
+    cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
+
+    async def scenario() -> None:
+        database_url = make_url(os.environ["TEST_DATABASE_URL"]).set(
+            drivername="postgresql+psycopg_async"
+        )
+        engine = create_async_engine(database_url)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text(f'SET search_path TO "{schema}"'))
+                await connection.commit()
+                async with AsyncSession(bind=connection) as session:
+                    store = SqlAlchemyBitbucketConnectionStore(session)
+                    for tenant, owned_installation in (
+                        (workspace_id, installation_id),
+                        (workspace_id, second_installation_id),
+                        (foreign_workspace_id, foreign_installation_id),
+                    ):
+                        await store.create_connection(
+                            workspace_id=tenant,
+                            installation_id=owned_installation,
+                            bitbucket_workspace_uuid=uuid4(),
+                            token=cipher.encrypt(
+                                "token",
+                                context=CredentialContext(owned_installation, tenant),
+                                purpose=CredentialPurpose.TOKEN,
+                            ),
+                        )
+                    await session.execute(
+                        text("""
+                            INSERT INTO repositories
+                                (id, provider_installation_id, workspace_id, external_id,
+                                 full_name, default_branch, web_url)
+                            SELECT md5('repository-' || number::text)::uuid,
+                                   CASE WHEN number >= 6000 THEN :foreign_installation_id
+                                       WHEN number % 2 = 0 THEN :installation_id
+                                       ELSE :second_installation_id END,
+                                   CASE WHEN number >= 6000 THEN :foreign_workspace_id
+                                       ELSE :workspace_id END,
+                                   nextval('bitbucket_repository_external_id_seq'),
+                                   'large/' || lpad((number % 6000)::text, 4, '0'),
+                                   'main', 'https://bitbucket.org/large/' || number::text
+                            FROM generate_series(0, 11999) AS number
+                        """),
+                        {
+                            "installation_id": installation_id,
+                            "second_installation_id": second_installation_id,
+                            "foreign_installation_id": foreign_installation_id,
+                            "workspace_id": workspace_id,
+                            "foreign_workspace_id": foreign_workspace_id,
+                        },
+                    )
+                    await session.execute(
+                        text("""
+                            INSERT INTO bitbucket_repository_identities
+                                (repository_id, provider_installation_id, workspace_id,
+                                 repository_external_id, repository_uuid)
+                            SELECT id, provider_installation_id, workspace_id, external_id,
+                                   md5('remote-' || full_name)::uuid
+                            FROM repositories
+                            WHERE provider_installation_id IN
+                                (:installation_id, :second_installation_id,
+                                 :foreign_installation_id)
+                        """),
+                        {
+                            "installation_id": installation_id,
+                            "second_installation_id": second_installation_id,
+                            "foreign_installation_id": foreign_installation_id,
+                        },
+                    )
+                    await session.execute(
+                        text("""
+                            INSERT INTO bitbucket_repository_webhook_secrets (repository_id)
+                            SELECT id FROM repositories
+                            WHERE provider_installation_id IN
+                                (:installation_id, :second_installation_id,
+                                 :foreign_installation_id)
+                        """),
+                        {
+                            "installation_id": installation_id,
+                            "second_installation_id": second_installation_id,
+                            "foreign_installation_id": foreign_installation_id,
+                        },
+                    )
+                    for table_name in (
+                        "repositories",
+                        "bitbucket_repository_identities",
+                        "bitbucket_repository_webhook_secrets",
+                    ):
+                        await session.execute(text(f"ANALYZE {table_name}"))
+                    deep_id = await session.scalar(
+                        text("""
+                            SELECT id FROM repositories
+                            WHERE workspace_id = :workspace_id AND full_name = 'large/2500'
+                        """),
+                        {"workspace_id": workspace_id},
+                    )
+                    assert isinstance(deep_id, UUID)
+                    captured: list[tuple[str, object]] = []
+
+                    def capture_page(
+                        _connection: Connection,
+                        _cursor: object,
+                        statement: str,
+                        parameters: object,
+                        _context: object,
+                        _executemany: bool,
+                    ) -> None:
+                        if "FROM repositories" in statement and "LIMIT" in statement.upper():
+                            captured.append((statement, parameters))
+
+                    for scope_id, first_name, index_names in (
+                        (
+                            installation_id,
+                            "large/2502",
+                            (
+                                "ix_repositories_available_installation_name_id",
+                                "ix_repositories_available_workspace_name_id",
+                            ),
+                        ),
+                        (None, "large/2501", ("ix_repositories_available_workspace_name_id",)),
+                    ):
+                        captured.clear()
+                        event.listen(engine.sync_engine, "before_cursor_execute", capture_page)
+                        try:
+                            page = await store.list_bindings_page(
+                                workspace_id=workspace_id,
+                                installation_id=scope_id,
+                                after=BindingPosition(
+                                    workspace_id, installation_id, "large/2500", deep_id
+                                ),
+                                limit=100,
+                            )
+                        finally:
+                            event.remove(engine.sync_engine, "before_cursor_execute", capture_page)
+                        assert len(page) == 101
+                        assert page[0].full_name == first_name
+                        assert all(
+                            item.installation_id in (installation_id, second_installation_id)
+                            for item in page
+                        )
+                        assert len(captured) == 1
+                        sql, parameters = captured[0]
+                        explained = await connection.exec_driver_sql(
+                            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql,
+                            cast(Any, parameters),
+                        )
+                        plan = explained.scalar_one()[0]["Plan"]
+                        nodes = [plan]
+                        for node in nodes:
+                            nodes.extend(node.get("Plans", []))
+                        assert any(node.get("Index Name") in index_names for node in nodes), plan
+                        assert all(node["Node Type"] != "Sort" for node in nodes), plan
+                        assert any(
+                            "ROW(" in node.get("Index Cond", "")
+                            and "full_name" in node["Index Cond"]
+                            for node in nodes
+                        ), plan
+                        assert (
+                            sum(node.get("Rows Removed by Filter", 0) for node in nodes) <= 101
+                        ), plan
         finally:
             await engine.dispose()
 

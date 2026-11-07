@@ -10,6 +10,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 import pytest
+from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, inspect, text
 from sqlalchemy.exc import IntegrityError
 
@@ -71,6 +72,7 @@ _COLUMNS = {
         "exclusions_digest": ("varchar", True, 64),
         "stored_bytes": ("int8", False, None),
         "pending_bytes": ("int8", False, None),
+        "raw_checkpoint_bytes": ("int8", False, None),
         "wake_requested_at": ("timestamptz", True, None),
         "review_full_requested_at": ("timestamptz", True, None),
         "review_full_requested_sha": ("varchar", True, 64),
@@ -145,6 +147,7 @@ _CHECKS = {
         "ck_code_index_states_failed_code",
         "ck_code_index_states_wake_live",
         "ck_code_index_states_review_full_sha_at",
+        "ck_code_index_states_raw_checkpoint_bytes",
     },
     "code_index_files": set(),
     "code_index_symbols": {"ck_code_index_symbols_lines"},
@@ -642,7 +645,9 @@ def test_a_migration_adds_its_columns_and_its_downgrade_drops_them_but_keeps_the
     command.upgrade(config, "head")
     assert tuple(connection.execute(text(probe)).one()) == added
     assert tuple(connection.execute(text(restored)).one()) == values
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0052"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+        ScriptDirectory.from_config(config).get_current_head()
+    )
 
 
 @pytest.mark.integration
@@ -667,7 +672,9 @@ def test_downgrade_drops_index_tables_and_types_and_upgrade_restores_them(
         "code_index_edge_kind",
         "code_index_import_resolution",
     }
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0052"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+        ScriptDirectory.from_config(config).get_current_head()
+    )
 
 
 # ADR 0001 §7: only a limit or an unsafe archive fails an index.
@@ -749,12 +756,13 @@ def test_downgrade_to_0033_drops_the_indexer_columns_and_upgrade_resets_profiles
     config = _migration_config(connection)
     head_columns = set(_COLUMNS["code_index_states"])
     # 0034 adds the indexer columns; 0037 (#143) adds the wake-up marker; 0038 (#144) adds
-    # the review full-build throttle.
+    # the review full-build throttle; 0058 (#360) adds raw checkpoint accounting.
     new_columns = {
         "indexed_default_branch",
         "exclusions_digest",
         "stored_bytes",
         "pending_bytes",
+        "raw_checkpoint_bytes",
         "wake_requested_at",
         "review_full_requested_at",
         "review_full_requested_sha",
@@ -798,4 +806,6 @@ def test_downgrade_to_0033_drops_the_indexer_columns_and_upgrade_resets_profiles
         )
     ).one() == ("ready", C1, *(None,) * 6, 0, 0)
     assert _state_schema(connection) == (head_columns, _CHECKS["code_index_states"], _STATE_INDEXES)
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0052"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+        ScriptDirectory.from_config(config).get_current_head()
+    )

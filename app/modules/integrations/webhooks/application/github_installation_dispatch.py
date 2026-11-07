@@ -61,6 +61,11 @@ class InstallationDeliveryDispatchStatus(StrEnum):
     PROCESSED_CI = "processed_ci"
     DEFERRED_REPOSITORY_DETAILS = "deferred_repository_details"
     DEFERRED_RUN_TRIGGER = "deferred_run_trigger"
+    CONTINUING_PUSH = "continuing_push"
+    WAITING_PUSH_CANDIDATE = "waiting_push_candidate"
+    WAITING_PUSH_PROVIDER = "waiting_push_provider"
+    FAILED_PUSH_CANDIDATES = "failed_push_candidates"
+    FAILED_PUSH_PROVIDER = "failed_push_provider"
     REQUESTED_RULES_REFRESH = "requested_rules_refresh"
 
 

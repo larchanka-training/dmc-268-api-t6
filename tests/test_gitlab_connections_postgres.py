@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import CheckConstraint, Connection, create_engine, inspect, text
 from sqlalchemy.schema import CreateSchema, DropSchema
 
@@ -413,17 +414,22 @@ def test_empty_gitlab_migration_round_trips_preserving_github_receipts_and_setti
         for table in tables
     }
     connection.commit()
+    heads = ScriptDirectory.from_config(config).get_heads()
+    assert len(heads) == 1
     for _ in range(2):
         command.upgrade(config, "head")
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0052"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == heads[0]
         for table in tables:
             after = connection.execute(text(f"SELECT to_jsonb(t) FROM {table} t")).scalar_one()
+            if table == "repositories":
+                assert after.pop("workspace_id") is None
             if table == "webhook_events":
                 assert after.pop("provider") == "github"
                 assert after.pop("gitlab_connection_id") is None
                 assert after.pop("bitbucket_repository_id") is None
                 assert after.pop("bitbucket_binding_generation") is None
                 assert after.pop("bitbucket_webhook_generation") is None
+                assert after.pop("bitbucket_push_after_pr_number") is None
             assert after == before[table]
         # Alembic does not compare CHECK constraints: retain explicit physical and
         # metadata names; the adversarial tests above exercise their SQL semantics.
@@ -443,6 +449,7 @@ def test_empty_gitlab_migration_round_trips_preserving_github_receipts_and_setti
                 "ck_webhook_events_payload_present",
                 "ck_webhook_events_projection_claim_pair",
                 "ck_webhook_events_projection_attempt_count_nonnegative",
+                "ck_webhook_events_bitbucket_push_position",
             },
         }
         for table, expected in expected_checks.items():
@@ -521,6 +528,8 @@ def test_downgrade_refuses_to_silently_delete_retired_gitlab_configuration(
 ) -> None:
     connection = gitlab_schema
     config = _config(connection)
+    heads = ScriptDirectory.from_config(config).get_heads()
+    assert len(heads) == 1
     command.upgrade(config, "head")
     workspace, installation = _installation(connection)
     _connection(connection, workspace, installation)
@@ -535,7 +544,7 @@ def test_downgrade_refuses_to_silently_delete_retired_gitlab_configuration(
     with pytest.raises(RuntimeError, match="configuration and receipts"):
         command.downgrade(config, "20261026_0041")
     connection.rollback()
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0052"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == heads[0]
     assert connection.scalar(text("SELECT count(*) FROM gitlab_connections")) == 1
     connection.execute(text("DELETE FROM webhook_events WHERE id=:id"), {"id": receipt})
     connection.commit()

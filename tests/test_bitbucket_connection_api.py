@@ -26,9 +26,11 @@ from app.modules.integrations.bitbucket.api.connections import (
 )
 from app.modules.integrations.bitbucket.application.manage_connection import (
     BitbucketCredentialCodec,
+    BitbucketManagementError,
     BitbucketManagementStore,
     BitbucketManagementUnitOfWork,
     BitbucketRepositoryProvider,
+    BitbucketRotationProbeError,
     ManageBitbucketConnection,
 )
 from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
@@ -189,8 +191,11 @@ class _MissingManagementStore(_MembershipOnlyStore):
         self.connection_lookups += 1
         return None
 
-    async def list_bindings(self, *, workspace_id: UUID) -> tuple[()]:
+    async def list_bindings(
+        self, *, workspace_id: UUID, installation_id: UUID | None = None
+    ) -> tuple[()]:
         assert workspace_id == WORKSPACE
+        assert installation_id == REPOSITORY
         return ()
 
     async def set_repository_webhook_secret(
@@ -701,6 +706,51 @@ def test_discovery_propagates_sanitized_retry_after() -> None:
     assert response.status_code == 429
     assert response.headers["Retry-After"] == "37"
     assert response.json()["detail"] == "provider_rate_limited"
+
+
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        (BitbucketRotationProbeError("repository_inaccessible", repository_uuid=REPOSITORY), 422),
+        (
+            BitbucketRotationProbeError(
+                "provider_rate_limited", repository_uuid=REPOSITORY, retry_after=37
+            ),
+            429,
+        ),
+        (BitbucketRotationProbeError("provider_unavailable", repository_uuid=REPOSITORY), 502),
+        (BitbucketRotationProbeError("provider_unavailable", repository_uuid=None), 502),
+        (BitbucketManagementError("repository_uuid_conflict", repository_uuid=REPOSITORY), 409),
+    ],
+)
+def test_rotation_failure_reports_only_safe_code_and_optional_repository_uuid(
+    error: BitbucketManagementError | BitbucketRotationProbeError, status: int
+) -> None:
+    class FailingManager:
+        async def rotate_token(self, **_kwargs: object) -> None:
+            raise error
+
+    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (WORKSPACE,))
+    app.dependency_overrides[get_bitbucket_workspace_scope] = lambda: AuthScope(42, (WORKSPACE,))
+    app.dependency_overrides[get_bitbucket_management] = lambda: FailingManager()
+    try:
+        response = TestClient(app).put(
+            f"/api/workspaces/{WORKSPACE}/bitbucket/connections/{REPOSITORY}/credential",
+            json={"apiToken": "private-token"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == status
+    assert response.json() == {"detail": error.code}
+    if error.repository_uuid is None:
+        assert "X-Bitbucket-Repository-UUID" not in response.headers
+    else:
+        assert response.headers["X-Bitbucket-Repository-UUID"] == str(REPOSITORY)
+    if status == 429:
+        assert response.headers["Retry-After"] == "37"
+    assert "private-token" not in response.text
+    assert "bitbucket.org" not in response.text
 
 
 def test_bitbucket_connection_list_shows_per_repository_webhook_confirmation() -> None:

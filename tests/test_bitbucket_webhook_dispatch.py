@@ -5,19 +5,35 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import UUID
 
+import pytest
+
 from app.modules.integrations.bitbucket.api.dispatch import BitbucketWebhookDispatchAdapter
+from app.modules.integrations.bitbucket.application.provider_error import BitbucketProviderError
 from app.modules.integrations.bitbucket.application.request_credentials import (
     BitbucketBindingGenerationChanged,
     BitbucketCredentialGenerationChanged,
 )
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    InstallationDeliveryDispatchResult,
+)
+from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     InstallationDeliveryDispatchStatus as Status,
 )
-from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
+from app.modules.integrations.webhooks.application.receive_github_delivery import (
+    GitHubWebhookReceiptUnitOfWork,
+    ReceiveWebhookDelivery,
+    WebhookDispatchRetry,
+    WebhookReceipt,
+)
 from app.modules.reviews.application.project_bitbucket_pull_request import (
     BitbucketPullRequestUntrackedClosed,
+    BitbucketPushCandidatesFailed,
+    BitbucketPushContinuationPending,
+    BitbucketPushRetryPending,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult, EnqueueStatus
 
@@ -42,7 +58,9 @@ def receipt(event: str, payload: dict[str, object]) -> WebhookReceipt:
 @dataclass
 class Handler:
     pull_requests: list[tuple[UUID, UUID, UUID, int, int, int]] = field(default_factory=list)
-    pushes: list[tuple[UUID, UUID, UUID, frozenset[str], int, int]] = field(default_factory=list)
+    pushes: list[tuple[UUID, UUID, UUID, frozenset[str], int, int, str]] = field(
+        default_factory=list
+    )
 
     async def pull_request(
         self,
@@ -73,6 +91,7 @@ class Handler:
         branches: frozenset[str],
         binding_generation: int,
         webhook_generation: int,
+        delivery_id: str,
     ) -> tuple[EnqueueResult, ...]:
         self.pushes.append(
             (
@@ -82,6 +101,7 @@ class Handler:
                 branches,
                 binding_generation,
                 webhook_generation,
+                delivery_id,
             )
         )
         return ()
@@ -115,9 +135,81 @@ def test_dispatches_pr_and_relevant_branch_push_with_bound_origin() -> None:
             )
         )
         assert push.status == Status.PROJECTED_PR
-        assert handler.pushes == [(INSTALLATION, REPOSITORY, REMOTE, frozenset({"feature"}), 2, 3)]
+        assert handler.pushes == [
+            (
+                INSTALLATION,
+                REPOSITORY,
+                REMOTE,
+                frozenset({"feature"}),
+                2,
+                3,
+                receipt("repo:push", {}).delivery_id,
+            )
+        ]
 
     asyncio.run(scenario())
+
+
+def test_push_page_requests_another_worker_pass() -> None:
+    class ContinuingHandler(Handler):
+        async def push(
+            self,
+            installation_id: UUID,
+            repository_id: UUID,
+            repository_uuid: UUID,
+            branches: frozenset[str],
+            binding_generation: int,
+            webhook_generation: int,
+            delivery_id: str,
+        ) -> tuple[EnqueueResult, ...]:
+            raise BitbucketPushContinuationPending()
+
+    result = asyncio.run(
+        BitbucketWebhookDispatchAdapter(ContinuingHandler()).execute(
+            receipt("repo:push", {"push": {"changes": [{"new": {"type": "branch", "name": "x"}}]}})
+        )
+    )
+    assert result.status == Status.CONTINUING_PUSH
+
+    class WaitingHandler(ContinuingHandler):
+        async def push(
+            self,
+            installation_id: UUID,
+            repository_id: UUID,
+            repository_uuid: UUID,
+            branches: frozenset[str],
+            binding_generation: int,
+            webhook_generation: int,
+            delivery_id: str,
+        ) -> tuple[EnqueueResult, ...]:
+            raise BitbucketPushRetryPending()
+
+    waiting = asyncio.run(
+        BitbucketWebhookDispatchAdapter(WaitingHandler()).execute(
+            receipt("repo:push", {"push": {"changes": [{"new": {"type": "branch", "name": "x"}}]}})
+        )
+    )
+    assert waiting.status == Status.WAITING_PUSH_CANDIDATE
+
+    class FailedHandler(ContinuingHandler):
+        async def push(
+            self,
+            installation_id: UUID,
+            repository_id: UUID,
+            repository_uuid: UUID,
+            branches: frozenset[str],
+            binding_generation: int,
+            webhook_generation: int,
+            delivery_id: str,
+        ) -> tuple[EnqueueResult, ...]:
+            raise BitbucketPushCandidatesFailed()
+
+    failed = asyncio.run(
+        BitbucketWebhookDispatchAdapter(FailedHandler()).execute(
+            receipt("repo:push", {"push": {"changes": [{"new": {"type": "branch", "name": "x"}}]}})
+        )
+    )
+    assert failed.status == Status.FAILED_PUSH_CANDIDATES
 
 
 def test_dispatch_rejects_invalid_identity_and_ignores_unrelated_event() -> None:
@@ -160,6 +252,7 @@ def test_token_rotation_defers_receipt_but_binding_change_is_inactive() -> None:
         handler.failure = BitbucketBindingGenerationChanged()
         rebound = await adapter.execute(delivery)
         assert rebound.status == Status.IGNORED_IRRELEVANT_EVENT
+        assert rebound.detail == "binding_generation_changed"
         handler.failure = BitbucketPullRequestUntrackedClosed()
         untracked_close = await adapter.execute(delivery)
         assert untracked_close.status == Status.IGNORED_IRRELEVANT_EVENT
@@ -169,3 +262,133 @@ def test_token_rotation_defers_receipt_but_binding_change_is_inactive() -> None:
         assert stale.status == Status.DEFERRED_KNOWN_EVENT
 
     asyncio.run(scenario())
+
+
+def test_push_rate_limit_preserves_provider_retry_delay() -> None:
+    class RateLimitedHandler(Handler):
+        async def push(
+            self,
+            installation_id: UUID,
+            repository_id: UUID,
+            repository_uuid: UUID,
+            branches: frozenset[str],
+            binding_generation: int,
+            webhook_generation: int,
+            delivery_id: str,
+        ) -> tuple[EnqueueResult, ...]:
+            raise BitbucketProviderError("provider_rate_limited", retry_after=3600)
+
+    async def scenario() -> None:
+        with pytest.raises(WebhookDispatchRetry) as error:
+            await BitbucketWebhookDispatchAdapter(RateLimitedHandler()).execute(
+                receipt(
+                    "repo:push",
+                    {"push": {"changes": [{"new": {"type": "branch", "name": "feature"}}]}},
+                )
+            )
+        assert error.value.delay_seconds == 3600
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("dispatch_result", "expected_delay", "expired"),
+    [
+        (WebhookDispatchRetry(120), timedelta(seconds=120), False),
+        (WebhookDispatchRetry(3600), timedelta(hours=1), False),
+        (WebhookDispatchRetry(30), timedelta(seconds=30), True),
+        (InstallationDeliveryDispatchResult(Status.CONTINUING_PUSH), timedelta(0), False),
+    ],
+)
+def test_push_retry_keeps_receipt_attempts_and_due_time(
+    dispatch_result: WebhookDispatchRetry | InstallationDeliveryDispatchResult,
+    expected_delay: timedelta,
+    expired: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 11, 4, tzinfo=UTC)
+    delivery = receipt(
+        "repo:push", {"push": {"changes": [{"new": {"type": "branch", "name": "feature"}}]}}
+    )
+
+    class ReceiptStore:
+        retry_at: datetime | None = None
+        failure_releases = 0
+        provider_retries = 0
+
+        async def pending_ids(self, at: datetime, limit: int) -> tuple[str, ...]:
+            assert at == now and limit == 1
+            return (delivery.delivery_id,)
+
+        async def claim(
+            self, delivery_id: str, token: UUID, at: datetime, until: datetime
+        ) -> WebhookReceipt:
+            assert delivery_id == delivery.delivery_id and at == now
+            assert until == now + timedelta(minutes=5)
+            return delivery
+
+        async def retry_push_continuation(
+            self, delivery_id: str, token: UUID, retry_after: datetime
+        ) -> None:
+            assert delivery_id == delivery.delivery_id
+            self.retry_at = retry_after
+
+        async def retry_push_provider(
+            self,
+            delivery_id: str,
+            token: UUID,
+            retry_after: datetime,
+            *,
+            now: datetime,
+            received_before: datetime,
+        ) -> bool:
+            assert delivery_id == delivery.delivery_id
+            assert now == datetime(2026, 11, 4, tzinfo=UTC)
+            assert received_before == datetime(2026, 11, 3, 18, tzinfo=UTC)
+            self.provider_retries += 1
+            self.retry_at = retry_after
+            return expired
+
+        async def release_after_dispatch_failure(self, *_: object) -> bool:
+            self.failure_releases += 1
+            return False
+
+    class Uow:
+        def __init__(self, receipts: ReceiptStore) -> None:
+            self.receipts = receipts
+
+        async def __aenter__(self) -> Uow:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            pass
+
+        async def commit(self) -> None:
+            pass
+
+    class Dispatcher:
+        async def execute(self, claimed: WebhookReceipt) -> InstallationDeliveryDispatchResult:
+            assert claimed == delivery
+            if isinstance(dispatch_result, WebhookDispatchRetry):
+                raise dispatch_result
+            return dispatch_result
+
+    async def scenario() -> None:
+        store = ReceiptStore()
+        receiver = ReceiveWebhookDelivery(
+            provider="bitbucket",
+            uow_factory=lambda: cast(GitHubWebhookReceiptUnitOfWork, Uow(store)),
+            dispatcher=Dispatcher(),
+            now=lambda: now,
+        )
+        result = await receiver.replay_batch(limit=1)
+        assert (result.handled_count, result.error_count) == (1, 0)
+        assert store.retry_at == now + expected_delay
+        assert store.failure_releases == 0
+        assert store.provider_retries == int(isinstance(dispatch_result, WebhookDispatchRetry))
+
+    asyncio.run(scenario())
+    assert (
+        any("reason=provider_retry_expired" in record.message for record in caplog.records)
+        is expired
+    )

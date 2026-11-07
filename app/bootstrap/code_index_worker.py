@@ -64,6 +64,12 @@ from app.modules.code_index.infrastructure.amqp import (
 )
 from app.modules.code_index.infrastructure.bitbucket_snapshot_source import (
     BitbucketRepositorySnapshotSource,
+    BitbucketSourceBudgets,
+)
+from app.modules.code_index.infrastructure.bitbucket_tree_checkpoint import (
+    SqlAlchemyBitbucketPublishedManifest,
+    SqlAlchemyBitbucketRawCheckpoint,
+    SqlAlchemyBitbucketTreeCheckpoint,
 )
 from app.modules.code_index.infrastructure.github_snapshot_source import (
     GitHubRepositorySnapshotSource,
@@ -141,6 +147,12 @@ class CodeIndexSettings:
     max_symbols: int = 500_000
     max_edges: int = 2_000_000
     max_incremental_files: int = 500
+    bitbucket_listing_requests: int = 512
+    bitbucket_metadata_requests: int = 2_048
+    bitbucket_raw_requests: int = 2_048
+    bitbucket_entries: int = 100_000
+    bitbucket_read_bytes: int = 104_857_600
+    bitbucket_deadline_seconds: int = 600
     max_repository_storage_bytes: int = 536_870_912
     max_workspace_storage_bytes: int = 2_147_483_648
     ttl_days: int = 30
@@ -213,6 +225,17 @@ class CodeIndexSettings:
             edges=self.max_edges,
             deadline_seconds=self.deadline_seconds,
             incremental_files=self.max_incremental_files,
+        )
+
+    @property
+    def bitbucket_budgets(self) -> BitbucketSourceBudgets:
+        return BitbucketSourceBudgets(
+            listing_requests=self.bitbucket_listing_requests,
+            metadata_requests=self.bitbucket_metadata_requests,
+            raw_requests=self.bitbucket_raw_requests,
+            entries=self.bitbucket_entries,
+            read_bytes=self.bitbucket_read_bytes,
+            deadline_seconds=self.bitbucket_deadline_seconds,
         )
 
     @property
@@ -456,6 +479,9 @@ async def index_consumer(
         if bitbucket_cipher is not None:
             reader = SqlAlchemyBitbucketTargetReader(session_factory)
             credentials = BitbucketRequestCredentials(reader, bitbucket_cipher)
+            checkpoint = SqlAlchemyBitbucketTreeCheckpoint(session_factory)
+            raw_checkpoint = SqlAlchemyBitbucketRawCheckpoint(session_factory)
+            published_manifest = SqlAlchemyBitbucketPublishedManifest(session_factory)
 
             def bitbucket_factory(repository: IndexedRepository) -> RepositorySnapshotSource:
                 return BitbucketRepositorySnapshotSource(
@@ -465,6 +491,10 @@ async def index_consumer(
                     ),
                     credentials=credentials,
                     limits=code_index.limits,
+                    budgets=code_index.bitbucket_budgets,
+                    checkpoint=checkpoint,
+                    raw_checkpoint=raw_checkpoint,
+                    published_manifest=published_manifest,
                 )
 
         def reconcile_sources() -> Callable[[IndexedRepository], RepositorySnapshotSource]:

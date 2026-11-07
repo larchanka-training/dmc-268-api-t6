@@ -79,12 +79,28 @@ class Repository(Base):
             "id", "provider_installation_id", "external_id", name="uq_repositories_owner"
         ),
         CheckConstraint("max_comments > 0", name="ck_repositories_max_comments_positive"),
+        Index(
+            "ix_repositories_available_installation_name_id",
+            "provider_installation_id",
+            "full_name",
+            "id",
+            postgresql_where=text("installation_available IS true"),
+        ),
+        Index(
+            "ix_repositories_available_workspace_name_id",
+            "workspace_id",
+            "full_name",
+            "id",
+            postgresql_where=text("installation_available IS true AND workspace_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     provider_installation_id: Mapped[UUID] = mapped_column(
         ForeignKey("provider_installations.id"), nullable=False
     )
+    # Bitbucket binding pages use the tenant key alongside the sortable repository name.
+    workspace_id: Mapped[UUID | None] = mapped_column(ForeignKey("workspaces.id"), nullable=True)
     external_id: Mapped[int] = mapped_column(BIGINT, nullable=False)
     full_name: Mapped[str] = mapped_column(String(REPOSITORY_FULL_NAME_MAX_LENGTH), nullable=False)
     default_branch: Mapped[str] = mapped_column(String(255), nullable=False)

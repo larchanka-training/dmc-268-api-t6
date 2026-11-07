@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
+import logging
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -12,6 +14,7 @@ from uuid import UUID, uuid4
 
 from app.common.application.unit_of_work import UnitOfWork
 from app.modules.auth.application.scope import AuthScope
+from app.modules.integrations.bitbucket.application.provider_error import BitbucketProviderError
 from app.modules.repositories.application.onboard_repository import (
     DefaultRuleSet,
     OnboardRepository,
@@ -20,9 +23,23 @@ from app.modules.repositories.application.onboard_repository import (
 
 
 class BitbucketManagementError(ValueError):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, repository_uuid: UUID | None = None) -> None:
         self.code = code
+        self.repository_uuid = repository_uuid
         super().__init__(code)
+
+
+class BitbucketRotationProbeError(BitbucketProviderError):
+    def __init__(
+        self, code: str, *, repository_uuid: UUID | None, retry_after: int | None = None
+    ) -> None:
+        self.repository_uuid = repository_uuid
+        super().__init__(code, retry_after=retry_after)
+
+
+_ROTATION_DEADLINE_SECONDS = 30
+_ROTATION_PROBE_CONCURRENCY = 4
+_LOGGER = logging.getLogger(__name__)
 
 
 class EncryptedCredentialLike(Protocol):
@@ -52,6 +69,7 @@ class RepositoryBinding:
     credential_generation: int
     binding_generation: int
     confirmed_at: datetime | None
+    position_full_name: str | None = field(default=None, repr=False, compare=False)
 
     @property
     def workspace_slug(self) -> str:
@@ -64,6 +82,14 @@ class RepositoryBinding:
     @property
     def status(self) -> Literal["awaiting_webhook", "active"]:
         return "active" if self.confirmed_at is not None else "awaiting_webhook"
+
+
+@dataclass(frozen=True)
+class BindingPosition:
+    workspace_id: UUID
+    installation_id: UUID
+    full_name: str
+    repository_id: UUID
 
 
 @dataclass(frozen=True)
@@ -225,7 +251,13 @@ class BitbucketManagementStore(RepositoryRuleVersionStore, Protocol):
         secret: EncryptedCredentialLike,
     ) -> int: ...
 
-    async def list_bindings(self, *, workspace_id: UUID) -> tuple[RepositoryBinding, ...]: ...
+    async def list_bindings(
+        self, *, workspace_id: UUID, installation_id: UUID | None = None
+    ) -> tuple[RepositoryBinding, ...]: ...
+
+    async def is_webhook_confirmed(
+        self, *, workspace_id: UUID, installation_id: UUID, repository_id: UUID
+    ) -> bool: ...
 
     async def rotate_token(
         self,
@@ -365,12 +397,11 @@ class ManageBitbucketConnection:
                         repository_id=repository_id,
                     ),
                 )
-            confirmed = False
-            if not newly_active:
-                confirmed = any(
-                    binding.repository_id == repository_id and binding.confirmed_at is not None
-                    for binding in await store.list_bindings(workspace_id=workspace_id)
-                )
+            confirmed = not newly_active and await store.is_webhook_confirmed(
+                workspace_id=workspace_id,
+                installation_id=installation_id,
+                repository_id=repository_id,
+            )
             current = await store.installation_for_remote_workspace(
                 workspace_id=workspace_id, bitbucket_workspace_uuid=remote.workspace_uuid
             )
@@ -470,38 +501,83 @@ class ManageBitbucketConnection:
             prior = await uow.connections.installation_by_id(
                 workspace_id=workspace_id, installation_id=installation_id
             )
-            bindings = tuple(
-                binding
-                for binding in await uow.connections.list_bindings(workspace_id=workspace_id)
-                if binding.installation_id == installation_id
+            bindings = await uow.connections.list_bindings(
+                workspace_id=workspace_id, installation_id=installation_id
             )
         if prior is None or not bindings:
             raise BitbucketManagementError("connection_not_found")
-        await self._provider.probe_current_user(token=token)
         refreshed: list[tuple[RepositoryBinding, RemoteRepository]] = []
-        for binding in bindings:
-            remote = await self._provider.fetch_repository_by_uuid(
-                workspace_uuid=prior.workspace_uuid,
-                repository_uuid=binding.repository_uuid,
-                token=token,
+
+        async def probe(binding: RepositoryBinding) -> tuple[RepositoryBinding, RemoteRepository]:
+            try:
+                remote = await self._provider.fetch_repository_by_uuid(
+                    workspace_uuid=prior.workspace_uuid,
+                    repository_uuid=binding.repository_uuid,
+                    token=token,
+                )
+                if remote.workspace_uuid != prior.workspace_uuid:
+                    raise BitbucketManagementError(
+                        "repository_uuid_conflict", repository_uuid=binding.repository_uuid
+                    )
+                await self._provider.probe_pull_request_read(
+                    workspace_uuid=prior.workspace_uuid,
+                    repository_uuid=binding.repository_uuid,
+                    token=token,
+                )
+                return binding, remote
+            except BitbucketProviderError as error:
+                raise BitbucketRotationProbeError(
+                    error.code,
+                    repository_uuid=binding.repository_uuid,
+                    retry_after=error.retry_after,
+                ) from None
+
+        try:
+            async with asyncio.timeout(_ROTATION_DEADLINE_SECONDS):
+                await self._provider.probe_current_user(token=token)
+                for start in range(0, len(bindings), _ROTATION_PROBE_CONCURRENCY):
+                    batch = bindings[start : start + _ROTATION_PROBE_CONCURRENCY]
+                    tasks = [asyncio.create_task(probe(binding)) for binding in batch]
+                    try:
+                        refreshed.extend(await asyncio.gather(*tasks))
+                    except BaseException:
+                        for task in tasks:
+                            task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        raise
+        except BitbucketRotationProbeError as error:
+            _LOGGER.warning(
+                "Bitbucket token rotation failed repository_uuid=%s code=%s",
+                error.repository_uuid,
+                error.code,
             )
-            if remote.workspace_uuid != prior.workspace_uuid:
-                raise BitbucketManagementError("repository_uuid_conflict")
-            await self._provider.probe_pull_request_read(
-                workspace_uuid=prior.workspace_uuid,
-                repository_uuid=binding.repository_uuid,
-                token=token,
+            raise
+        except BitbucketManagementError as error:
+            _LOGGER.warning(
+                "Bitbucket token rotation failed repository_uuid=%s code=%s",
+                error.repository_uuid,
+                error.code,
             )
-            refreshed.append((binding, remote))
+            raise
+        except BitbucketProviderError as error:
+            _LOGGER.warning(
+                "Bitbucket token rotation failed repository_uuid=unknown code=%s", error.code
+            )
+            raise
+        except TimeoutError:
+            _LOGGER.warning(
+                "Bitbucket token rotation failed repository_uuid=unknown code=provider_unavailable"
+            )
+            raise BitbucketRotationProbeError(
+                "provider_unavailable", repository_uuid=None
+            ) from None
         async with self._uow_factory() as uow:
             await self._require_member(uow.connections, scope, workspace_id, lock=True)
             current = await uow.connections.installation_by_id(
                 workspace_id=workspace_id, installation_id=installation_id
             )
-            current_bindings = tuple(
-                binding
-                for binding in await uow.connections.list_bindings(workspace_id=workspace_id)
-                if binding.installation_id == installation_id
+            current_bindings = await uow.connections.list_bindings(
+                workspace_id=workspace_id, installation_id=installation_id
             )
             if (
                 current is None

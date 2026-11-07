@@ -30,6 +30,44 @@ HEAD = "a" * 40
 RUN_URL = "https://review.example/runs/one"
 
 
+@pytest.mark.parametrize(
+    ("provider", "expected_reads"),
+    [("github", 0), ("gitlab", 0), ("bitbucket", 1)],
+)
+def test_status_gateway_reads_bitbucket_source_only_for_bitbucket_runs(
+    provider: str, expected_reads: int
+) -> None:
+    async def scenario() -> None:
+        run_id = uuid4()
+        reads: list[UUID] = []
+
+        class Source:
+            async def current(self, selected: UUID) -> BitbucketStatusSnapshot | None:
+                reads.append(selected)
+                return None
+
+        class Credentials:
+            async def checkpoint(self, selected: BoundBitbucketTarget) -> None:
+                raise AssertionError("unexpected credential check")
+
+            async def credential_for(
+                self, selected: BoundBitbucketTarget
+            ) -> BitbucketRequestCredential:
+                raise AssertionError("unexpected credential read")
+
+        async def run_provider(selected: UUID) -> str:
+            assert selected == run_id
+            return provider
+
+        publisher = BitbucketBuildStatusPublisher(
+            Source(), Credentials(), run_provider=run_provider
+        )
+        await update_bitbucket_status(publisher, run_id, RUN_URL)
+        assert reads == [run_id] * expected_reads
+
+    asyncio.run(scenario())
+
+
 def test_status_key_has_the_bitbucket_cloud_length_and_stable_literal() -> None:
     payload = bitbucket_status_payload(
         workspace_id=UUID("11111111-1111-4111-8111-111111111111"),
@@ -223,6 +261,7 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
         requests: list[httpx.Request] = []
         ambiguous = True
         source_uuid = remote
+        source_uuid_braced = True
         remote_pr_id = 7
         remote_source_branch = "feature/review"
         remote_head = HEAD
@@ -266,7 +305,11 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
                         "source": {
                             "commit": {"hash": remote_head[:12]},
                             "branch": {"name": remote_source_branch},
-                            "repository": {"uuid": f"{{{source_uuid}}}"},
+                            "repository": {
+                                "uuid": f"{{{source_uuid}}}"
+                                if source_uuid_braced
+                                else str(source_uuid)
+                            },
                         },
                         "destination": {
                             "branch": {"name": remote_target_branch},
@@ -326,6 +369,10 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
             await publisher.upsert(run_id, RUN_URL)
         assert len(statuses) == 4
         remote_target_branch = "main"
+        source_uuid_braced = False
+        with pytest.raises(BitbucketStatusUnavailable, match="malformed"):
+            await publisher.upsert(run_id, RUN_URL)
+        source_uuid_braced = True
 
         snapshot = replace(snapshot, state="cancelled")
         remote_pr_id = 8

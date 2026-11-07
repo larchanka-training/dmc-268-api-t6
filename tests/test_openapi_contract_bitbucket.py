@@ -165,8 +165,11 @@ def test_bitbucket_error_contract_accepts_safe_application_and_request_validatio
     _validator_for(method, path, "422").validate(
         {"detail": [{"loc": ["body", "apiToken"], "msg": "Invalid value", "type": "value_error"}]}
     )
-    assert operation["responses"]["429"] == {"$ref": "#/components/responses/BitbucketRateLimited"}
-    assert "Retry-After" in _spec()["components"]["responses"]["BitbucketRateLimited"]["headers"]
+    rate_limited = operation["responses"]["429"]
+    if method != "put":
+        assert rate_limited == {"$ref": "#/components/responses/BitbucketRateLimited"}
+        rate_limited = _spec()["components"]["responses"]["BitbucketRateLimited"]
+    assert "Retry-After" in rate_limited["headers"]
 
 
 _BITBUCKET_WORKSPACE = UUID(int=333)
@@ -456,6 +459,16 @@ def test_bitbucket_provider_error_body_matches_spec(
     )
     if status == "429":
         assert response.headers["Retry-After"] == "37"
+
+
+def test_rotation_error_responses_declare_repository_uuid_header() -> None:
+    responses = _spec()["paths"][_BITBUCKET_CREDENTIAL]["put"]["responses"]
+    for status in ("409", "422", "429", "502"):
+        assert responses[status]["headers"]["X-Bitbucket-Repository-UUID"]["schema"] == {
+            "type": "string",
+            "format": "uuid",
+        }
+    assert "Retry-After" in responses["429"]["headers"]
 
 
 def test_bitbucket_rotate_invalid_credential_response_matches_spec(

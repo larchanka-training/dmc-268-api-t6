@@ -10,6 +10,10 @@ from uuid import UUID
 
 import httpx
 
+from app.modules.integrations.bitbucket.application.provider_error import (
+    BitbucketPullRequestFetchError,
+    BitbucketPullRequestResponseError,
+)
 from app.modules.integrations.bitbucket.application.request_credentials import (
     BitbucketRequestCredential,
     BoundBitbucketTarget,
@@ -18,11 +22,13 @@ from app.modules.integrations.bitbucket.infrastructure.commit_hash import (
     pr_commit_hash,
     resolved_commit_hash,
 )
+from app.modules.integrations.bitbucket.infrastructure.provider_validation import (
+    check_bitbucket_response,
+    parse_bitbucket_uuid,
+)
 from app.modules.integrations.bitbucket.infrastructure.repository_provider import (
     BitbucketCloudRepositoryProvider,
     BitbucketProviderError,
-    _check_response,
-    _parse_uuid,
 )
 from app.modules.reviews.application.project_bitbucket_pull_request import (
     CanonicalBitbucketPullRequest,
@@ -31,9 +37,9 @@ from app.modules.reviews.application.project_bitbucket_pull_request import (
 _MAX_BODY_BYTES = 2 * 1024 * 1024
 
 
-class _DestinationCommitMissing(BitbucketProviderError):
+class _DestinationCommitMissing(BitbucketPullRequestFetchError):
     def __init__(self) -> None:
-        super().__init__("repository_inaccessible")
+        super().__init__("pull_request_missing")
 
 
 class BitbucketTokenSource(Protocol):
@@ -90,10 +96,12 @@ class BitbucketCurrentPullRequestProvider:
                 credential.token,
             )
             return replace(current, head_sha=head, base_sha=base)
-        except BitbucketProviderError:
+        except BitbucketProviderError as error:
+            if error.code == "invalid_provider_response":
+                raise BitbucketPullRequestResponseError() from None
             raise
         except (ValueError, TypeError, KeyError, OverflowError):
-            raise BitbucketProviderError("invalid_provider_response") from None
+            raise BitbucketPullRequestResponseError() from None
 
     async def _resolve_commit(
         self, workspace: UUID, repository_uuid: UUID, prefix: str, token: str
@@ -131,7 +139,11 @@ class BitbucketCurrentPullRequestProvider:
             ) as response:
                 if commit_lookup and response.status_code == 404:
                     raise _DestinationCommitMissing()
-                _check_response(response)
+                if response.status_code == 404:
+                    raise BitbucketPullRequestFetchError("pull_request_missing")
+                if response.status_code >= 500:
+                    raise BitbucketPullRequestFetchError("pull_request_unavailable")
+                check_bitbucket_response(response)
                 chunks: list[bytes] = []
                 size = 0
                 async for chunk in response.aiter_bytes():
@@ -141,7 +153,7 @@ class BitbucketCurrentPullRequestProvider:
                     chunks.append(chunk)
             return httpx.Response(200, content=b"".join(chunks)).json()
         except httpx.RequestError:
-            raise BitbucketProviderError("provider_unavailable") from None
+            raise BitbucketPullRequestFetchError("pull_request_unavailable") from None
 
 
 def _parse_pull_request(
@@ -155,7 +167,7 @@ def _parse_pull_request(
         raise ValueError("invalid_refs")
     destination_repository = destination.get("repository")
     if not isinstance(destination_repository, dict) or (
-        _parse_uuid(destination_repository.get("uuid")) != repository_uuid
+        parse_bitbucket_uuid(destination_repository.get("uuid")) != repository_uuid
     ):
         raise ValueError("invalid_origin")
     state = raw.get("state")

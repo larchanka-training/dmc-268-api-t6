@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 
 from app.bootstrap.reviews_api import get_github_webhook_receipt_uow_factory
 from app.main import app, get_github_webhook_secret
-from tests.test_github_webhook_delivery import FakeReceiptUnitOfWork
+from tests.github_webhook_fakes import FakeReceiptUnitOfWork
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "webhook_smoke.py"

@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID, uuid4
 
 from app.common.application.log_token import log_token
@@ -22,6 +22,9 @@ _LEASE = timedelta(minutes=5)
 _DISPATCH_TIMEOUT_SECONDS = 240.0
 _FAILURE_RETRY = timedelta(seconds=30)
 _RUN_TRIGGER_RETRY = timedelta(seconds=30)
+_PUSH_CONTINUATION_RETRY = timedelta(0)
+_PUSH_CANDIDATE_RETRY = timedelta(seconds=30)
+_PUSH_PROVIDER_MAX_WAIT = timedelta(hours=6)
 _RUN_TRIGGER_MAX_WAIT = timedelta(hours=1)
 _UNKNOWN_INSTALLATION_RETRY = timedelta(minutes=5)
 _MAX_DISPATCH_ATTEMPTS = 3
@@ -36,6 +39,14 @@ _DEFERRED = frozenset(
         InstallationDeliveryDispatchStatus.DEFERRED_REPOSITORY_DETAILS,
     }
 )
+
+
+class WebhookDispatchRetry(Exception):
+    """A provider retry window that must not consume receipt failure attempts."""
+
+    def __init__(self, delay_seconds: int) -> None:
+        self.delay_seconds = max(delay_seconds, 30)
+        super().__init__("provider_retry")
 
 
 class FailureCategory(StrEnum):
@@ -110,6 +121,12 @@ class GitHubWebhookReceiptStore(Protocol):
 
     async def mark_projected(self, delivery_id: str, token: UUID, at: datetime) -> None: ...
 
+    async def fail_push_candidates(self, delivery_id: str, token: UUID, at: datetime) -> None: ...
+
+    async def retry_push_continuation(
+        self, delivery_id: str, token: UUID, retry_after: datetime
+    ) -> None: ...
+
     async def retry_run_trigger(
         self,
         delivery_id: str,
@@ -157,6 +174,20 @@ class GitHubWebhookReceiptStore(Protocol):
         ...
 
     async def pending_ids(self, now: datetime, limit: int) -> tuple[str, ...]: ...
+
+
+class PushProviderRetryReceiptStore(Protocol):
+    """Bitbucket provider retry disposition for receipts awaiting a push page."""
+
+    async def retry_push_provider(
+        self,
+        delivery_id: str,
+        token: UUID,
+        retry_after: datetime,
+        *,
+        now: datetime,
+        received_before: datetime,
+    ) -> bool: ...
 
 
 class GitHubWebhookReceiptUnitOfWork(UnitOfWork, Protocol):
@@ -250,6 +281,9 @@ class ReceiveWebhookDelivery:
                 deferred += (
                     status in _DEFERRED
                     or status == InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER
+                    or status == InstallationDeliveryDispatchStatus.CONTINUING_PUSH
+                    or status == InstallationDeliveryDispatchStatus.WAITING_PUSH_CANDIDATE
+                    or status == InstallationDeliveryDispatchStatus.WAITING_PUSH_PROVIDER
                 )
                 final += last_attempt
         if delivery_ids:
@@ -298,6 +332,34 @@ class ReceiveWebhookDelivery:
             result = await asyncio.wait_for(
                 dispatcher.execute(delivery), timeout=self._dispatch_timeout_seconds
             )
+        except WebhookDispatchRetry as retry:
+            now = self._now()
+            retry_at = now + timedelta(seconds=retry.delay_seconds)
+            async with self._uow_factory() as uow:
+                expired = await cast(
+                    "PushProviderRetryReceiptStore", uow.receipts
+                ).retry_push_provider(
+                    delivery_id,
+                    token,
+                    retry_at,
+                    now=now,
+                    received_before=now - _PUSH_PROVIDER_MAX_WAIT,
+                )
+                await uow.commit()
+            if expired:
+                _LOGGER.warning(
+                    "%s webhook delivery %s failed reason=provider_retry_expired",
+                    self._provider_label,
+                    delivery_id,
+                )
+                return InstallationDeliveryDispatchStatus.FAILED_PUSH_PROVIDER, False
+            _LOGGER.info(
+                "%s webhook delivery %s waiting %d seconds for provider retry",
+                self._provider_label,
+                delivery_id,
+                retry.delay_seconds,
+            )
+            return InstallationDeliveryDispatchStatus.WAITING_PUSH_PROVIDER, False
         except Exception as exc:
             # Logged before the release so the line exists even if the release fails too.
             self._log_failure(delivery_id, delivery, FailureStage.DISPATCH, exc)
@@ -326,7 +388,9 @@ class ReceiveWebhookDelivery:
         wait_expired = False
         try:
             async with self._uow_factory() as uow:
-                if result.status == InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER:
+                if result.status == InstallationDeliveryDispatchStatus.FAILED_PUSH_CANDIDATES:
+                    await uow.receipts.fail_push_candidates(delivery_id, token, self._now())
+                elif result.status == InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER:
                     now = self._now()
                     retry_at = now + _RUN_TRIGGER_RETRY
                     wait_expired = await uow.receipts.retry_run_trigger(
@@ -337,6 +401,19 @@ class ReceiveWebhookDelivery:
                         received_before=now - _RUN_TRIGGER_MAX_WAIT,
                     )
                     retry_note = f" retry_at={'none' if wait_expired else retry_at.isoformat()}"
+                elif result.status in (
+                    InstallationDeliveryDispatchStatus.CONTINUING_PUSH,
+                    InstallationDeliveryDispatchStatus.WAITING_PUSH_CANDIDATE,
+                ):
+                    now = self._now()
+                    waiting = (
+                        result.status == InstallationDeliveryDispatchStatus.WAITING_PUSH_CANDIDATE
+                    )
+                    retry_at = now + (
+                        _PUSH_CANDIDATE_RETRY if waiting else _PUSH_CONTINUATION_RETRY
+                    )
+                    await uow.receipts.retry_push_continuation(delivery_id, token, retry_at)
+                    retry_note = f" retry_at={retry_at.isoformat()}"
                 elif result.status in _DEFERRED:
                     now = self._now()
                     retry_at = now + _UNKNOWN_INSTALLATION_RETRY
@@ -350,6 +427,18 @@ class ReceiveWebhookDelivery:
         except Exception as exc:
             self._log_failure(delivery_id, delivery, FailureStage.FINALIZE, exc, result)
             raise
+        if result.status == InstallationDeliveryDispatchStatus.FAILED_PUSH_CANDIDATES:
+            _LOGGER.warning(
+                "%s webhook delivery %s terminal reason=candidate_exhausted",
+                self._provider_label,
+                delivery_id,
+            )
+        elif result.detail == "binding_generation_changed":
+            _LOGGER.warning(
+                "%s webhook delivery %s terminal reason=binding_generation_changed",
+                self._provider_label,
+                delivery_id,
+            )
         if wait_expired:
             _LOGGER.warning(
                 "%s webhook delivery %s failed after supersession wait reached its age limit",

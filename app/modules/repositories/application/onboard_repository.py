@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
@@ -67,9 +69,26 @@ def load_default_rule_sets(rules_dir: Path) -> dict[str, DefaultRuleSet]:
     Validation is intentionally performed at onboarding/bootstrap time rather than
     at prompt rendering time, so invalid immutable artifacts cannot enter the DB.
     """
-    schema = _read_json_object(rules_dir / "schema.json")
+    paths = (rules_dir / "schema.json", *sorted(rules_dir.glob("default-*.v*.json")))
+    snapshot: list[tuple[Path, int, int, int, int, int]] = []
+    try:
+        for path in paths:
+            stat = path.stat()
+            snapshot.append(
+                (path, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            )
+    except OSError as error:
+        raise RuleSetValidationError(f"cannot read JSON artifact {error.filename}") from error
+    return deepcopy(_load_default_rule_sets_cached(tuple(snapshot)))
+
+
+@lru_cache(maxsize=8)
+def _load_default_rule_sets_cached(
+    snapshot: tuple[tuple[Path, int, int, int, int, int], ...],
+) -> dict[str, DefaultRuleSet]:
+    schema = _read_json_object(snapshot[0][0])
     assets: dict[str, DefaultRuleSet] = {}
-    for path in sorted(rules_dir.glob("default-*.v*.json")):
+    for path, *_ in snapshot[1:]:
         match = _FILENAME.fullmatch(path.name)
         if match is None:
             raise RuleSetValidationError(f"invalid default rule filename: {path.name}")

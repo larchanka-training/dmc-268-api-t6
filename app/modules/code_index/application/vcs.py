@@ -230,6 +230,19 @@ class SparseRepositorySnapshotSource(RepositorySnapshotSource, Protocol):
     ) -> SourceArchive: ...
 
 
+@runtime_checkable
+class IncrementalRepositorySnapshotSource(SparseRepositorySnapshotSource, Protocol):
+    """A source that can derive a pinned target manifest from a published base."""
+
+    async def prepare_incremental_manifest(
+        self, base_sha: str, head_sha: str, comparison: Comparison
+    ) -> bool: ...
+
+    def discard_incremental_manifest(self, head_sha: str) -> None: ...
+
+    async def publish_manifest(self, commit_sha: str) -> None: ...
+
+
 class ArchiveReader(Protocol):
     """Reads an archive in memory, never on disk, off the event loop (ADR 0001 §7).
 

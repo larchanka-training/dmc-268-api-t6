@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 from app.modules.integrations.bitbucket.application.request_credentials import (
+    BitbucketCredentialGenerationChanged,
     BitbucketRequestCredential,
     BitbucketTargetInactive,
     BoundBitbucketTarget,
@@ -92,6 +93,7 @@ class CommentsPort:
         self.destination_branch = "main"
         self.destination_base = "b" * 40
         self.source = SOURCE
+        self.braced_uuid = True
         self.fail_after_post = False
         self.page_size = 2
         self.comment_reads: list[str | None] = []
@@ -111,7 +113,9 @@ class CommentsPort:
             "state": "OPEN",
             "source": {
                 "commit": {"hash": self.head[:12]},
-                "repository": {"uuid": f"{{{self.source}}}"},
+                "repository": {
+                    "uuid": f"{{{self.source}}}" if self.braced_uuid else str(self.source)
+                },
             },
             "destination": {
                 "branch": {"name": self.destination_branch},
@@ -174,6 +178,19 @@ async def test_late_retarget_blocks_comment_post_after_initial_pr_check() -> Non
 
 
 @sync_test
+async def test_unbraced_provider_identity_blocks_comment_post() -> None:
+    port = CommentsPort()
+    port.braced_uuid = False
+    gateway = BitbucketPullRequestCommentGateway(port, run_id=RUN, repository_uuid=REPO)
+
+    with pytest.raises(PublishError, match="identity is malformed"):
+        await gateway.submit_review(_submission())
+
+    assert port.posts == []
+    assert port.updates == []
+
+
+@sync_test
 async def test_inline_and_summary_replay_after_ambiguous_post() -> None:
     port = CommentsPort()
     port.fail_after_post = True
@@ -199,6 +216,7 @@ async def test_inline_and_summary_replay_after_ambiguous_post() -> None:
     replay = await gateway.submit_review(submission)
     assert replay == result
     assert len(port.posts) == 2
+    assert port.comment_reads == [None, None, None]
 
 
 @sync_test
@@ -608,6 +626,69 @@ async def test_publication_http_rechecks_revocation_before_write() -> None:
         credentials.active = False
         with pytest.raises(RunCancelled, match="installation_unavailable"):
             await http.post_comment({"content": {"raw": "hello"}})
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT"])
+@pytest.mark.parametrize("mutation_stage", ["after_credential", "during_claim"])
+@pytest.mark.parametrize("mutation", ["rotation", "disconnect"])
+def test_publication_http_rechecks_credential_after_read_and_claim_fence(
+    method: str, mutation_stage: str, mutation: str
+) -> None:
+    async def scenario() -> None:
+        target = BoundBitbucketTarget(RUN, RUN, RUN, REPO, 1)
+
+        class RotatingCredentials(Credentials):
+            rotated = False
+
+            async def checkpoint(self, target: BoundBitbucketTarget) -> None:
+                await super().checkpoint(target)
+                if self.rotated:
+                    raise BitbucketCredentialGenerationChanged()
+
+            async def credential_for(
+                self, target: BoundBitbucketTarget
+            ) -> BitbucketRequestCredential:
+                credential = await super().credential_for(target)
+                if mutation_stage == "after_credential":
+                    if mutation == "rotation":
+                        self.rotated = True
+                    else:
+                        self.active = False
+                return credential
+
+        credentials = RotatingCredentials()
+        write_checks = 0
+
+        async def write_checkpoint() -> None:
+            nonlocal write_checks
+            write_checks += 1
+            if mutation_stage == "during_claim":
+                if mutation == "rotation":
+                    credentials.rotated = True
+                else:
+                    credentials.active = False
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _: pytest.fail("stale credential reached provider")
+            )
+        ) as client:
+            http = BitbucketPublicationHttp(
+                client,
+                credentials,
+                target,
+                pr_number=7,
+                checkpoint=lambda: asyncio.sleep(0),
+                write_checkpoint=write_checkpoint,
+            )
+            with pytest.raises(RunCancelled, match="installation_unavailable"):
+                if method == "POST":
+                    await http.post_comment({"content": {"raw": "hello"}})
+                else:
+                    await http.update_comment(71, {"content": {"raw": "hello"}})
+        assert write_checks == 1
+
+    asyncio.run(scenario())
 
 
 @sync_test

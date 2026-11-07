@@ -187,6 +187,25 @@ services:
     healthcheck:
       disable: true
 
+  # Trusted one-shot key migration; never starts during ordinary deploy.
+  credential-key-rotation:
+    image: ${IMAGE:?IMAGE is required}
+    profiles: ["credential-operator"]
+    entrypoint: ["python", "-m", "app.credential_key_rotation"]
+    command: []
+    env_file:
+      - gitlab.env
+      - bitbucket.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    pull_policy: missing
+    healthcheck:
+      disable: true
+
   # This one-shot service must complete before API containers are started.  Keeping
   # both commands in the image avoids needing uv or a checkout on the deploy host.
   bootstrap:
