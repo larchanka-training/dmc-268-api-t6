@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.auth.application.scope import AuthScope
@@ -549,6 +549,46 @@ def test_an_expired_blob_loses_its_content_and_keeps_its_row(portal_env: Env) ->
         assert await _blob(factory, "3" * 40) == (_SOURCE, live)
 
     _on_database(portal_env, body)
+
+
+def test_the_blob_sweep_reads_only_the_index_of_blobs_with_text(portal_env: Env) -> None:
+    # Cleared rows stay forever, so a pass must not walk them: the planner has to reach the
+    # sweep through the partial index even when a sequential scan is off the table.
+    sweeps: list[tuple[str, Any]] = []
+
+    def capture(
+        _connection: Any, _cursor: Any, statement: str, parameters: Any, *_rest: Any
+    ) -> None:
+        if statement.startswith("SELECT cached_file_blobs.id"):
+            sweeps.append((statement, parameters))
+
+    async def run() -> None:
+        engine = portal_env.engine()
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            await _store_blob(factory, "1" * 40, _NOW - timedelta(seconds=1))
+            event.listen(engine.sync_engine, "before_cursor_execute", capture)
+            try:
+                assert await _task(factory).run(30) is False
+            finally:
+                event.remove(engine.sync_engine, "before_cursor_execute", capture)
+            assert len(sweeps) == 1
+            statement, parameters = sweeps[0]
+            async with engine.connect() as connection:
+                await connection.exec_driver_sql("SET enable_seqscan = off")
+                explained = await connection.exec_driver_sql(
+                    "EXPLAIN (FORMAT JSON) " + statement, parameters
+                )
+                nodes = [explained.scalar_one()[0]["Plan"]]
+        finally:
+            await engine.dispose()
+        for node in nodes:
+            nodes.extend(node.get("Plans", []))
+        assert [node["Index Name"] for node in nodes if "Index Name" in node] == [
+            "ix_cached_file_blobs_retention_candidates"
+        ], nodes
+
+    asyncio.run(run())
 
 
 def test_a_cleared_blob_comes_back_when_a_later_run_caches_it(portal_env: Env) -> None:

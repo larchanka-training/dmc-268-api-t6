@@ -172,7 +172,14 @@ class CachedFileBlob(Base):
     """A seven-day immutable file blob retained for run inspection."""
 
     __tablename__ = "cached_file_blobs"
-    __table_args__ = (UniqueConstraint("repository_id", "blob_sha"),)
+    __table_args__ = (
+        UniqueConstraint("repository_id", "blob_sha"),
+        Index(
+            "ix_cached_file_blobs_retention_candidates",
+            "expires_at",
+            postgresql_where=text("content <> ''"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     repository_id: Mapped[UUID] = mapped_column(
