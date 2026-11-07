@@ -134,7 +134,7 @@ Application зависит от узких интерфейсов, сгрупп�
 | `CodeIndexEnabler` | `repositories` | запрос полной сборки индекса (создание строки состояния или новое поколение очищенного индекса, с маркером пробуждения) при включении RAG на сессии и в транзакции вызывающего use case; реализация — в `code_index.infrastructure` |
 | `CodeIndexStore`, `CodeIndexUnitOfWork` | `code_index` | индекс графа RAG v1 по `repository_id` (fenced-запись, публикация, чтение, очистка, сборка мусора) и граница транзакции модуля; реализация — в `code_index.infrastructure` |
 | `CodeIndexMaintenance`, `CodeIndexMaintenanceUnitOfWork` | `code_index` | кандидаты leader-задач индекса без `repository_id` (TTL-очистка, сборка мусора, запросы пробуждения, сверка с HEAD, кандидаты повторного включения и очистки для сходимости, #143); каждый шаг по репозиторию идёт через `CodeIndexStore`; реализация — в `code_index.infrastructure` |
-| `PaymentGateway` | `billing` | создание и подтверждение оплаты |
+| `PaymentGateway` | `billing` | Stripe, все вызовы вне транзакции с `Idempotency-Key` (ADR 0002 §10.4). Customer: создание до первого Checkout (§10.1). Checkout: пополнение, подписка, сохранение карты (§6.1, §9). Подписка: повышение с `pending_if_incomplete` (§4.4), отмена сразу при отказе (§9), Customer Portal. Счёт авто-пополнения: создание, позиция, `finalize`, `pay`, `void` (§6.2). Возврат: `refunds.create` при отказе (§9). Сверка: чтение Checkout Sessions, PaymentIntents, счетов, возвратов, споров, Subscriptions, SetupIntents и карты (§10.5). Вебхуки: проверка подписи и чтение актуального объекта (§10.3, §10.4). Баланс в `credit_ledger`, а не в Stripe ([ADR 0002 §10](adr/0002-billing-monetization.md#10-stripe)) |
 | `UnitOfWork` | общий контракт; расширение в использующем модуле | граница транзакции и доступ к интерфейсам repositories |
 | `Clock`, `IdGenerator` | `common` | детерминированные тесты и технические значения |
 
@@ -272,7 +272,7 @@ app/
     billing/
       domain/
       application/
-      infrastructure/          # Payment/CreditLedger models, repos, Stripe implementation
+      infrastructure/          # Payment/CreditLedger models, repos, Stripe implementation (ADR 0002)
     analytics/
       domain/
       application/
@@ -326,8 +326,20 @@ Application управляет транзакцией через [UnitOfWork](..
 [`SqlAlchemyUsageLedger.record`](../app/modules/analytics/infrastructure/usage_ledger.py):
 после завершения вызова провайдера он записывает `usage_events` в собственной короткой
 транзакции (`session_factory.begin()`), чтобы оплаченная стоимость сохранилась при
-rollback основного run. Исключение касается только этого ledger, не обычных
-repositories; транзакция по-прежнему не охватывает сетевой вызов.
+rollback основного run. Второе узкое исключение (план, с #371,
+[ADR 0002 §3.3](adr/0002-billing-monetization.md#33-момент-и-формула-списания)):
+единственная точка записи модуля `billing` пишет состояние списаний run своей
+короткой транзакцией: строки run в `credit_ledger` (`usage_debit`, `run_settlement`,
+`adjustment` сторно и деградации, `expiry` возвращённой суммы) вместе с
+изменением удержания run в `balance_holds`. Запись идёт сразу после
+`usage_events`, после commit конечного состояния run или позже из leader-задачи
+досписания, идемпотентно по ключам ADR 0002 §10.4 (`(usage_event_id, grant_id)`,
+`(run_id, grant_id)`, `reversal_of_id`, `balance_holds.run_id`). Истечение
+грантов, основное и отложенное до снятия удержания (ключ `(grant_id,
+hold_run_id)`), пишет часовая leader-задача истечения обычным use case, оно в
+исключение не входит. Исключения касаются только этих двух точек записи, не
+обычных repositories; транзакция по-прежнему не охватывает сетевой вызов.
+<!-- SYNC: то же исключение в AGENTS.md, .agents/rules/backend.md §3 п. 3 (авторитетный), здесь и в ADR 0002 §3.3; менять все четыре места вместе -->
 
 План выполнения worker:
 
@@ -345,6 +357,23 @@ repositories; транзакция по-прежнему не охватывае
 
 Вызовы GitHub и Stripe также не включаются в длительную DB-транзакцию. Их retries,
 idempotency и reconciliation — часть соответствующего use case, не repository.
+
+Модуль `billing` (план, [ADR 0002](adr/0002-billing-monetization.md)): баланс workspace
+считается по `credit_ledger` в USD; списание за ревью пишется после каждой строки
+`usage_events` своей короткой транзакцией (второе исключение выше), по строке на
+грант, идемпотентно по `(usage_event_id, grant_id)`. Гейт баланса проверяется в два
+шага: при claim Run рядом с `budget_paused` цена движка (цена ревью выбранным
+движком без надбавки), и claim пишет удержание `balance_holds` на неё под
+блокировкой строки workspace; после `vcs.fetch_diff` полная цена `P` с надбавкой
+за строки, удержание поднимается до `P` (иначе переход `running → skipped`).
+Поэтому параллельные прогоны не уводят остаток в минус. Порог расхода прогона передаётся
+шлюзу как лимит этого прогона. Вебхуки Stripe идемпотентны по id события,
+исходящие вызовы идут с `Idempotency-Key`, суточная сверка со Stripe выполняется
+leader-задачей. Списания, пропущенные из-за сбоя между транзакциями, дописывает
+отдельная leader-задача тем же идемпотентным обработчиком (ADR 0002 §10.6). Роли
+workspace проверяются в БД на каждом важном действии и в JWT не попадают; запись
+об исключении участника проверяется на каждом запросе к workspace, включая чтение
+(ADR 0002 §11.3).
 
 ### Worker и очередь (#34)
 

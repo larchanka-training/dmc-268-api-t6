@@ -52,8 +52,20 @@ infrastructure}`, `app/modules/<m>/{domain,application,infrastructure}`,
 3. `UnitOfWork`: repositories call `flush`, never `commit` — the use case commits.
    Narrow exception: `SqlAlchemyUsageLedger.record` writes `usage_events` in its own
    short transaction after the provider call completes, so cost survives rollback of
-   the main run. This exception does not apply to ordinary repositories and does not
-   permit network calls inside a DB transaction.
+   the main run. Second narrow exception (planned with #371, ADR 0002 §3.3, §5.2,
+   §10.6): the single billing write point records a run's charge state in its own
+   short transaction: the run's `credit_ledger` rows (`usage_debit`,
+   `run_settlement`, `adjustment` for reversals and engine fallback, `expiry` of a
+   reversed amount) together with the matching change of the run's `balance_holds`
+   row. It runs right after `usage_events`, after the run's final state is
+   committed, or later from the leader catch-up job, and is idempotent by the ADR
+   0002 §10.4 keys (`(usage_event_id, grant_id)`, `(run_id, grant_id)`,
+   `reversal_of_id`, `balance_holds.run_id`). Grant expiry, the main one and the
+   part deferred until a hold is released (key `(grant_id, hold_run_id)`), is
+   written by the hourly expiry leader job through an ordinary use case and is not
+   part of this exception. These exceptions do not apply to ordinary repositories
+   and do not permit network calls inside a DB transaction.
+   <!-- SYNC: the same exception in AGENTS.md, .agents/rules/backend.md §3 item 3 (authoritative), docs/BACKEND_ARCHITECTURE.md (UnitOfWork) and ADR 0002 §3.3; change all four together -->
 4. No DB transaction spans an LLM or GitHub call; network calls happen outside the
    transaction boundary.
 5. Alembic revisions are frozen: a merged revision is never edited, not even by a
