@@ -7,6 +7,9 @@ from sqlalchemy import Connection, Enum, text
 
 from app.bootstrap.db_metadata import metadata
 
+# Borrowed from the code index topic: code_index_database is the shared fixture that runs
+# `upgrade head` in a schema of its own, with no seed data and no broker. Nothing here depends
+# on code index.
 pytest_plugins = ("tests.code_index_postgres",)
 
 
