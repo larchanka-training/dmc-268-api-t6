@@ -958,7 +958,7 @@ API, хранения, hash/dedup и eval. Старые v1 findings не пол�
 | 5. Verifier | Замороженные candidates после прохода 4, policy/defaults, код и отдельный manifest | Обязательный смысловой batch по §7 | `supported` идёт дальше; `contradicted`, `insufficient_context` сохраняются без публикации; ошибки всего вызова — §8.4 |
 | 6. Порог и размещение | Только supported, закреплённый `severity_threshold`, `max_comments` | Порог после verifier (§7), затем сортировка и закреплённый inline cap | Drop `severity_threshold` с отдельным счётчиком; остальные — final findings с disposition inline/general; сверх cap — general, не drop |
 | 6b. Межпрогонный дедуп | Supported-кандидаты после Pass 5, реестр опубликованных комментариев PR (`comments` с `github_comment_id`), body-only находок последнего прошедшего T14 прогона (`registry`) и активные подтверждённые находки базового Run (`findings` со статусом `publication_action IN ('publish_inline', 'publish_body', 'suppressed_duplicate') AND drop_reason IS NULL`), карта тредов `thread_map: ReviewThreadMap`, исходы `resolution_outcomes` (сетевой шаг `sync_review_threads_state` с обновлением статусов тредов в `comments` и `resolution_outcomes`, а затем чтение актуализированного реестра выполняются в `store_review_output.py` после `get_post_processing_input` и до `process()`) | Межпрогонная дедупликация кандидатов внутри `findings_post_processor.py:process()` (Cross-Run Dedup по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)); выполняется строго после восстановления атрибуции `_repair_attribution` и до сортировки и среза cap `Repository.max_comments`; подавленные дубли не сжигают inline cap | Повторные находки сохраняют `drop_reason IS NULL`, возвращаются в поле dataclass `ProcessedReviewOutput.suppressed`, в полном объёме учитываются в `kept` (`Verdict` и `Risk summary` тела ревью, `hashed_findings`), severity counts и check-run (`CheckRunReport.suppressed_count`), связываются с существующим `Comment` (`linked_comment_id`, либо `NULL` для body-only) и помечаются `publication_action = 'suppressed_duplicate'`; отсеянные проходами 2–6 получают `publication_action = 'dropped'`; подавленные дубли не попадают в срез inline cap и не рендерятся строками в списке тела ревью; новые получают `publication_action = 'publish_inline'` (или `'publish_body'`); потребители — `store_review_output.py` и `run_repository.py` |
-| 7. Публикация | FinalReviewResult и immutable publication plan (сформированный после прохода 6b), текущая идентичность VCS | Проверка допустимого адаптера, отсутствия удаления коммита (422) и совпадения целевой ветки (проверенной до сохранения diff; при смене базы — `failed/pr_base_changed`); отправка review batch на GitHub (дискуссий на GitLab); чистка тредов publisher после перехода T14 | Новые inline-находки публикуются review batch; чистка устаревших/решённых тредов мутацией `resolveReviewThread` по квоте до 30; явный отказ публикации всего batch по §9–10: `commit_not_found`, `pr_closed`, `pr_base_changed`, `publication_payload_too_large`, provider-specific ошибки, `publication_outcome_unknown`; без угадывания координат |
+| 7. Публикация | FinalReviewResult и immutable publication plan (сформированный после прохода 6b), текущая идентичность VCS | Проверка допустимого адаптера и закреплённого diff (смена базы до сохранения diff — `failed/pr_base_changed`); отправка review batch на GitHub (дискуссий на GitLab); только специфичный GitHub POST 422 о `commit_id` вне PR даёт `commit_not_found`; чистка тредов publisher после перехода T14 | Новые inline-находки публикуются review batch; чистка устаревших/решённых тредов мутацией `resolveReviewThread` по квоте до 30; явный отказ публикации всего batch по §9–10: `commit_not_found`, `pr_closed`, `pr_base_changed`, `publication_payload_too_large`, provider-specific ошибки, `publication_outcome_unknown`; без угадывания координат |
 
 `lint_pattern` и `duplicate` сохраняют действующие имена legacy-кодов;
 переименование/миграция причин не вводится. `ignored_file` для якоря выдаёт проход 2
@@ -1982,17 +1982,17 @@ comments/discussions обязательна; ошибка чтения или л
 
 1. Короткая транзакция захватывает lease публикации и фиксирует подготовленные
    операции. Перед каждым новым POST проверяются run/cancel, открытость PR/MR
-   и наличие коммита в VCS (отсутствие HTTP 422 `commit_not_found`; для GitLab/Bitbucket — текущий head и идентичность diff, PIPELINE_SPEC §5.2); затем выполняется поиск уже отправленной
+   (для GitLab/Bitbucket — также текущий head и идентичность diff, PIPELINE_SPEC §5.2); затем выполняется поиск уже отправленной
    операции. Все HTTP-вызовы — вне DB-транзакции.
 2. При смене целевой ветки/базы PR (проверенной до сохранения diff) новый POST запрещён, run получает отказ (`failed`, `pr_base_changed`). После сохранения diff выполняющийся Run доводится до публикации на своей закреплённой базе. Сдвиг головы в PR сам по себе не прерывает отправку: ревью публикуется на исходном `commit_id`, а run успешно завершается (`succeeded`, T14) и формирует базу для последующего инкрементального ревью коммит-дельты ([`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6.4).
 3. После подтверждённого ответа сохраняются review/discussion/note IDs и точное
    соответствие finding → comment по сохранённым marker/координатам и body.
    Порядок и равное число элементов в ответе недостаточны для восстановления.
-4. После POST повторно читается актуальность VCS и в короткой транзакции
+4. После POST в короткой транзакции
    завершается run. Push между GET и POST возможен: удалённая публикация остаётся
    привязана к исходному `commit_id`, её IDs сохраняются в `comments`, а run успешно
    переходит в `succeeded` (T14), фиксируя базу инкремента; в `cancelled` (T15) run переходит
-   только если коммит исчез из VCS (HTTP 422 `commit_not_found`) либо PR был закрыт. Новый head не объявляется
+   при закрытии PR или если GitHub POST вернул 422 с диагностикой `commit_id` вне PR (`commit_not_found`); другой 422 остаётся ошибкой координат. Новый head не объявляется
    проверенным. Автоматическое удаление опубликованного комментария для сокрытия гонки не выполняется.
 5. Разрешение устаревших и исправленных замечаний (VCS Write-back). В соответствии
    со спецификацией [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)
@@ -2036,7 +2036,7 @@ GitHub v1 сохраняет один review batch на run. GitLab требуе
 | 401 | Одно обновление токена и повтор при подтверждённом отказе, затем access failure |
 | 403 без rate-limit признаков, 404 доступа/ресурса | Access/resource failure; не объявлять старый commit без соответствующего доказательства |
 | Явная ошибка недопустимых path/line/side/range/position при неизменном diff | `coordinates_rejected`; один сохранённый вариант body-only после подтверждённого отказа исходной операции |
-| Недопустимый commit/diff refs либо удаление коммита (422) | Сверить VCS; при подтверждении исчезновения коммита `cancelled/commit_not_found`, без body-only обхода. При наличии нового коммита — публикация на исходном `commit_id`, run `succeeded` |
+| GitHub POST 422 с диагностикой `commit_id` вне PR | `cancelled/commit_not_found`, без body-only обхода; наличие нового head само по себе не отменяет публикацию на исходном `commit_id` |
 | 400/422 по body/event/schema, spam/abuse, неизвестная validation error | Невосстановимая ошибка payload либо отдельная rate-limit классификация; не считать её ошибкой координат |
 
 GitHub документирует 422 и для validation, и для spam; одного HTTP-кода недостаточно
