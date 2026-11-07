@@ -12,6 +12,7 @@ from tests.monitoring_deploy_host import (
     METADATA_GRANTS,
     MONITORING,
     QUERIES,
+    REPO_ROOT,
     _grants,
     _query,
     _read,
@@ -36,7 +37,7 @@ def test_review_queries_and_grants_never_touch_review_content() -> None:
         if "rawSql" in target
     )
 
-    assert sql.count("SELECT") == 5
+    assert sql.count("SELECT") == 6
     assert dashboard_sql.count("SELECT") == 9
     assert {table for table, _ in grants} == {"runs", "run_actions", "usage_events"}
     granted = set().union(*grants.values())
@@ -100,6 +101,38 @@ def test_budget_paused_query_counts_skipped_runs_from_granted_columns() -> None:
     # No new grant: the exporter already reads these columns of runs.
     assert read == {"state", "error_code", "finished_at"}
     assert read <= _grants(_read(MONITORING / "deploy.sh"))[("runs", "metrics_exporter")]
+
+
+def test_review_time_query_measures_succeeded_fast_runs_from_granted_columns() -> None:
+    block = _read(QUERIES).split("\ndmc_review_time_1h:\n", 1)[1].split("\n\n", 1)[0]
+    sql = _query("dmc_review_time_1h")
+    run_columns = {column.name for column in Run.__table__.columns}
+    read = {column for column in run_columns if re.search(rf"\b{column}\b", sql)}
+
+    # postgres-exporter names the series <block>_<column>: dmc_review_time_1h_runs and
+    # dmc_review_time_1h_p95_seconds.
+    assert re.search(r"- runs:\n\s+usage: GAUGE\n", block)
+    assert re.search(r"- p95_seconds:\n\s+usage: GAUGE\n", block)
+    assert re.findall(r"^\s*(?:FROM|JOIN)\s+(\w+)", sql, re.M) == ["runs"]
+    assert "state = 'succeeded' AND engine = 'fast'" in sql
+    assert "finished_at > now() - interval '1 hour'" in sql
+    # No new grant: the exporter already reads these columns of runs.
+    assert read == {"state", "engine", "finished_at", "created_at"}
+    assert read <= _grants(_read(MONITORING / "deploy.sh"))[("runs", "metrics_exporter")]
+
+
+def test_monitoring_doc_names_the_sla_alerts_and_series() -> None:
+    doc = _read(REPO_ROOT / "docs" / "MONITORING.md")
+    rules = _read(MONITORING / "prometheus" / "rules" / "sla.yml")
+    names = re.findall(r"^      - (?:alert|record): (\S+)$", rules, re.M)
+
+    assert len(names) == 9
+    for name in names:
+        assert f"`{name}`" in doc, name
+    assert "## 12. SLA prod" in doc
+    # The retention of §1 and §12 is the one of compose.yml.
+    assert "хранение 65 дней / 6 GB" in doc
+    assert "15 дней / 2 GB" not in doc
 
 
 # --- dashboard -----------------------------------------------------------------------------
@@ -168,6 +201,63 @@ def test_dashboard_shows_certificate_days_coloured_where_the_alerts_fire() -> No
         ("red", None),
         ("orange", days["TlsCertificateExpiring"]),
         ("green", days["TlsCertificateExpiresSoon"]),
+    ]
+
+
+def _panel_titled(title: str) -> Any:
+    return next(
+        panel for panel in json.loads(_read(DASHBOARD))["panels"] if panel["title"] == title
+    )
+
+
+def test_sla_panels_show_each_prod_name_and_match_the_alert_thresholds() -> None:
+    rules = _read(MONITORING / "prometheus" / "rules" / "sla.yml")
+    thresholds = {
+        alert: (float(low), high)
+        for alert, low, high in re.findall(
+            r"- alert: (SlaAvailability\w+)\n        expr: sla:downtime_budget_spent:ratio"
+            r" (?:> |>= )([\d.]+)(?: < ([\d.]+))?\n",
+            rules,
+        )
+    }
+    availability = _panel_titled("SLA availability, month to date")
+    left = _panel_titled("Downtime budget left")
+    spent = _panel_titled("Downtime budget spent")
+
+    assert thresholds == {
+        "SlaAvailabilityAtRisk": (0.5, "1"),
+        "SlaAvailabilityBreached": (1.0, ""),
+    }
+    for panel in (availability, left, spent):
+        # Fixed to prod: the Environment switch does not move them, and the descriptions say so.
+        assert panel["type"] == "stat"
+        assert panel["datasource"] == PROMETHEUS
+        [target] = panel["targets"]
+        assert target["datasource"] == PROMETHEUS
+        assert target["instant"] is True
+        # One tile per probed prod name, none for a name that is not probed.
+        assert target["legendFormat"] == "{{host}}"
+        assert panel["options"]["textMode"] == "value_and_name"
+        assert "Environment" in panel["description"]
+    assert availability["targets"][0]["expr"] == 'sla:availability_ratio:month{environment="prod"}'
+    assert availability["fieldConfig"]["defaults"]["unit"] == "percentunit"
+    assert availability["fieldConfig"]["defaults"]["decimals"] == 3
+    # Not coloured: the share of the elapsed time reads badly red on the first day after a blip
+    # while the allowance is nearly whole.
+    assert availability["options"]["colorMode"] == "none"
+    assert left["targets"][0]["expr"] == (
+        'scalar(sla:downtime_budget_seconds:month) - sla:downtime_seconds:month{environment="prod"}'
+    )
+    assert left["fieldConfig"]["defaults"]["unit"] == "s"
+    assert spent["targets"][0]["expr"] == 'sla:downtime_budget_spent:ratio{environment="prod"}'
+    assert spent["fieldConfig"]["defaults"]["unit"] == "percentunit"
+    assert [
+        (step["color"], step["value"])
+        for step in spent["fieldConfig"]["defaults"]["thresholds"]["steps"]
+    ] == [
+        ("green", None),
+        ("orange", thresholds["SlaAvailabilityAtRisk"][0]),
+        ("red", thresholds["SlaAvailabilityBreached"][0]),
     ]
 
 

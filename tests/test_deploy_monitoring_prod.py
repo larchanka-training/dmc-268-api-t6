@@ -30,11 +30,15 @@ def _load(path: Path) -> dict[str, Any]:
     return loaded
 
 
+def _rules() -> list[dict[str, Any]]:
+    """Every rule of every rule file of the Prometheus config (rule_files: rules/*.yml)."""
+    files = sorted((MONITORING / "prometheus" / "rules").glob("*.yml"))
+    assert files
+    return [rule for path in files for group in _load(path)["groups"] for rule in group["rules"]]
+
+
 def test_every_alert_has_a_case_that_checks_its_environment() -> None:
-    rules = _load(MONITORING / "prometheus" / "rules" / "alerts.yml")
-    alerts = {
-        rule["alert"] for group in rules["groups"] for rule in group["rules"] if "alert" in rule
-    }
+    alerts = {rule["alert"] for rule in _rules() if "alert" in rule}
     cases = _load(ROOT / "tests" / "monitoring" / "alerts.test.yml")
     with_environment = {
         check["alertname"]
@@ -51,12 +55,10 @@ SHARED_BY_DESIGN = {"HostCpuHigh"}
 
 
 def test_every_alert_that_groups_by_environment_has_a_prod_case() -> None:
-    rules = _load(MONITORING / "prometheus" / "rules" / "alerts.yml")
     grouping = {
         rule["alert"]
-        for group in rules["groups"]
-        for rule in group["rules"]
-        if re.search(r"\bby \(\s*environment\b", rule["expr"])
+        for rule in _rules()
+        if "alert" in rule and re.search(r"\bby \(\s*environment\b", rule["expr"])
     } - SHARED_BY_DESIGN
     cases = _load(ROOT / "tests" / "monitoring" / "alerts.test.yml")
     prod_cases = {
@@ -577,6 +579,8 @@ SELECTED = 'environment="${environment:text}"'
 # Host-level panels and the budget across environments show everything the stack scrapes.
 UNFILTERED_PANELS = {"Host CPU", "Host memory", "Root filesystem used", "LLM spend this month"}
 CONTAINER_PANELS = {"Container CPU", "Container memory"}
+# The SLA of prod is one fixed environment, whatever the Environment switch says.
+PROD_PANELS = {"SLA availability, month to date", "Downtime budget left", "Downtime budget spent"}
 # Every other panel with a PromQL target filters on the selected environment.
 FILTERED_PANELS = {
     "Requests per second",
@@ -644,13 +648,16 @@ def test_prometheus_panels_read_the_selected_environment() -> None:
         for panel in _panels()
         if any("expr" in target for target in panel.get("targets", []))
     }
-    assert prometheus == FILTERED_PANELS | UNFILTERED_PANELS | CONTAINER_PANELS
+    assert prometheus == FILTERED_PANELS | UNFILTERED_PANELS | CONTAINER_PANELS | PROD_PANELS
     for panel in _panels():
         for target in panel.get("targets", []):
             if "expr" not in target:
                 continue
             if panel["title"] in UNFILTERED_PANELS:
                 assert "environment" not in target["expr"], panel["title"]
+            elif panel["title"] in PROD_PANELS:
+                assert 'environment="prod"' in target["expr"], panel["title"]
+                assert "${environment" not in target["expr"], panel["title"]
             elif panel["title"] in CONTAINER_PANELS:
                 # Containers of the monitoring and edge projects are shared by both.
                 assert 'environment=~"${environment:text}|shared"' in target["expr"], panel["title"]

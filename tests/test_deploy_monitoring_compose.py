@@ -32,6 +32,20 @@ def test_monitoring_images_are_pinned_by_digest() -> None:
         assert re.fullmatch(r"[a-z0-9./_-]+:v?[\d.]+(-alpine)?@sha256:[0-9a-f]{64}", image), image
 
 
+def test_prometheus_retention_covers_two_months() -> None:
+    # The SLA window is the calendar month: 31 days of the current month and, for the comparison
+    # with the previous one, another 31 days.
+    prometheus = _service_blocks(_read(MONITORING / "compose.yml"))["prometheus"]
+
+    time_limit = re.search(r"^      - --storage\.tsdb\.retention\.time=(\d+)d$", prometheus, re.M)
+    size_limit = re.search(r"^      - --storage\.tsdb\.retention\.size=(\S+)$", prometheus, re.M)
+    assert time_limit is not None
+    assert size_limit is not None
+    assert int(time_limit.group(1)) >= 31 + 31
+    assert time_limit.group(1) == "65"
+    assert size_limit.group(1) == "6GB"
+
+
 def test_backup_uses_the_postgres_image_of_staging() -> None:
     # pg_dump must match the server version: the same image, by the same digest.
     staging = re.search(
