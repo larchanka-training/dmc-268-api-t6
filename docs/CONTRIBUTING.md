@@ -316,15 +316,13 @@ gh issue edit <номер issue> --milestone "Спринт 4"
 
 Для автора вне команды: как поднять стек, проверить правку и куда её отправить. Устройство кода — [`ARCHITECTURE.md`](ARCHITECTURE.md). Что дальше происходит с PR, описано в §2–§7, оформление веток, коммитов и тела PR — в [`git-workflow.md`](../.agents/rules/git-workflow.md); здесь это не повторяется.
 
-**Поднять стек.** Нужны [uv](https://docs.astral.sh/uv/) и Docker:
+**Поднять стек.** Нужны [uv](https://docs.astral.sh/uv/) и Docker. Стек поднимает одна команда:
 
 ```bash
-cp .env.example .env
-uv sync
 docker compose up --build --wait
 ```
 
-API отвечает на `http://localhost:8000/healthcheck`. Сервисы, запуск без Compose и `webhook-worker` описаны в [README](../README.md#run).
+API отвечает на `http://localhost:8000/healthcheck`. Источник этой команды — [README «Run»](../README.md#run): там же сервисы, запуск без Compose и `webhook-worker`.
 
 **Прогнать гейты.** То же проверяет CI в `Python lint / type / test`:
 
