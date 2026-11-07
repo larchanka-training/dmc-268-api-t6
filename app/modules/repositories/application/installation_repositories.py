@@ -19,7 +19,8 @@ class RepositorySnapshot:
     web_url: str
     # GitHub's flag; None is unknown, which the public badge reads as not public (#454).
     private: bool | None = None
-    # When the flag was true; None when nothing was read, so a stored flag stays as it is.
+    # The time the flag is known as of, for true and false alike; None when nothing was read,
+    # so a stored flag stays as it is.
     private_observed_at: datetime | None = None
 
 
