@@ -233,7 +233,7 @@ deep: 5 цен единицы).
   Portal (§10.1).
 - Включённые ревью начисляются грантом `subscription_grant` в USD ($19 и $49) по
   `invoice.paid` только для счетов с `billing_reason` = `subscription_create` или
-  `subscription_cycle`. Ключ идемпотентности: id счёта.
+  `subscription_cycle`. Ключ идемпотентности: id счёта (`payments.provider_invoice_id`, §10.4).
 - Счета с другим `billing_reason` полного гранта не дают. Единственное исключение
   описано в §4.4: доплата за повышение даёт грант на оплаченную сумму. Счёт с нулевой
   суммой (`amount_paid = 0`) грант не даёт.
@@ -382,13 +382,32 @@ deep: 5 цен единицы).
 | Когда срабатывает | пересечение сверху вниз: после списания купленный и бонусный остаток стал ниже порога, а до него был не ниже. Остаток ниже порога без нового пересечения второй платёж не запускает |
 | Сумма | от $10 до $500, как обычное пополнение, и не больше месячного потолка: настройки с суммой больше потолка не сохраняются |
 | Месячный потолок | по умолчанию $200 за календарный месяц UTC; пользователь меняет в пределах $10-$500 |
-| Платёж | разовый счёт Stripe Invoicing: позиция на сумму, `automatic_tax[enabled]=true`, `collection_method=charge_automatically`, карта авто-пополнения как `default_payment_method`, `metadata.source=auto_recharge`; Stripe списывает её `off_session` при финализации. Ключ идемпотентности на попытку |
+| Платёж | разовый счёт Stripe Invoicing: позиция на сумму, `automatic_tax[enabled]=true`, `collection_method=charge_automatically`, карта авто-пополнения как `default_payment_method`, `metadata.source=auto_recharge`, `metadata.payment_id`; шаги и ключи ниже |
 | Карта | одна карта авто-пополнения (§6.1); её смена или удаление в Customer Portal выключает авто-пополнение до нового согласия (§9, п. 3) |
 | Отказ карты | авто-пополнение выключается; баннер в ui (ниже) |
 | Требуется 3-D Secure | то же: выключается, баннер; клиент платит вручную через Checkout |
 | Потолок достигнут | попытка не идёт, если сумма больше остатка потолка месяца; до конца месяца не срабатывает, отметка в ui |
 
-- Не больше одной попытки на workspace одновременно.
+- **Шаги платежа.** Счёт, созданный через API, стоит в `draft`, а
+  автоматическое проведение Stripe ждёт час, поэтому все шаги явные:
+  1. В короткой транзакции БД пишется строка `payments` (`source=auto_recharge`,
+     `status=pending`, сумма); её id и есть id попытки.
+  2. Вне транзакции: позиция счёта и счёт (`auto_advance=false`), затем
+     `POST /v1/invoices/{id}/finalize`, затем `POST /v1/invoices/{id}/pay` с
+     `off_session=true`. Каждый вызов идёт с `Idempotency-Key` из id попытки и
+     имени шага (`ar-<payment_id>-create`, `-finalize`, `-pay`).
+  3. В строку `payments` пишутся `provider_invoice_id` (`in_...`) и
+     `provider_payment_id` PaymentIntent счёта.
+  4. Деньги только по вебхуку: `invoice.paid` даёт `payments.status=paid` и грант
+     `top_up` с этим `payment_id`; `invoice.payment_failed` и
+     `invoice.payment_action_required` дают `status=failed` и выключают
+     авто-пополнение.
+  Строка `pending` старше часа сверяется с Stripe задачей §10.5.
+- **Одна попытка на workspace:** частичный уникальный индекс `payments
+  (workspace_id) WHERE source = 'auto_recharge' AND status = 'pending'`. Пока
+  попытка не закончилась, новая не создаётся.
+- Месячный потолок считается по строкам `payments` с `source=auto_recharge` в
+  статусах `pending` и `paid` за календарный месяц UTC.
 - **Как клиент узнаёт об отказе.** Писем мы не шлём: своей рассылки в эпике нет
   (#369), а email пользователей у нас нет (вход через GitHub App). Вместо письма:
   - баннер на всех страницах workspace для Owner, Admin и Billing: «Авто-пополнение
@@ -619,7 +638,17 @@ deep: 5 цен единицы).
 - Входящие: id события Stripe (`evt_...`) уникален в своей таблице квитанций;
   повтор отвечает 200 без действий. Порядок событий не гарантирован: обработчик
   читает актуальный объект из Stripe.
-- Бизнес-ключи: уникальные `payments (provider, provider_checkout_id)` и
+- **Строка `payments` на каждый оплачиваемый объект Stripe.** Новые поля (#371):
+  `source` (`checkout | auto_recharge | subscription`), `provider_invoice_id`
+  (уникальна пара `(provider, provider_invoice_id)`), `workspace_id`. Checkout
+  пишет строку при создании сессии (`provider_checkout_id`, счёт `invoice_creation`
+  дописывается в `provider_invoice_id`); авто-пополнение при создании попытки
+  (§6.2); счёт подписки при первом событии по нему (`invoice.paid` или
+  `invoice.payment_failed`). Статусы те же: `pending | paid | failed | expired`.
+  Грант `top_up` и `subscription_grant` ссылаются на строку через `payment_id`;
+  ключ гранта подписки «id счёта» это `provider_invoice_id` этой строки.
+- Бизнес-ключи: уникальные `payments (provider, provider_checkout_id)`,
+  `(provider, provider_invoice_id)` и
   `(provider, provider_payment_id)`, `credit_ledger.payment_id`,
   строки списания по `(usage_event_id, grant_id)`, `run_settlement` по
   `(run_id, grant_id)` (§5.1), грант подписки по id счёта, бонус по GitHub user id,
