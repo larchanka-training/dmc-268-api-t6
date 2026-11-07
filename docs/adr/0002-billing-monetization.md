@@ -361,7 +361,8 @@ deep: 5 цен единицы).
 - Карту можно сохранить двумя путями, оба уже в первой версии:
   - **кнопка «Привязать карту»** на экране «Баланс и тариф»: Checkout `mode=setup`
     (SetupIntent `usage=off_session`), без списания. Событие `setup_intent.succeeded`.
-    Только этот путь даёт бонус (§7);
+    В `setup_intent_data.metadata` сессии пишутся `workspace_id`, `github_user_id`
+    (кто нажал кнопку) и `source=link_card`. Только этот путь даёт бонус (§7);
   - **при пополнении**, если клиент отметил «Сохранить карту» на нашей странице до
     Checkout (§9, п. 4): `payment_intent_data.setup_future_usage=off_session`. Карта
     сохраняется вместе с оплатой; событие `checkout.session.completed`, карта берётся
@@ -406,7 +407,10 @@ deep: 5 цен единицы).
 - **Фича-флаг** `billing_signup_bonus`, по умолчанию выключен. Пока флаг выключен,
   бонус не начисляется и не обещается в ui. Включает команда.
 - **Когда начисляется:** $5 только после привязки карты кнопкой «Привязать карту»
-  (Checkout `mode=setup`, §6.1), по `setup_intent.succeeded`. На этом пути карта не
+  (Checkout `mode=setup`, §6.1), по `setup_intent.succeeded`. Получателя и
+  workspace обработчик берёт из `metadata` SetupIntent; без `source=link_card`,
+  `workspace_id` и `github_user_id` бонуса нет, даже если флаг включён: другой
+  SetupIntent того же Customer бонус не даёт. На этом пути карта не
   списывается. Карта, сохранённая при пополнении, бонуса не даёт: так у бонуса одно
   событие и одно место в ui.
 - **Кому:** GitHub-пользователю, который нажал кнопку (роль Owner, Admin или
@@ -600,7 +604,7 @@ deep: 5 цен единицы).
 | `checkout.session.async_payment_succeeded`, `..._failed` | в v1 только карты; событие логируется |
 | `payment_intent.succeeded`, `payment_intent.payment_failed` | только лог: деньги пополнения по `checkout.session.completed`, авто-пополнения и подписки по событиям счёта |
 | `payment_method.detached`, `customer.updated` (смена карты по умолчанию) | если это карта авто-пополнения: авто-пополнение выключается, баннер «Карта изменена, включите авто-пополнение заново» (§6.2, §9 п. 3) |
-| `setup_intent.succeeded` | путь «Привязать карту»: карта сохранена; бонус §7, если флаг включён и условия выполнены |
+| `setup_intent.succeeded` | `metadata.source=link_card`: карта сохранена; бонус §7 получателю из `metadata.github_user_id`, если флаг включён и условия выполнены. Без этой метки только лог |
 | `invoice.paid` | `metadata.source=auto_recharge`: грант `top_up` (§6.2). Счёт подписки, подписка `canceled`: грант `top_up` на оплаченную сумму, тариф не возвращается (§4.3). Иначе грант `subscription_grant`: полный для `billing_reason` = `subscription_create` или `subscription_cycle`, на оплаченную сумму для доплаты за повышение (§4.3, §4.4); иначе без гранта |
 | `invoice.payment_failed`, `invoice.payment_action_required` | `metadata.source=auto_recharge`: авто-пополнение выключается, баннер (§6.2). Подписка: статус `past_due`, тариф работает, баннер «Оплата подписки не прошла» (§4.3), письмо шлёт Stripe |
 | `customer.subscription.created`, `.updated` | тариф workspace, лимит репозиториев, статус подписки (`active`, `past_due`) |
