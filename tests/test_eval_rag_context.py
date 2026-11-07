@@ -28,8 +28,8 @@ from app.modules.reviews.application.review_context_stage import FAST_CONTEXT_TO
 from app.modules.reviews.application.vcs_diff import is_generated_path
 from review.scripts.eval_rag_context import Arm, ArmInput, build_arm_input, build_case_input
 from review.scripts.eval_rag_source import commit_id
-from tests.test_eval_live import VALID as VALID_ANSWER
-from tests.test_eval_live import FakeTransport, answer, settings
+from tests.eval_live_fakes import VALID as VALID_ANSWER
+from tests.eval_live_fakes import FakeTransport, answer, settings
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "rag_eval"
 _SPIKE = _FIXTURES / "spike"

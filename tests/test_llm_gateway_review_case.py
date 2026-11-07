@@ -15,16 +15,15 @@ from pathlib import Path
 
 from app.bootstrap.llm_gateway import ReviewCase
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
-from tests.test_eval_live import (
+from tests.eval_live_fakes import (
     REPO_ROOT,
     VALID,
     FakeTransport,
     answer,
-    fixture_root,
-    record,
     record_arm,
     rules_fixture_root,
 )
+from tests.test_eval_live import fixture_root, record
 
 _SYSTEM_V5 = REPO_ROOT / "review" / "prompts" / "review.system.v5.md"
 

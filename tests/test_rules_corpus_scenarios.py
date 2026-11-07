@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from tests.test_eval_live import VALID, FakeTransport, answer, record_arm, rules_fixture_root
+from tests.eval_live_fakes import VALID, FakeTransport, answer, record_arm, rules_fixture_root
 
 ROOT = Path(__file__).resolve().parent.parent
 CASES = ROOT / "test-prs-dataset" / "rules" / "cases"
