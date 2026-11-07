@@ -18,6 +18,10 @@ def _declares_too_much(scope: Scope) -> bool:
         return False  # A malformed header decides nothing: the bytes are still counted.
 
 
+def _too_large() -> HTTPException:
+    return HTTPException(status_code=413, detail="payload too large")
+
+
 class RequestBodyLimitMiddleware:
     """Answer 413 from ``receive``: FastAPI reads the body before it runs any dependency.
 
@@ -41,12 +45,12 @@ class RequestBodyLimitMiddleware:
             if not isinstance(route, APIRoute) or route.body_field is None:
                 return await receive()
             if _declares_too_much(scope):
-                raise HTTPException(status_code=413, detail="payload too large")
+                raise _too_large()
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > MAX_REQUEST_BODY_BYTES:
-                    raise HTTPException(status_code=413, detail="payload too large")
+                    raise _too_large()
             return message
 
         await self._app(scope, limited_receive, send)
