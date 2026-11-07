@@ -113,13 +113,16 @@ modules hold only `infrastructure/` code and `app/entrypoints/` does not exist y
   Narrow exception: `SqlAlchemyUsageLedger.record` writes `usage_events` in its own
   short transaction after the provider call completes, so cost survives rollback of
   the main run. Second narrow exception (planned with #371, ADR 0002 §3.3):
-  the single billing write point records a run's charge state (its `credit_ledger`
-  rows and its hold) in its own short transaction right after `usage_events`, after
-  the run's final state is committed, or later from the leader catch-up job,
-  idempotently; the rows, keys and hold mechanics are defined in #371. Grant expiry
-  is written by an ordinary use case and is not part of this exception. These
-  exceptions do not apply to ordinary repositories and do not permit network calls
-  inside a DB transaction (.agents/rules/backend.md §3.3).
+  the single billing write point writes only a run's charge rows (`credit_ledger`)
+  and the release of its hold at the run's final result, in its own short transaction
+  right after `usage_events`, after the run's final state is committed, or later from
+  the leader catch-up job, idempotently; the rows, keys and hold mechanics are defined
+  in #371. The hold written at claim (gate 1), raised or released at gate 2 and
+  released when `billing_enforcement` is turned off is written by an ordinary use case
+  (claim, gate 2, flag turn-off) in that use case's own transaction through a
+  `billing` port; grant expiry is also written by an ordinary use case. Neither is
+  part of this exception. These exceptions do not apply to ordinary repositories
+  and do not permit network calls inside a DB transaction (.agents/rules/backend.md §3.3).
   <!-- SYNC: the same exception in AGENTS.md, .agents/rules/backend.md §3 item 3 (authoritative), docs/BACKEND_ARCHITECTURE.md (UnitOfWork) and ADR 0002 §3.3; change all four together -->
 - Do not put business logic in a router — decode the transport contract and
   call a use case.
