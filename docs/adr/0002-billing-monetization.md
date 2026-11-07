@@ -263,6 +263,9 @@ deep: 5 цен единицы).
     возвращается и `subscription_grant` не пишется; оплаченная сумма зачисляется
     грантом `top_up` (12 месяцев), чтобы деньги клиента не пропали. Вернуть тариф
     можно только новой подпиской (§4.4);
+  - первый счёт (`subscription_create`) не оплачен: подписка `incomplete`, тариф
+    не начинается и гранта нет; Stripe закрывает её как `incomplete_expired`,
+    workspace остаётся на прежнем тарифе;
   - `invoice.paid` по счёту в `past_due` до конца повторов: обычный грант по
     `billing_reason`, подписка снова `active`.
 
@@ -277,7 +280,9 @@ deep: 5 цен единицы).
 
 - Customer Portal настраивается так: повышение в Portal выключено (оно идёт только
   с нашего экрана, чтобы было `pending_if_incomplete`), понижение и отмена в конце
-  периода (`schedule_at_period_end`).
+  периода (`schedule_at_period_end`). Можно ли в Portal включить понижение без повышения,
+  исполнитель #372 проверяет по документации Stripe до реализации; если нельзя,
+  понижение тоже идёт с нашего экрана.
 - **Starter при числе репозиториев больше 5.** Правило одно для любого пути в
   Starter: понижение Pro → Starter, переход PAYG → Starter и новая подписка Starter
   после отмены. До оплаты или смены страница тарифа предупреждает и даёт Owner или
@@ -369,6 +374,9 @@ deep: 5 цен единицы).
 ### 6.1. Пополнение
 
 - Любая сумма от $10 до $500 в целых долларах, Stripe Checkout `mode=payment`.
+- В v1 только карты: каждая сессия Checkout (пополнение, подписка, сохранение
+  карты) создаётся с `payment_method_types=[card]` (§10.1), поэтому отложенных
+  способов оплаты нет и деньги приходят в `checkout.session.completed`.
 - Грант `top_up` пишется по `checkout.session.completed` со статусом оплаты `paid`.
   Налог и счёт: §9. В `metadata` сессии и её PaymentIntent
   (`payment_intent_data.metadata`) пишутся `workspace_id` и `source=checkout`.
@@ -671,7 +679,8 @@ deep: 5 цен единицы).
    до Checkout подписки, рядом с условиями п. 1, обязательный чекбокс «Подписка
    продлевается автоматически, отменить можно в любой момент», с ценой, периодом и
    способом отмены. Без него кнопка оплаты подписки не активна. Отмена онлайн в
-   Customer Portal и ссылкой из ui. Квитанции и счета шлёт Stripe.
+   Customer Portal и ссылкой из ui. Квитанции и счета в live шлёт Stripe (в sandbox
+   писем нет, §18).
 
 **Где хранятся согласия.** Таблица `billing_consents` (новая): `id`, `workspace_id`,
 `github_user_id`, `kind` (`immediate_start | subscription_renewal | auto_recharge |
@@ -691,7 +700,7 @@ save_card`), `text_version`, `params` (JSON: цена и период для `im
 | Объект | Использование |
 |---|---|
 | Customer | один на workspace; `metadata.workspace_id`; создаётся нами до первого Checkout любого вида (`mode=payment`, `subscription` или `setup`) и передаётся в сессию как `customer` |
-| Checkout Session | пополнение (`mode=payment`), подписка (`mode=subscription`), сохранение карты (`mode=setup`); в каждой сессии `billing_address_collection=required`, `customer_update[address]=auto` и, раз включён `tax_id_collection` при существующем Customer, `customer_update[name]=auto` (имя компании и VAT ID сохраняются в Customer, docs.stripe.com/tax/checkout/tax-ids): адрес сохраняется в Customer, по нему Stripe Tax считает налог и в Checkout, и в счёте авто-пополнения (§6.2) |
+| Checkout Session | пополнение (`mode=payment`), подписка (`mode=subscription`), сохранение карты (`mode=setup`); в каждой сессии `payment_method_types=[card]` (§6.1), `billing_address_collection=required`, `customer_update[address]=auto` и, раз включён `tax_id_collection` при существующем Customer, `customer_update[name]=auto` (имя компании и VAT ID сохраняются в Customer, docs.stripe.com/tax/checkout/tax-ids): адрес сохраняется в Customer, по нему Stripe Tax считает налог и в Checkout, и в счёте авто-пополнения (§6.2) |
 | Product, Price | Starter и Pro: фиксированная месячная цена (licensed), `tax_behavior=inclusive`; пополнение: `price_data` на выбранную сумму с `tax_behavior=inclusive` |
 | Subscription | один активный тариф на workspace |
 | SetupIntent | сохранение карты `off_session` |
@@ -720,17 +729,17 @@ save_card`), `text_version`, `params` (JSON: цена и период для `im
 |---|---|
 | `checkout.session.completed` | `mode=payment`: `payments.status=paid`, грант `top_up`, карта сохранена, если был `setup_future_usage` (§6.1); `mode=setup`: карта сохранена, бонус по `setup_intent.succeeded` |
 | `checkout.session.expired` | `payments.status=expired` |
-| `checkout.session.async_payment_succeeded`, `..._failed` | в v1 только карты; событие логируется |
+| `checkout.session.async_payment_succeeded`, `..._failed` | не ожидаются: Checkout принимает только карты (`payment_method_types=[card]`, §6.1, §10.1); если придут, логируются, а оплату подхватывает суточная сверка (§10.5) |
 | `payment_intent.succeeded`, `payment_intent.payment_failed` | только лог: деньги пополнения по `checkout.session.completed`, авто-пополнения и подписки по событиям счёта |
 | `payment_method.detached` | если это карта авто-пополнения: авто-пополнение выключается, баннер «Карта изменена, включите авто-пополнение заново» (§6.2, §9 п. 3) |
 | `setup_intent.succeeded` | `metadata.source=link_card`: карта сохранена; бонус §7 получателю из `metadata.github_user_id`, если флаг включён и условия выполнены. Без этой метки только лог |
 | `invoice.paid` | `metadata.source=checkout`: только дописать `provider_invoice_id` строки Checkout, без гранта (§10.4). `metadata.source=auto_recharge`: грант `top_up` (§6.2). Счёт подписки, подписка `canceled`: грант `top_up` на оплаченную сумму, тариф не возвращается (§4.3). Иначе грант `subscription_grant`: полный для `billing_reason` = `subscription_create` или `subscription_cycle`, на оплаченную сумму для доплаты за повышение (§4.3, §4.4); иначе без гранта |
-| `invoice.payment_failed`, `invoice.payment_action_required` | `metadata.source=auto_recharge`: авто-пополнение выключается, баннер (§6.2). Подписка: статус `past_due`, тариф работает, баннер «Оплата подписки не прошла» (§4.3), письмо шлёт Stripe |
-| `customer.subscription.created`, `.updated` | тариф workspace, лимит репозиториев, статус подписки (`active`, `past_due`) |
+| `invoice.payment_failed`, `invoice.payment_action_required` | `metadata.source=auto_recharge`: авто-пополнение выключается, баннер (§6.2). Счёт подписки по `billing_reason`: `subscription_cycle`: статус `past_due`, тариф работает, баннер «Оплата подписки не прошла» (§4.3), в live письмо шлёт Stripe (в sandbox писем нет, §18); `subscription_update` (доплата за повышение): тариф и статус не меняются, остаётся Starter, баннер «Повышение не оплачено» по `pending_update_expired` (§4.4); `subscription_create`: тариф не начинается, гранта нет, workspace остаётся на прежнем тарифе (§4.3); иначе только лог |
+| `customer.subscription.created`, `.updated` | тариф workspace, лимит репозиториев, статус подписки. Тариф действует при статусах `active` и `past_due` (на время повторов); при `incomplete`, `incomplete_expired`, `unpaid`, `paused` и `canceled` тарифа нет, workspace на PAYG (§4.3) |
 | `customer.subscription.deleted` | тариф снимается, workspace на PAYG (§4.3) |
 | `customer.subscription.pending_update_applied` | повышение оплачено: тариф Pro, цена единицы и лимиты Pro (§4.4) |
 | `customer.subscription.pending_update_expired` | повышение не оплачено: тариф остаётся Starter, баннер «Повышение не оплачено» (§4.4) |
-| `customer.tax_id.created`, `.updated` | статус проверки VAT ID |
+| `customer.tax_id.created`, `.updated` | статус проверки VAT ID: при `unverified` или `invalid` клиент считается потребителем (§9) |
 | `charge.refunded` | по строке `refund` на каждый объект возврата из `charge.refunds`, которого ещё нет (§5). Возврат по отказу в 14 дней: авто-пополнение уже выключено отказом, проверка по уровню не запускается (§9); иной возврат запускает её (§6.2) |
 | `charge.dispute.created` | строка `adjustment` с причиной `dispute` на сумму спора в грант платежа (§5); авто-пополнение выключается; отметка для оператора |
 | `charge.dispute.closed` | `status=won`: обратная строка `adjustment` с `reversal_of_id`; иначе только лог |
@@ -839,7 +848,7 @@ save_card`), `text_version`, `params` (JSON: цена и период для `im
     не нужно;
   - установка на личный аккаунт: владелец этого аккаунта.
   Workspace и установку на `main` создаёт OAuth-вход (`LinkGitHubInstallations`),
-  а доставка для ещё не связанной установки ждёт связывания (SD §6.5). Поэтому
+  а доставка для ещё не связанной установки ждёт связывания (SD §6.9). Поэтому
   первого Owner пишет проекция после связывания, а не обработчик вебхука: когда
   установка связана с workspace, проекция берёт `sender.id` и `account.type` из
   сохранённой доставки `installation.created` этой установки, пишет в
@@ -876,7 +885,7 @@ save_card`), `text_version`, `params` (JSON: цена и период для `im
   уход одного человека не оставил workspace без владельца.
 - **Восстановление Owner.** Условие проверяется в момент заявки, а не по строкам
   `github_user_workspace_access`: они не пересчитываются по workspace и живут, пока
-  человек сам не войдёт (SD §6.5).
+  человек сам не войдёт (SD §6.9).
   - организация: админ организации в GitHub может нажать «Стать Owner». При заявке
     мы проверяем через GitHub API (`GET /orgs/{org}/memberships/{username}`) его
     роль (`admin`, `state = active`) и каждого текущего Owner. Заявка проходит, если
