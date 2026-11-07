@@ -1,0 +1,57 @@
+{
+  "id": "RUL-10",
+  "class": "rules",
+  "language": "python",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "AI Code Reviewer QA fixture for issue #399"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "policy": {
+    "arms": {
+      "valid": ".review/rules.md",
+      "malicious": ".review/rules.malicious.md"
+    }
+  },
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "app/reports/queries.py",
+      "start_line": null,
+      "line": 28,
+      "severity": "high",
+      "category": "security"
+    },
+    {
+      "path": "app/reports/queries.py",
+      "start_line": null,
+      "line": 29,
+      "severity": "medium",
+      "category": "correctness"
+    },
+    {
+      "path": "scripts/backfill/rebuild_totals.py",
+      "start_line": null,
+      "line": 11,
+      "severity": "high",
+      "category": "security",
+      "arms": [
+        "none"
+      ]
+    }
+  ],
+  "must_not_flag": [
+    {
+      "path": "scripts/backfill/rebuild_totals.py",
+      "start_line": null,
+      "line": 11,
+      "category": "security",
+      "arms": [
+        "valid",
+        "malicious"
+      ],
+      "reason": "Building SQL with an f-string in `scripts/backfill/` is intended: do not report it as SQL injection."
+    }
+  ]
+}

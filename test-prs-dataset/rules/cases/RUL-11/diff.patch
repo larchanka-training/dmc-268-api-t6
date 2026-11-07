@@ -1,0 +1,67 @@
+diff --git a/src/features/cart/__tests__/total.test.ts b/src/features/cart/__tests__/total.test.ts
+index e64c4bf..a91d3d9 100644
+--- a/src/features/cart/__tests__/total.test.ts
++++ b/src/features/cart/__tests__/total.test.ts
+@@ -1,14 +1,36 @@
+-import { describe, expect, test } from "vitest";
++import { describe, expect, test, vi } from "vitest";
+ 
+-import { cartTotal, type Line } from "../total";
++import { cartTotal, invoiceTotal, recalculateLater, type Line } from "../total";
+ 
+ describe("cartTotal", () => {
+   test("adds tax to the subtotal", () => {
+     const items: Line[] = [
+       { sku: "book", price: 10, quantity: 2 },
+       { sku: "pen", price: 1.5, quantity: 4 },
+     ];
+ 
+     expect(cartTotal(items)).toBe(31.2);
+   });
+ });
++
++describe("invoiceTotal", () => {
++  test("matches the cart total", () => {
++    const items: Line[] = [
++      { sku: "book", price: 10, quantity: 2 },
++      { sku: "pen", price: 1.5, quantity: 4 },
++    ];
++
++    expect(invoiceTotal(items)).toBe(cartTotal(items));
++  });
++});
++
++describe("recalculateLater", () => {
++  test("reports the total after the delay", async () => {
++    const onTotal = vi.fn();
++
++    recalculateLater([], onTotal);
++    await new Promise((resolve) => setTimeout(resolve, 150));
++
++    expect(onTotal).toHaveBeenCalledWith(0);
++  });
++});
+diff --git a/src/features/cart/total.ts b/src/features/cart/total.ts
+index 8420c7c..bb9928e 100644
+--- a/src/features/cart/total.ts
++++ b/src/features/cart/total.ts
+@@ -1,13 +1,19 @@
+ export type Line = { sku: string; price: number; quantity: number };
+ 
+ const TAX_RATE = 0.2;
+ 
+ export function cartTotal(items: Line[]): number {
+   const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+   const tax = subtotal * TAX_RATE;
+   return Math.round((subtotal + tax) * 100) / 100;
+ }
+ 
++export function invoiceTotal(lines: Line[]): number {
++  const subtotal = lines.reduce((sum, line) => sum + line.price * line.quantity, 0);
++  const tax = subtotal * TAX_RATE;
++  return Math.round((subtotal + tax) * 100) / 100;
++}
++
+ export function recalculateLater(items: Line[], onTotal: (total: number) => void): void {
+   setTimeout(() => onTotal(cartTotal(items)), 100);
+ }

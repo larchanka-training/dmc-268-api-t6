@@ -1,0 +1,18 @@
+diff --git a/src/features/invites/renderInvite.ts b/src/features/invites/renderInvite.ts
+new file mode 100644
+index 0000000..4ae9294
+--- /dev/null
++++ b/src/features/invites/renderInvite.ts
+@@ -0,0 +1,12 @@
++import type { Invite } from "./types";
++
++const DATE_FORMAT = new Intl.DateTimeFormat("en", { dateStyle: "medium" });
++
++/** Shows the newest invite: who sent it and the note they typed for the recipient. */
++export function renderOrgInvite(container: HTMLElement, invites: Invite[]): void {
++  const sorted = [...invites].sort((a, b) => a.sentAt.localeCompare(b.sentAt));
++  const newest = sorted[sorted.length];
++  const sent = DATE_FORMAT.format(new Date(newest.sentAt));
++
++  container.innerHTML = `<p>${newest.sender}, ${sent}</p><p>${newest.note}</p>`;
++}
