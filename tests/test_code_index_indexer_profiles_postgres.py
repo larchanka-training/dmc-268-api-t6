@@ -1,13 +1,6 @@
-"""PostgreSQL evidence for the graph indexer (#142).
+"""PostgreSQL policy, profile and stale-index rebuild scenarios for the graph indexer.
 
-A fake VCS serves a tarball per commit; the archive reader, the parser, the resolver and
-the store are the real ones. AC6: an incremental build of repository A equals a fresh
-full build of repository B at the same commit, compared as the normalized sets of files,
-symbols, edges and import records. Each scenario also proves that A really built
-incrementally and that the sets changed.
-
-Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
-Each test migrates its own schema to head and drops it afterwards.
+The scenarios use the shared fake VCS and real indexer harness.
 """
 
 from __future__ import annotations
@@ -26,85 +19,21 @@ from app.modules.code_index.application.exclusions import ExclusionClass
 from app.modules.code_index.domain.enums import IndexStatus
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from tests.code_index_indexer_support import (
-    _ADMISSION as _ADMISSION,
-)
-from tests.code_index_indexer_support import (
-    _KIB as _KIB,
-)
-from tests.code_index_indexer_support import (
-    _LIMITS as _LIMITS,
-)
-from tests.code_index_indexer_support import (
-    _MIB as _MIB,
-)
-from tests.code_index_indexer_support import (
-    _SETTINGS as _SETTINGS,
-)
-from tests.code_index_indexer_support import (
-    _USER as _USER,
-)
-from tests.code_index_indexer_support import (
-    _VERSIONS as _VERSIONS,
-)
-from tests.code_index_indexer_support import (
-    EXTERNAL as EXTERNAL,
-)
-from tests.code_index_indexer_support import (
-    RESOLVED as RESOLVED,
-)
-from tests.code_index_indexer_support import (
-    Branch as Branch,
-)
-from tests.code_index_indexer_support import (
-    Indexer as Indexer,
-)
-from tests.code_index_indexer_support import (
-    Link as Link,
-)
-from tests.code_index_indexer_support import (
-    Snapshot as Snapshot,
-)
-from tests.code_index_indexer_support import (
-    Tree as Tree,
-)
-from tests.code_index_indexer_support import (
-    Vcs as Vcs,
-)
-from tests.code_index_indexer_support import (
-    Wakeups as Wakeups,
-)
-from tests.code_index_indexer_support import (
-    _changes as _changes,
-)
-from tests.code_index_indexer_support import (
-    _Database as _Database,
-)
-from tests.code_index_indexer_support import (
-    _imports as _imports,
-)
-from tests.code_index_indexer_support import (
-    _raw_rows as _raw_rows,
-)
-from tests.code_index_indexer_support import (
-    _record as _record,
-)
-from tests.code_index_indexer_support import (
-    _repository as _repository,
-)
-from tests.code_index_indexer_support import (
-    _run as _run,
-)
-from tests.code_index_indexer_support import (
-    _sha as _sha,
-)
-from tests.code_index_indexer_support import (
-    _tarball as _tarball,
-)
-from tests.code_index_indexer_support import (
-    _uses as _uses,
+    _USER,
+    _VERSIONS,
+    RESOLVED,
+    Indexer,
+    Link,
+    Tree,
+    _Database,
+    _imports,
+    _raw_rows,
+    _record,
+    _run,
+    _uses,
 )
 
-pytest_plugins = ("tests.code_index_indexer_support",)
+pytest_plugins = ("tests.code_index_postgres", "tests.code_index_indexer_support")
 
 # --- authoritative policy excluded from source archives (#207) ----------------------------
 

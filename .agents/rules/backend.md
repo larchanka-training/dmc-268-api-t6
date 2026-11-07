@@ -132,7 +132,8 @@ from a missing scope.
   before pytest loads it as a plugin, or a plain module whose helpers assert (today
   `tests.worker_queue_postgres`, `tests.rules_md_e2e`, `tests.deploy_host_fakes`,
   `tests.deploy_prod_workflow_fakes`, `tests.monitoring_deploy_host`,
-  `tests.code_index_postgres` and `tests.portal_postgres`).
+  `tests.code_index_postgres`, `tests.portal_postgres` and
+  `tests.code_index_indexer_support`).
 - Assert literal values taken from the spec — never derive an expected value from
   the implementation under test.
 - One test per behavior. Before adding a test, grep the feature's file prefix for the
