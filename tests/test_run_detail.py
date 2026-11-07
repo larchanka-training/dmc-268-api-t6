@@ -197,9 +197,9 @@ def test_summary_and_saved_result_follow_displayed_status_when_run_finishes_betw
     detail = asyncio.run(GetRunDetail(repository).execute(RUN))
 
     assert detail is not None and repository.item is not None
-    assert repository.item.status == "succeeded"
+    assert repository.item.status == RunStatus.SUCCEEDED
     assert detail.run.status == status
-    if status == "succeeded":
+    if status == RunStatus.SUCCEEDED:
         assert detail.review.summary == summary
         assert detail.review.saved_result is saved
         assert detail.verdict == "clean"
@@ -348,7 +348,7 @@ def test_rerun_publication_failure_keeps_the_run_queued_for_the_reconciler() -> 
         RerunRun(lambda: repository, repository, Publisher(fail=True), lambda: NOW).execute(RUN)
     )
 
-    assert item is not None and item.status == "queued"
+    assert item is not None and item.status == RunStatus.QUEUED
     assert repository.published == []
 
 

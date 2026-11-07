@@ -28,10 +28,10 @@ class FakeCancelRunRepository:
         item = self._items.get(run_id)
         if item is None:
             return CancelRequestResult(found=False, changed=False)
-        if item.status == "queued":
+        if item.status == RunStatus.QUEUED:
             self._items[run_id] = replace(item, status=RunStatus.CANCELLED)
             return CancelRequestResult(found=True, changed=True)
-        elif item.status in {"running", "publishing"}:
+        elif item.status in {RunStatus.RUNNING, RunStatus.PUBLISHING}:
             if not item.cancel_requested:
                 self._items[run_id] = replace(item, cancel_requested=True)
                 return CancelRequestResult(found=True, changed=True)

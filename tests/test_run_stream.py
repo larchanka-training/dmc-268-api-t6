@@ -41,7 +41,7 @@ def make_item(status: RunStatus = RunStatus.RUNNING) -> RunListItem:
         status=status,
         engine=Engine.FAST,
         attempt=0,
-        cancel_requested=status == "running",
+        cancel_requested=status == RunStatus.RUNNING,
         started_at=created_at,
         finished_at=None,
         error_code=None,
