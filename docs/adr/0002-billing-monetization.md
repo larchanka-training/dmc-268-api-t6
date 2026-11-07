@@ -1079,8 +1079,10 @@ GitHub после принятия приглашения видит workspace �
 
 - Данные вымышленной немецкой GmbH в одном месте конфигурации (файл в ui, путь
   задаёт [ui#211](https://github.com/larchanka-training/dmc-268-ui-t6/issues/211));
-  legal-страницы, страница цен и Public details аккаунта Stripe sandbox берут их
-  оттуда.
+  legal-страницы и страница цен берут их оттуда. Это единственный источник: Public
+  details и адрес head office в Dashboard Stripe sandbox (для Stripe Tax) заполняются
+  вручную копией из этого файла, и при каждой правке файла их сверяют с ним (шаг в
+  How to verify ui#211).
 - Значения: «Beispiel Review GmbH», Musterstraße 1, 10115 Berlin; HRB 000000 B,
   Amtsgericht Charlottenburg; USt-IdNr. DE000000000; Geschäftsführer Max
   Mustermann; email legal@example.com, телефон +49 30 00000000 (второй канал
