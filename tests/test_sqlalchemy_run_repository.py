@@ -670,7 +670,7 @@ def test_sqlalchemy_run_repository_writes_fail_fast_without_a_unit_of_work_sessi
         "expected_threshold",
     ),
     [
-        (None, None, 4, SeverityThreshold.WARNING, 4, "warning"),
+        (None, None, 4, SeverityThreshold.CRITICAL, 4, "critical"),
         (3, SeverityThreshold.WARNING, 7, SeverityThreshold.CRITICAL, 3, "warning"),
         (None, None, 5, SeverityThreshold.WARNING, 5, "warning"),
     ],
@@ -768,7 +768,8 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
     assert post_input.repository_max_inline == expected_cap
     assert post_input.severity_threshold == expected_threshold
 
-    # Verify that in legacy runs without verifier, unverified v2 names are nulled out
+    # Verify that in legacy runs without verifier, unverified v2 names are nulled out.
+    # Critical findings publish under every threshold above, so all three stay inline.
     findings = [
         ReviewFinding(
             path="app/main.py",
@@ -777,7 +778,7 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
             title="Finding 1",
             body="Review finding text",
             suggestion=None,
-            severity="medium",
+            severity="critical",
             category="correctness",
             confidence=0.9,
             rule_name=".review/rules.md",
@@ -789,7 +790,7 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
             title="Finding 2",
             body="Review finding text 2",
             suggestion=None,
-            severity="medium",
+            severity="critical",
             category="correctness",
             confidence=0.9,
             rule_name="AGENTS.md",
@@ -801,7 +802,7 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
             title="Finding 3",
             body="Review finding text 3",
             suggestion=None,
-            severity="medium",
+            severity="critical",
             category="correctness",
             confidence=0.9,
             rule_name="service-defaults:fastapi",
