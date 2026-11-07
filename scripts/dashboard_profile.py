@@ -48,7 +48,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import httpx
@@ -253,11 +253,18 @@ class Volume:
         return self.prs_per_day * self.history_days
 
 
+_PATHS = {"summary": "/api/metrics/summary", "runs": "/api/runs"}
+
+
 @dataclass(frozen=True)
 class Scenario:
     name: str
-    path: str
+    endpoint: Literal["summary", "runs"]
     params: dict[str, str]
+
+    @property
+    def path(self) -> str:
+        return _PATHS[self.endpoint]
 
 
 @dataclass(frozen=True)
@@ -700,6 +707,10 @@ def print_volume(database_url: URL) -> None:
     print(f"rows digest: {digest}", flush=True)
 
 
+def _load() -> str:
+    return " ".join(f"{value:.1f}" for value in os.getloadavg())
+
+
 def print_environment(database_url: URL) -> None:
     with psycopg.connect(_conninfo(database_url)) as connection:
         settings = {
@@ -712,11 +723,10 @@ def print_environment(database_url: URL) -> None:
                 "max_parallel_workers_per_gather",
             )
         }
-    load = " ".join(f"{value:.1f}" for value in os.getloadavg())
     print(
         "environment: "
         + " ".join(f"{name}={value}" for name, value in settings.items())
-        + f" cpus={os.cpu_count()} load={load}",
+        + f" cpus={os.cpu_count()} load={_load()}",
         flush=True,
     )
 
@@ -773,10 +783,10 @@ def scenarios(database_url: URL) -> tuple[Scenario, ...]:
     page = {"limit": str(_PAGE_SIZE)}
     cursor = RunCursor(created_at=middle[0], id=middle[1]).encode()
     return (
-        Scenario("summary 30d", "/api/metrics/summary", {"range": "30d"}),
-        Scenario("summary 30d repo", "/api/metrics/summary", {"range": "30d", "repo": busiest[0]}),
-        Scenario("runs first page", "/api/runs", page),
-        Scenario("runs by cursor", "/api/runs", {**page, "cursor": cursor}),
+        Scenario("summary 30d", "summary", {"range": "30d"}),
+        Scenario("summary 30d repo", "summary", {"range": "30d", "repo": busiest[0]}),
+        Scenario("runs first page", "runs", page),
+        Scenario("runs by cursor", "runs", {**page, "cursor": cursor}),
     )
 
 
@@ -845,11 +855,11 @@ def _check_data(client: httpx.Client, chosen: Sequence[Scenario]) -> None:
     """A page or a summary over nearly empty data would make the numbers lie."""
     for scenario in chosen:
         body = _timed_get(client, scenario)[1].json()
-        if "items" in body and len(body["items"]) < _PAGE_SIZE:
+        if scenario.endpoint == "runs" and len(body["items"]) < _PAGE_SIZE:
             raise MeasurementFailed(
                 f"{scenario.name} did not return a full page of {_PAGE_SIZE}: raise the volume"
             )
-        if "items" not in body and not sum(body["totals"]["runsByStatus"].values()):
+        if scenario.endpoint == "summary" and not sum(body["totals"]["runsByStatus"].values()):
             raise MeasurementFailed(f"{scenario.name} counted no Run: raise the volume")
 
 
@@ -903,7 +913,7 @@ async def capture_statements(
         statements.append(Statement(statement, parameters, elapsed))
 
     async def call(scenario: Scenario) -> None:
-        if scenario.path.endswith("/summary"):
+        if scenario.endpoint == "summary":
             await summary.execute(
                 scope, range=scenario.params["range"], repo=scenario.params.get("repo")
             )
@@ -920,7 +930,7 @@ async def capture_statements(
     captured: list[Captured] = []
     # Two page sizes show whether the statement count grows with the page.
     pages = tuple(
-        Scenario(f"runs limit={limit}", "/api/runs", {"limit": str(limit)}) for limit in (10, 100)
+        Scenario(f"runs limit={limit}", "runs", {"limit": str(limit)}) for limit in (10, 100)
     )
     try:
         for scenario in (*chosen, *pages):
@@ -1017,8 +1027,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             chosen = scenarios(database_url)
             with api_server(database_url, user.public_key) as base_url:
                 print_latency(measure(base_url, user.token, chosen, arguments.requests))
-            load = " ".join(f"{value:.1f}" for value in os.getloadavg())
-            print(f"load after timing: {load}", flush=True)
+            print(f"load after timing: {_load()}", flush=True)
             captured = asyncio.run(capture_statements(database_url, user, chosen))
             print_statements(captured)
             if arguments.explain_out is not None:
