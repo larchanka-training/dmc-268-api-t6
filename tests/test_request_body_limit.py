@@ -140,22 +140,23 @@ def _install_token_and_use_cases() -> None:
 
 
 @pytest.fixture
-def token() -> Iterator[None]:
-    _install_token_and_use_cases()
+def overrides() -> Iterator[None]:
+    """Clear whatever the fixtures below install, so every test starts from the real app."""
     try:
         yield
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def token(overrides: None) -> None:
+    _install_token_and_use_cases()
 
 
 @pytest.fixture(params=[pytest.param(False, id="no-token"), pytest.param(True, id="token")])
-def with_and_without_token(request: pytest.FixtureRequest) -> Iterator[None]:
+def with_and_without_token(request: pytest.FixtureRequest, overrides: None) -> None:
     if request.param:
         _install_token_and_use_cases()
-    try:
-        yield
-    finally:
-        app.dependency_overrides.clear()
 
 
 @pytest.mark.parametrize(
@@ -278,7 +279,7 @@ def test_valid_json_of_exactly_64_kib_reaches_the_use_case(
 
 
 @pytest.fixture
-def webhooks() -> Iterator[None]:
+def webhooks(overrides: None) -> None:
     app.dependency_overrides[get_github_webhook_secret] = lambda: "secret"
     app.dependency_overrides[get_github_webhook_receipt_uow_factory] = _UseCase
     app.dependency_overrides[get_gitlab_webhook_resources] = lambda: GitLabWebhookResources(
@@ -286,10 +287,6 @@ def webhooks() -> Iterator[None]:
     )
     # Without a signature the fake refuses the delivery, but only after the whole body is read.
     app.dependency_overrides[get_bitbucket_webhook_resources] = lambda: FakeWebhookResources()
-    try:
-        yield
-    finally:
-        app.dependency_overrides.clear()
 
 
 GITHUB_WEBHOOK = "/webhooks/github"
