@@ -22,6 +22,16 @@ from app.modules.reviews.application.saved_review_result import read_saved_revie
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "dashboard_profile.py"
 _TINY = ["--prs-per-day", "5", "--history-days", "40", "--requests", "3"]
+_LOOPBACK = "postgresql+psycopg://app:app@127.0.0.1:1/app"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _no_libpq_redirect() -> Iterator[None]:
+    """An exported PGHOSTADDR or PGSERVICE refuses every run; only the guard test sets one."""
+    with pytest.MonkeyPatch.context() as patch:
+        for variable in ("PGHOSTADDR", "PGSERVICE"):
+            patch.delenv(variable, raising=False)
+        yield
 
 
 @pytest.fixture(scope="module")
@@ -73,19 +83,26 @@ def test_a_server_that_is_not_loopback_is_refused_before_any_connection(
 
 
 @pytest.mark.parametrize(
-    "arguments",
+    ("arguments", "message"),
     [
-        ["--prs-per-day", "0"],
-        ["--history-days", "0"],
-        ["--requests", "0"],
+        (["--prs-per-day", "0"], "positive"),
+        (["--history-days", "0"], "positive"),
+        (["--requests", "0"], "positive"),
     ],
 )
-def test_a_size_that_is_not_positive_is_refused(
-    profile: ModuleType, arguments: list[str], capsys: pytest.CaptureFixture[str]
+def test_an_invalid_argument_is_refused_before_any_connection(
+    profile: ModuleType, arguments: list[str], message: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    server_url = "postgresql+psycopg://app:app@127.0.0.1:1/app"
-    assert profile.main(["--server-url", server_url, *arguments]) == 2
-    assert "positive" in capsys.readouterr().err
+    assert profile.main(["--server-url", _LOOPBACK, *arguments]) == 2
+    assert message in capsys.readouterr().err
+
+
+@dataclass(frozen=True)
+class Finished:
+    code: int
+    stdout: str
+    stderr: str
+    database: str
 
 
 @dataclass(frozen=True)
@@ -106,32 +123,65 @@ class TinyRun:
         return int(match.group(1))
 
 
-def _run_profile(profile: ModuleType, server_url: str, *flags: str) -> tuple[int, str, str]:
-    stdout = io.StringIO()
-    with contextlib.redirect_stdout(stdout):
+def _run_profile(profile: ModuleType, server_url: str, *flags: str) -> Finished:
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         code = profile.main(["--server-url", server_url, *_TINY, *flags])
     match = re.search(r"database: (dashboard_profile_[0-9a-f]+)", stdout.getvalue())
     assert match is not None, stdout.getvalue()
-    return code, stdout.getvalue(), match.group(1)
+    return Finished(code, stdout.getvalue(), stderr.getvalue(), match.group(1))
+
+
+def _admin(server_url: str) -> str:
+    return make_url(server_url).set(drivername="postgresql").render_as_string(hide_password=False)
+
+
+def _database_exists(server_url: str, database: str) -> bool:
+    with psycopg.connect(_admin(server_url)) as connection:
+        row = connection.execute(
+            "SELECT count(*) FROM pg_database WHERE datname = %s", (database,)
+        ).fetchone()
+    return row != (0,)
+
+
+def _drop_database(server_url: str, database: str) -> None:
+    with psycopg.connect(_admin(server_url), autocommit=True) as connection:
+        connection.execute(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')
 
 
 @pytest.fixture(scope="module")
-def tiny_run(profile: ModuleType, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TinyRun]:
-    """One end-to-end run on a tiny volume, its database kept for the assertions."""
-    server_url = os.environ.get("TEST_DATABASE_URL")
-    if server_url is None:
+def server_url() -> str:
+    url = os.environ.get("TEST_DATABASE_URL")
+    if url is None:
         pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
+    return url
+
+
+@pytest.fixture(scope="module")
+def tiny_run(
+    profile: ModuleType, server_url: str, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[TinyRun]:
+    """One end-to-end run on a tiny volume, its database kept for the assertions."""
     explain = tmp_path_factory.mktemp("dashboard_profile") / "plans.md"
-    code, stdout, database = _run_profile(
-        profile, server_url, "--keep", "--explain-out", str(explain)
-    )
-    run = TinyRun(code, stdout, make_url(server_url), database, explain)
+    finished = _run_profile(profile, server_url, "--keep", "--explain-out", str(explain))
     try:
-        yield run
+        yield TinyRun(
+            finished.code, finished.stdout, make_url(server_url), finished.database, explain
+        )
     finally:
-        admin = run.server_url.set(drivername="postgresql")
-        with psycopg.connect(admin.render_as_string(hide_password=False), autocommit=True) as conn:
-            conn.execute(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')
+        _drop_database(server_url, finished.database)
+
+
+@pytest.fixture(scope="module")
+def unkept_run(profile: ModuleType, server_url: str) -> Finished:
+    """The same seed again, without `--keep`."""
+    return _run_profile(profile, server_url)
+
+
+@pytest.fixture(scope="module")
+def failed_run(profile: ModuleType, server_url: str) -> Finished:
+    """A volume too small to fill a page, without `--keep`."""
+    return _run_profile(profile, server_url, "--prs-per-day", "1", "--history-days", "1")
 
 
 @pytest.mark.integration
@@ -194,22 +244,21 @@ def test_the_measured_user_sees_only_part_of_the_data(tiny_run: TinyRun) -> None
 
 
 @pytest.mark.integration
-def test_the_same_seed_gives_the_same_rows_and_an_unkept_database_is_dropped(
-    profile: ModuleType, tiny_run: TinyRun
-) -> None:
-    server_url = tiny_run.server_url.render_as_string(hide_password=False)
-    code, stdout, database = _run_profile(profile, server_url)
-    assert code == 0, stdout
+def test_the_same_seed_gives_the_same_rows(tiny_run: TinyRun, unkept_run: Finished) -> None:
+    assert unkept_run.code == 0, unkept_run.stdout
     digest = re.compile(r"rows digest: ([0-9a-f]{32})")
-    first, second = digest.search(tiny_run.stdout), digest.search(stdout)
+    first, second = digest.search(tiny_run.stdout), digest.search(unkept_run.stdout)
     assert first is not None and second is not None
     assert first.group(1) == second.group(1)
-    admin = tiny_run.server_url.set(drivername="postgresql")
-    with psycopg.connect(admin.render_as_string(hide_password=False)) as connection:
-        row = connection.execute(
-            "SELECT count(*) FROM pg_database WHERE datname = %s", (database,)
-        ).fetchone()
-    assert row == (0,)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("finished", ["unkept_run", "failed_run"])
+def test_a_database_without_keep_is_dropped_also_when_the_measurement_fails(
+    request: pytest.FixtureRequest, server_url: str, finished: str
+) -> None:
+    run: Finished = request.getfixturevalue(finished)
+    assert not _database_exists(server_url, run.database)
 
 
 @pytest.mark.integration
@@ -226,22 +275,10 @@ def test_the_command_prints_p50_and_p95_of_every_scenario(tiny_run: TinyRun, sce
 
 
 @pytest.mark.integration
-def test_a_volume_without_a_full_page_fails_and_still_drops_its_database(
-    profile: ModuleType, tiny_run: TinyRun, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_a_volume_without_a_full_page_fails_the_measurement(failed_run: Finished) -> None:
     """A profile of nearly empty data would lie; the run says so instead of printing numbers."""
-    server_url = tiny_run.server_url.render_as_string(hide_password=False)
-    code, _, database = _run_profile(
-        profile, server_url, "--prs-per-day", "1", "--history-days", "1"
-    )
-    assert code == 1
-    assert "full page" in capsys.readouterr().err
-    admin = tiny_run.server_url.set(drivername="postgresql")
-    with psycopg.connect(admin.render_as_string(hide_password=False)) as connection:
-        row = connection.execute(
-            "SELECT count(*) FROM pg_database WHERE datname = %s", (database,)
-        ).fetchone()
-    assert row == (0,)
+    assert failed_run.code == 1
+    assert "full page" in failed_run.stderr
 
 
 @pytest.mark.integration
@@ -296,17 +333,13 @@ def test_a_libpq_variable_that_redirects_the_connection_is_refused(
 ) -> None:
     """libpq reads these when the URL names no hostaddr or service, past the host checked."""
     monkeypatch.setenv(variable, "192.0.2.1")
-    assert profile.main(["--server-url", "postgresql+psycopg://app:app@127.0.0.1:1/app"]) == 2
+    assert profile.main(["--server-url", _LOOPBACK]) == 2
     error = capsys.readouterr().err
     assert variable in error
     assert "loopback" in error
 
 
 @pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "127.0.0.2", "[::1]"])
-def test_a_loopback_server_passes_the_guard(
-    profile: ModuleType, host: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    for variable in ("PGHOSTADDR", "PGSERVICE"):
-        monkeypatch.delenv(variable, raising=False)
+def test_a_loopback_server_passes_the_guard(profile: ModuleType, host: str) -> None:
     url = profile.loopback_server_url(f"postgresql+psycopg://app:app@{host}:5432/app")
     assert url.database == "app"
