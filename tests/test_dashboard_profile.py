@@ -59,6 +59,10 @@ def test_percentile_is_nearest_rank(
         "postgresql+psycopg://app:app@10.0.0.5:5432/app",
         "postgresql+psycopg://app:app@/app",
         "not a url",
+        # libpq takes these over the authority, so the server would not be the one checked.
+        "postgresql+psycopg://app:app@127.0.0.1:5432/app?host=staging.example.test",
+        "postgresql+psycopg://app:app@127.0.0.1:5432/app?hostaddr=10.0.0.5",
+        "postgresql+psycopg://app:app@127.0.0.1:5432/app?service=staging",
     ],
 )
 def test_a_server_that_is_not_loopback_is_refused_before_any_connection(
