@@ -30,6 +30,7 @@ class _Store:
     due_calls: list[tuple[timedelta, int]] = field(default_factory=list)
     overwritten: list[tuple[int, int, bool | None, datetime]] = field(default_factory=list)
     renamed: list[tuple[int, int, str, str | None, datetime]] = field(default_factory=list)
+    failed: list[tuple[int, int, datetime]] = field(default_factory=list)
 
     async def due(self, *, older_than: timedelta, limit: int) -> RepositoryVisibilityDue:
         self.due_calls.append((older_than, limit))
@@ -59,6 +60,11 @@ class _Store:
             (installation_external_id, repository_external_id, full_name, web_url, observed_at)
         )
         return True
+
+    async def record_failure(
+        self, installation_external_id: int, repository_external_id: int, failed_at: datetime
+    ) -> None:
+        self.failed.append((installation_external_id, repository_external_id, failed_at))
 
 
 @dataclass
@@ -168,13 +174,14 @@ def test_a_batch_stops_after_three_failed_reads() -> None:
     assert refreshed == 0
     assert len(reader.reads) == 3
     assert store.overwritten == []
+    assert store.failed == [(17, 101, T0), (17, 102, T0), (17, 103, T0)]
 
 
-def test_a_failed_read_writes_nothing_and_the_next_one_still_runs(
+def test_a_failed_read_moves_its_row_back_and_the_next_one_still_runs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level(logging.WARNING):
-        refreshed, store, _, _ = _run(
+        refreshed, store, _, database = _run(
             {
                 101: RepositoryVisibilityUnavailable("GitHub is away"),
                 102: RuntimeError("a bug in a read"),
@@ -184,5 +191,8 @@ def test_a_failed_read_writes_nothing_and_the_next_one_still_runs(
 
     assert refreshed == 1
     assert [row[1] for row in store.overwritten] == [103]
+    # Only the failure is written for these rows, so the next pass reads the others first.
+    assert store.failed == [(17, 101, T0), (17, 102, T0)]
+    assert database.commits == 3
     assert "repository 101" in caplog.text
     assert "repository 102" in caplog.text

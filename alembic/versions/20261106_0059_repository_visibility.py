@@ -26,6 +26,10 @@ def upgrade() -> None:
         "repositories",
         sa.Column("full_name_observed_at", sa.DateTime(timezone=True), nullable=True),
     )
+    op.add_column(
+        "repositories",
+        sa.Column("private_read_failed_at", sa.DateTime(timezone=True), nullable=True),
+    )
     op.create_index(
         "ix_repositories_lower_full_name", "repositories", [sa.text("lower(full_name)")]
     )
@@ -33,6 +37,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index("ix_repositories_lower_full_name", table_name="repositories")
+    op.drop_column("repositories", "private_read_failed_at")
     op.drop_column("repositories", "full_name_observed_at")
     op.drop_column("repositories", "private_observed_at")
     op.drop_column("repositories", "private")

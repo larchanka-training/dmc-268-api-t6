@@ -122,6 +122,10 @@ class Repository(Base):
     full_name_observed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # The last failed background read of ``private``: such a row is read after the others.
+    private_read_failed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # The RAG toggle (#145): off by default, and onboarding never turns it on.
     rag_enabled: Mapped[bool] = mapped_column(BOOLEAN, nullable=False, server_default=text("false"))
     default_engine: Mapped[Engine] = mapped_column(

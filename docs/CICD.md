@@ -584,7 +584,7 @@ workflow до него уже меняет Compose-файлы и edge-прокс
 
 | Ревизия | Что удаляет downgrade | Что даёт повторный upgrade |
 |---|---|---|
-| `20261106_0059` (#454) | колонки `repositories.private`, `private_observed_at`, `full_name_observed_at` и индекс `ix_repositories_lower_full_name`; сохранённая видимость теряется | колонки снова NULL и заполняются событиями GitHub и фоновым перечитыванием; пока NULL, публичный бейдж нейтральный |
+| `20261106_0059` (#454) | колонки `repositories.private`, `private_observed_at`, `full_name_observed_at`, `private_read_failed_at` и индекс `ix_repositories_lower_full_name`; сохранённая видимость теряется | колонки снова NULL и заполняются событиями GitHub и фоновым перечитыванием; пока NULL, публичный бейдж нейтральный |
 | `20261027_0052` (#333) | колонку `code_index_states.last_error_http_status`; HTTP-статус последней ошибки индекса теряется | колонка снова NULL, прежний статус не восстанавливается |
 | `20261027_0051` (#333) | **отказывает**, пока есть status intent; после его явного удаления удаляет `bitbucket_status_publications`, порядок `bitbucket_run_origins.run_order` и UNIQUE для него | пустая таблица status intents и новый порядок run origins; удалённые намерения, применённые состояния и прежний порядок не восстанавливаются |
 | `20261026_0050` (#333) | **отказывает**, пока есть publication claim; после его явного удаления удаляет `bitbucket_publication_claims` | пустая таблица; прежние claim/lease не восстанавливаются |

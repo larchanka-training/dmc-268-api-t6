@@ -380,11 +380,11 @@ which a retry or a revival keeps, so an old delivery loses to a later change.
   oldest first, by `GET /repositories/{id}`, outside any transaction, with a time taken before the
   batch. 200 writes the flag and the name; any other final answer, and a token GitHub refuses with
   403 or 404, write `NULL`, so the row steps back a day. A network error, a 5xx, a 401, a 429 or a
-  rate limit (`Retry-After`, `X-RateLimit-Remaining: 0`) is a failed read: it writes nothing, and
-  three of them end the pass, so an outage holds the scan for a few timeouts only. The known limit:
-  a repository that alone answers 5xx for days stays first in the queue, and three of those would end
-  every pass, so all badges would turn neutral after 72 hours. GitHub's 5xx is not known to be
-  specific to a repository, and the log line of each failed read names it.
+  rate limit (`Retry-After`, `X-RateLimit-Remaining: 0`), and an unexpected error in the read, is a
+  failed read: it keeps the flag and writes only `private_read_failed_at`, and three of them end the
+  pass, so an outage holds the scan for a few timeouts only. The queue orders by the later of the
+  last read and the last failure, so a repository that fails for days goes behind the others and
+  cannot hold their reads back; the log line of each failed read names it.
 
 The Repository subscription of the GitHub App is a manual step of the App settings (staging, dev
 and sandbox Apps alike; Permissions & events, Subscribe to events, Repository). It needs no new

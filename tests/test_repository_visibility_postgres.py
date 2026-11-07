@@ -472,6 +472,35 @@ def test_a_transfer_forgets_the_flag_by_the_repository_id_across_installations(
         ),
         pytest.param(
             (
+                "UPDATE repositories SET private_observed_at = now() - interval '30 hours', "
+                f"private_read_failed_at = now() WHERE id = '{REPO_A}'",
+                "UPDATE repositories SET private_observed_at = now() - interval '25 hours' "
+                f"WHERE id = '{REPO_B}'",
+            ),
+            [(18, 102), (17, 101)],
+            id="a-failed-row-goes-behind",
+        ),
+        pytest.param(
+            (
+                f"UPDATE repositories SET private_read_failed_at = now() WHERE id = '{REPO_A}'",
+                "UPDATE repositories SET private_observed_at = now() - interval '25 hours' "
+                f"WHERE id = '{REPO_B}'",
+            ),
+            [(18, 102), (17, 101)],
+            id="a-failed-row-never-observed-goes-behind",
+        ),
+        pytest.param(
+            (
+                "UPDATE repositories SET private_observed_at = now() - interval '30 hours', "
+                f"private_read_failed_at = now() - interval '40 hours' WHERE id = '{REPO_A}'",
+                "UPDATE repositories SET private_observed_at = now() - interval '35 hours' "
+                f"WHERE id = '{REPO_B}'",
+            ),
+            [(18, 102), (17, 101)],
+            id="a-read-after-a-failure-counts",
+        ),
+        pytest.param(
+            (
                 "UPDATE repositories SET private = true, "
                 "private_observed_at = now() - interval '25 hours' "
                 f"WHERE id = '{REPO_A}'",
@@ -531,6 +560,18 @@ def test_a_batch_of_due_rows_is_limited(portal_env: Env) -> None:
     _, _, result = _exercise(portal_env, None, step)
 
     assert len(cast(RepositoryVisibilityDue, result).targets) == 1
+
+
+def test_a_failed_read_moves_only_its_own_row_back(portal_env: Env) -> None:
+    async def step(session: AsyncSession) -> dict[UUID, datetime | None]:
+        await _store(session).record_failure(GITHUB_INSTALLATION, GITHUB_REPOSITORY, T0)
+        rows = await session.execute(text("SELECT id, private_read_failed_at FROM repositories"))
+        return {row.id: row.private_read_failed_at for row in rows}
+
+    flag, observed, result = _exercise(portal_env, True, step, stamp=BEFORE)
+
+    assert (flag, observed) == (True, BEFORE)
+    assert result == {REPO_A: T0, REPO_B: None}
 
 
 def test_a_retried_delivery_keeps_its_received_at_and_loses_to_a_later_change(

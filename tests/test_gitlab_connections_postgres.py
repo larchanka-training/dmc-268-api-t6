@@ -426,6 +426,7 @@ def test_empty_gitlab_migration_round_trips_preserving_github_receipts_and_setti
                 assert after.pop("private") is None
                 assert after.pop("private_observed_at") is None
                 assert after.pop("full_name_observed_at") is None
+                assert after.pop("private_read_failed_at") is None
             if table == "webhook_events":
                 assert after.pop("provider") == "github"
                 assert after.pop("gitlab_connection_id") is None

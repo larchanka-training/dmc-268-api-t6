@@ -64,7 +64,16 @@ class RepositoryVisibilityReader(Protocol):
 
 class RepositoryVisibilityStore(Protocol):
     async def due(self, *, older_than: timedelta, limit: int) -> RepositoryVisibilityDue:
-        """GitHub repositories of live installations, never observed or longest ago first."""
+        """GitHub repositories of live installations, never observed or longest ago first.
+
+        A failed read counts as touched: that row waits behind the others.
+        """
+        ...
+
+    async def record_failure(
+        self, installation_external_id: int, repository_external_id: int, failed_at: datetime
+    ) -> None:
+        """The background read failed; the flag and its stamp stay as they are."""
         ...
 
     async def forget(self, installation_external_id: int, observed_at: datetime) -> bool:
@@ -183,7 +192,8 @@ class RefreshRepositoryVisibility:
 
     It keeps a quiet public repository on its badge, and it closes one whose ``privatized``
     delivery was lost. The load is bounded by the connected repositories per interval and does
-    not depend on how often a badge is requested.
+    not depend on how often a badge is requested. A row whose read fails goes behind the
+    others, so a few repositories that always fail cannot end every pass before the rest.
     """
 
     def __init__(
@@ -222,6 +232,13 @@ class RefreshRepositoryVisibility:
                 await self._save(target, reading, due.observed_at)
                 refreshed += 1
                 continue
+            async with self._uow_factory() as uow:
+                await uow.visibility.record_failure(
+                    target.installation_external_id,
+                    target.repository_external_id,
+                    due.observed_at,
+                )
+                await uow.commit()
             failed += 1
             if failed == _MAX_FAILED_READS:
                 break

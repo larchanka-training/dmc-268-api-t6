@@ -77,12 +77,25 @@ class SqlAlchemyRepositoryVisibilityStore:
                 Repository.installation_available.is_(True),
                 or_(stamp.is_(None), stamp < observed_at - older_than),
             )
-            .order_by(stamp.asc().nulls_first(), Repository.id)
+            # greatest() skips a NULL: the later of the last read and the last failure.
+            .order_by(
+                func.greatest(stamp, Repository.private_read_failed_at).asc().nulls_first(),
+                Repository.id,
+            )
             .limit(limit)
         )
         return RepositoryVisibilityDue(
             observed_at,
             tuple(RepositoryVisibilityTarget(installation, repo) for installation, repo in rows),
+        )
+
+    async def record_failure(
+        self, installation_external_id: int, repository_external_id: int, failed_at: datetime
+    ) -> None:
+        await self._session.execute(
+            update(Repository)
+            .where(_github_repository(installation_external_id, repository_external_id))
+            .values(private_read_failed_at=failed_at)
         )
 
     async def forget(self, installation_external_id: int, observed_at: datetime) -> bool:
