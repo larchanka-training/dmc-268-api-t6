@@ -24,7 +24,7 @@ from app.bootstrap.bitbucket import (
     get_bitbucket_webhook_resources,
     get_bitbucket_workspace_scope,
 )
-from app.bootstrap.gitlab import get_gitlab_webhook_resources
+from app.bootstrap.gitlab import GitLabWebhookResources, get_gitlab_webhook_resources
 from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import (
     get_github_webhook_receipt_uow_factory,
@@ -32,9 +32,8 @@ from app.bootstrap.reviews_api import (
 )
 from app.main import app, get_github_webhook_secret
 from app.modules.auth.application.scope import AuthScope
-from app.modules.integrations.gitlab.application.authenticate_webhook import (
-    GitLabWebhookAuthStatus,
-)
+from tests.bitbucket_webhook_fakes import FakeWebhookResources
+from tests.gitlab_webhook_fakes import Acceptor, Authenticator
 from tests.openapi_contract import _spec
 
 REPOSITORY_ID = UUID("00000000-0000-4000-8000-0000000000a2")
@@ -278,24 +277,15 @@ def test_valid_json_of_exactly_64_kib_reaches_the_use_case(
         )
 
 
-class _GitLabResources:
-    async def authenticate(self, *, connection_id: UUID, secret: str) -> GitLabWebhookAuthStatus:
-        return GitLabWebhookAuthStatus.AUTHENTICATED
-
-
-class _BitbucketResources:
-    async def authenticate(
-        self, *, installation_id: UUID, repository_id: UUID, body: bytes, signature: str | None
-    ) -> None:
-        return None
-
-
 @pytest.fixture
 def webhooks() -> Iterator[None]:
     app.dependency_overrides[get_github_webhook_secret] = lambda: "secret"
     app.dependency_overrides[get_github_webhook_receipt_uow_factory] = _UseCase
-    app.dependency_overrides[get_gitlab_webhook_resources] = _GitLabResources
-    app.dependency_overrides[get_bitbucket_webhook_resources] = _BitbucketResources
+    app.dependency_overrides[get_gitlab_webhook_resources] = lambda: GitLabWebhookResources(
+        authenticator=Authenticator(), receiver=Acceptor(), intake_enabled=True
+    )
+    # Without a signature the fake refuses the delivery, but only after the whole body is read.
+    app.dependency_overrides[get_bitbucket_webhook_resources] = lambda: FakeWebhookResources()
     try:
         yield
     finally:
