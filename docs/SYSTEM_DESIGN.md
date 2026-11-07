@@ -86,7 +86,7 @@ flowchart LR
 ## 4. C4 — уровень 2: контейнеры
 
 Диаграмма фиксирует целевую границу системы; развёртывание сервисов, включая одноразовый
-`migrator`, — в §14.
+`migrator`, — в §14. Цепочка реального кода — [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```mermaid
 flowchart TB
@@ -104,7 +104,6 @@ flowchart TB
     ww["<b>webhook-worker</b><br/><i>[Container: Python]</i><br/>разбор квитанций по NOTIFY после commit<br/>(резервно раз в 30 с): проекция PR и лейбла ai-review,<br/>подключение репозиториев, схлопывание Р-2, триггер Р-10 (#52),<br/>статус .review/rules.md (#150)"]
     worker["<b>AI Worker</b><br/><i>[Container: Python + aio-pika]</i><br/>сборщик контекста (4 уровня) → LLM Gateway<br/>→ постобработка → трейс;<br/>индексатор графа RAG (#142)"]
     pub["<b>GitHub Publisher</b><br/><i>[Container: Python + aio-pika]</i><br/>валидация координат, одно ревью и check-run"]
-    sandbox["<b>Sandbox Runner</b><br/><i>[Container: Docker, --network=none]</i><br/>SandboxEngine · фаза 3"]
     mq[("<b>RabbitMQ</b><br/><i>[AMQP 0-9-1]</i><br/>reviews и code_index (direct),<br/>retry и DLX")]
     pg[("<b>PostgreSQL 17</b><br/><i>[SQLAlchemy 2 + Alembic]</i><br/>источник истины")]
     redis[("<b>Redis</b><br/>токены, блобы, AST, дерево репо")]
@@ -132,7 +131,6 @@ flowchart TB
   worker -->|"промпт → находки"| llm
   worker -->|"блобы, AST"| redis
   worker -->|"context_payloads, findings,<br/>run_actions, usage_events,<br/>code_index_*"| pg
-  worker -.->|"docker API · фаза 3"| sandbox
   worker -->|"review.publish"| mq
 
   mq -->|review.publish| pub
@@ -146,7 +144,7 @@ flowchart TB
   classDef store fill:#2f6db3,color:#fff,stroke:#1f4f85
   class dev,op person
   class gh,llm ext
-  class ui,portal,auth,hook,ww,worker,pub,sandbox cont
+  class ui,portal,auth,hook,ww,worker,pub cont
   class mq,pg,redis store
 ```
 
