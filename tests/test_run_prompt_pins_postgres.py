@@ -75,6 +75,9 @@ from tests.test_run_publication_settings_postgres import _claim, _insert, _ready
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # The checksum portal_schema seeds for RULE_A.
 RULE_A_CHECKSUM = "1" * 64
+# The newer defaults of REPO_A a test activates; literal, like the seed.
+NEWER_RULE = UUID("00000000-0000-4000-8000-000000000497")
+NEWER_RULE_CHECKSUM = "3" * 64
 AGENTS = b"# Agents\n"
 
 type PromptRow = tuple[str, int, str]
@@ -155,16 +158,22 @@ async def _pins(
         return await _row_pins(session, run)
 
 
-async def _activate_newer_defaults(factory: async_sessionmaker[AsyncSession]) -> tuple[UUID, str]:
-    newer = RuleVersion.from_rules(repository_id=REPO_A, version=2, rules=[{"id": "newer"}])
+async def _activate_newer_defaults(factory: async_sessionmaker[AsyncSession]) -> None:
     async with factory.begin() as session:
         # uq_rule_versions_active_repository allows one active row: the old one goes first.
         await session.execute(
             update(RuleVersion).where(RuleVersion.id == RULE_A).values(is_active=False)
         )
-        session.add(newer)
-    assert newer.id != RULE_A and newer.checksum != RULE_A_CHECKSUM
-    return newer.id, newer.checksum
+        session.add(
+            RuleVersion(
+                id=NEWER_RULE,
+                repository_id=REPO_A,
+                version=2,
+                rules=[],
+                checksum=NEWER_RULE_CHECKSUM,
+                is_active=True,
+            )
+        )
 
 
 async def _pinned_rule_version(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> UUID:
@@ -265,7 +274,7 @@ def test_rerun_pins_a_newer_rule_version_in_its_own_snapshot_and_leaves_the_orig
                     text("UPDATE runs SET state='succeeded' WHERE id=:run"), {"run": original}
                 )
 
-            newer_id, newer_checksum = await _activate_newer_defaults(factory)
+            await _activate_newer_defaults(factory)
             async with SqlAlchemyRerunUnitOfWork(factory, allow_unscoped=True) as work:
                 result = await create_rerun(work.runs, original, NOW)
                 assert result.outcome is RerunOutcome.CREATED and result.message is not None
@@ -274,11 +283,11 @@ def test_rerun_pins_a_newer_rule_version_in_its_own_snapshot_and_leaves_the_orig
             await _claim(factory, rerun, 1)
             rerun_snapshot = await _prepare(factory, source).execute(rerun)
 
-            assert await _pinned_rule_version(factory, rerun) == newer_id
+            assert await _pinned_rule_version(factory, rerun) == NEWER_RULE
             assert rerun_snapshot.run_id == rerun
             assert rerun_snapshot.snapshot_id != original_snapshot.snapshot_id
-            assert rerun_snapshot.service_defaults_rule_version_id == newer_id
-            assert rerun_snapshot.defaults_checksum == newer_checksum
+            assert rerun_snapshot.service_defaults_rule_version_id == NEWER_RULE
+            assert rerun_snapshot.defaults_checksum == NEWER_RULE_CHECKSUM
             assert await _pinned_rule_version(factory, original) == RULE_A
             assert original_snapshot.service_defaults_rule_version_id == RULE_A
             assert original_snapshot.defaults_checksum == RULE_A_CHECKSUM
