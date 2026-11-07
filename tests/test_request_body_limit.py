@@ -351,7 +351,7 @@ def test_webhooks_keep_their_own_limits(
 
 def _routes_with_a_parsed_body() -> set[tuple[str, str]]:
     return {
-        (method, route.path_format)
+        (method, str(route.path_format))
         for route in iter_route_contexts(app.routes)
         if isinstance(route.original_route, APIRoute) and route.body_field is not None
         for method in route.methods or ()
