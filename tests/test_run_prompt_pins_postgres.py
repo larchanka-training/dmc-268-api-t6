@@ -623,13 +623,6 @@ def test_complete_pins_make_snapshot_ready_and_the_pinned_prompt_picks_the_path(
     async def scenario() -> None:
         engine = env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
-
-        def uow() -> SqlAlchemyPolicySnapshotUnitOfWork:
-            # The worker injects its complete profile the same way (worker.py:534).
-            return SqlAlchemyPolicySnapshotUnitOfWork(
-                factory, execution_profile=make_complete_execution_profile()
-            )
-
         try:
             await _ready(factory)
             await _seed(factory, assets)
@@ -640,7 +633,9 @@ def test_complete_pins_make_snapshot_ready_and_the_pinned_prompt_picks_the_path(
                 run = await session.get(Run, run_id)
                 assert run is not None
                 assert await _describe(session, run.prompt_version_id) == pinned_row
-            prepare = PreparePolicySnapshot(uow_factory=uow, source_factory=lambda pins: Source())
+            prepare = PreparePolicySnapshot(
+                uow_factory=lambda: _policy_uow(factory), source_factory=lambda pins: Source()
+            )
             vcs = Vcs()
             stage = ReviewContextStage(
                 runs=SqlAlchemyRunRepository(factory, allow_unscoped=True),
