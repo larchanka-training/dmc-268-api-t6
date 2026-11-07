@@ -66,7 +66,6 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
 
 from alembic import command
 from app.modules.auth.application.scope import AuthScope
@@ -883,7 +882,8 @@ async def capture_statements(
     database_url: URL, user: Identity, chosen: Sequence[Scenario]
 ) -> list[Captured]:
     """The SQL the real use cases send: where a request spends its time, and the plans' input."""
-    engine = create_async_engine(database_url, poolclass=NullPool)
+    # Pooled like the API, so the warm call reuses the connection and what is not SQL is not setup.
+    engine = create_async_engine(database_url, pool_pre_ping=True)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     scope = AuthScope(_USER_ID, tuple(UUID(item) for item in user.workspace_ids))
     summary = GetMetricsSummary(SqlAlchemyMetricsSummary(factory, scope))
