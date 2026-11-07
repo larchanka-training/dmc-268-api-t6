@@ -58,8 +58,9 @@ shape, 1 different, 2 a file is not a batch.
 State: ${XDG_CACHE_HOME:-$HOME/.cache}/create-issue/batches/<id>.json —
 {"started_at": ISO, "items": {key: {"url", "number", "repo", "summary", "board",
 "links"}}}; started_at is written before the first create, each entry atomically
-right after its item.
-Test seam: ISSUE_BATCH_SCRIPTS_DIR — the directory issue-create.sh and issue-link.sh
+right after its item. A real run holds an OS lock on adjacent <id>.lock through
+its final result; a concurrent run stops, and a crashed run releases the lock.
+Test seam: ISSUE_BATCH_SCRIPTS_DIR — the directory issue-create.sh, issue-link.sh and issue-board.py
 are run from (default: this script's directory; a warning says when it is set); the
 builder always runs from here.
 """
@@ -68,6 +69,7 @@ builder always runs from here.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import re
@@ -472,7 +474,9 @@ def refusal(dup: dict[str, Any], started_at: str | None, user: Any) -> str | Non
     if author.lower() != user.lower():
         return f"it was opened by {author}, not by you ({user})"
     start, created = earliest(started_at), when(dup.get("createdAt"))
-    if start is None or created is None or created < start:
+    if created is None:
+        return "its creation time is unknown"
+    if start is None or created < start:
         skew = f"more than {CLOCK_SKEW_S} s"
         return f"it was created {skew} before this batch started ({started_at})"
     return None
@@ -765,11 +769,29 @@ def run(
                 links = ensure_links(key, entry, spec)
                 record(key, {**entry, "links": links}, new=False)
                 if entry.get("board") == "failed":
-                    worst = max(worst, 6)
-                    warn(
-                        f'item "{key}": {entry["url"]} is recorded with a failed board step — '
-                        f"{BOARD_REPAIR.format(url=entry['url'])}, then set its Status on the board"
+                    code, board_out, msg, _ = call(
+                        "issue-board.py", [entry["url"], spec.get("status") or "Todo"]
                     )
+                    if (
+                        code == 0
+                        and isinstance(board_out, dict)
+                        and board_out.get("board") == "added"
+                    ):
+                        entry = {**entry, "board": "added"}
+                        record(key, {**entry, "links": links}, new=False)
+                    elif code == 6:
+                        worst = max(worst, 6)
+                        warn(
+                            f'item "{key}": {entry["url"]} is recorded with a failed board step — '
+                            f"{BOARD_REPAIR.format(url=entry['url'])}, then set its Status "
+                            "on the board"
+                        )
+                    else:
+                        stop(
+                            key,
+                            code,
+                            f"issue-board.py could not check its board (exit {code}): {msg}",
+                        )
                 result(key, entry, verified=None, board=entry.get("board"), links=links)
                 continue
             spec_path = Path(work) / f"{key}.json"
@@ -918,10 +940,22 @@ def main(argv: list[str]) -> int:
             err(f'item "{with_status}" sets "status" but --no-board skips the board — drop one')
     builder = validate(batch)
     path = state_file(batch["id"])
-    state, rerun = load_state(path, ordered)
     if dry:
+        state, rerun = load_state(path, ordered)
         return preview(batch, ordered, state, rerun, no_board, builder)
-    return run(batch, ordered, state, rerun, path, no_board, builder)
+    lock_path = path.with_suffix(".lock")
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock = lock_path.open("a+")
+    except OSError as exc:
+        err(f"cannot open the batch lock {lock_path}: {exc} — nothing was created", 5)
+    with lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            err(f'batch "{batch["id"]}" is already running — wait for it to finish, then rerun')
+        state, rerun = load_state(path, ordered)
+        return run(batch, ordered, state, rerun, path, no_board, builder)
 
 
 if __name__ == "__main__":
