@@ -953,6 +953,16 @@ public-state gate и trusted recovery описаны один раз в §2. Д�
 - **Бейджи** ([решение техлида ui#127](https://github.com/larchanka-training/dmc-268-ui-t6/issues/127#issuecomment-6291809919)): подпись бейджа находки в UI — её точный уровень (Critical / High / Medium / Low / Info). Цвет и вариант выбираются отдельно: critical — critical/solid (red), high — critical/dot (red), medium — high/dot (orange), low — warning/dot (yellow), info — info/dot (blue); заливка только у critical. Фильтр «Критичность» сохраняет три группы D3: Critical = `critical` + `high`, Warning = `medium` + `low`, Info = `info`. API по-прежнему отдаёт пять уровней; counts и verdict этим UI-оформлением не меняются.
 - **Порог severity репозитория** [техлид, 14.10.2026, #149]: `severityThreshold` называет нижнюю публикуемую группу теми же именами, что группы фильтра UI (`SEVERITY_BADGE_GROUPS`): `all` (по умолчанию) — все пять уровней, `warning` — `critical`, `high`, `medium`, `low`, `critical` — `critical`, `high`. Severity counts, verdict, check-run и UI считаются по набору после порога (§9): они уже читают только находки с `drop_reason IS NULL`, отдельный фильтр не нужен. Поэтому при `critical` ревью, где были только medium/low, получает `clean` вместо `attention` (в ограниченной проекции #213 и целевом профиле #107 `clean` требует complete coverage). `blocking` и `REQUEST_CHANGES` порог не затрагивает: critical/high проходят любой порог.
 - **`review_event`** [дефолт]: `Repository.reviewEvent = REQUEST_CHANGES` ∧ `verdict = blocking` → `REQUEST_CHANGES`, иначе `COMMENT`. По умолчанию `reviewEvent = COMMENT` (D8).
+- **Risk Score** (#316): вердикт, прочитанный вместе с полнотой проверки, в блоке Executive summary в начале тела ревью (CONTEXT_AND_VERIFICATION_SPEC §8.2). Это не второе правило вердикта: модель его не назначает, а verdict, counts, `review_event` и `findings_hash` от него не зависят. Полноту определяет coverage, поэтому binary и исключённые политикой файлы оценку не повышают. Skipped и failed прогоны тела не публикуют, блока у них нет.
+
+| Условие | Risk Score |
+| --- | --- |
+| `blocking` | High |
+| `attention` | Medium |
+| Summary-only | Medium |
+| `clean`: coverage complete, все разрешённые файлы проверены | Low |
+| `verdict = null`, coverage неполна: `status=partial` или любая причина в `coverage.reason_counts`, в том числе непроверенный разрешённый файл, `unsupported_path`, `identity_unresolved`, `classification_unavailable`, `unknown_path` и неполный список файлов | Medium |
+| `verdict = null`, причин нет: только binary и исключённые политикой файлы | Low |
 
 ---
 
