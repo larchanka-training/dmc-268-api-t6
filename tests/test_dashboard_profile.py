@@ -285,3 +285,28 @@ def test_the_plans_stay_readable_and_list_every_statement(tiny_run: TinyRun) -> 
 def test_the_machine_load_is_printed_on_both_sides_of_the_timing(tiny_run: TinyRun) -> None:
     assert re.search(r"^environment: .* jit=\w+ .*load=[\d. ]+$", tiny_run.stdout, re.MULTILINE)
     assert re.search(r"^load after timing: [\d. ]+$", tiny_run.stdout, re.MULTILINE)
+
+
+@pytest.mark.parametrize("variable", ["PGHOSTADDR", "PGSERVICE"])
+def test_a_libpq_variable_that_redirects_the_connection_is_refused(
+    profile: ModuleType,
+    variable: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """libpq reads these when the URL names no hostaddr or service, past the host checked."""
+    monkeypatch.setenv(variable, "192.0.2.1")
+    assert profile.main(["--server-url", "postgresql+psycopg://app:app@127.0.0.1:1/app"]) == 2
+    error = capsys.readouterr().err
+    assert variable in error
+    assert "loopback" in error
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "127.0.0.2", "[::1]"])
+def test_a_loopback_server_passes_the_guard(
+    profile: ModuleType, host: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for variable in ("PGHOSTADDR", "PGSERVICE"):
+        monkeypatch.delenv(variable, raising=False)
+    url = profile.loopback_server_url(f"postgresql+psycopg://app:app@{host}:5432/app")
+    assert url.database == "app"
