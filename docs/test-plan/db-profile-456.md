@@ -75,12 +75,12 @@ until docker exec dash-profile pg_isready -h 127.0.0.1 -U postgres -q; do sleep 
 
 uv run python -m scripts.dashboard_profile \
   --server-url postgresql+psycopg://postgres:profile@127.0.0.1:55456/postgres \
-  --explain-out docs/plans/456-explain.md
+  --explain-out /tmp/456-explain.md
 
 docker rm -fv dash-profile
 ```
 
-Команда работает только с адресом loopback, создаёт базу `dashboard_profile_<hex>` и удаляет её в конце, в том числе при сбое. Занимает 5–15 минут в зависимости от нагрузки и до 1 ГБ на диске вместе с WAL. Запускать из корня репозитория: `python scripts/…` не импортирует `app`. Флаг `-v` у `docker rm` нужен, иначе остаётся анонимный том. `docs/plans/` не попадает в git.
+Команда работает только с адресом loopback, создаёт базу `dashboard_profile_<hex>` и удаляет её в конце, в том числе при сбое. Занимает 5–15 минут в зависимости от нагрузки и до 1 ГБ на диске вместе с WAL. Запускать из корня репозитория: `python scripts/…` не импортирует `app`. Флаг `-v` у `docker rm` нужен, иначе остаётся анонимный том. Каталог для `--explain-out` должен существовать.
 
 ## Результаты
 
