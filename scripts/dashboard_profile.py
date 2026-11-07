@@ -76,6 +76,8 @@ from app.modules.reviews.application.verdict import coverage_verdict, severity_c
 from app.modules.reviews.infrastructure.metrics_summary import SqlAlchemyMetricsSummary
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 
+# libpq reads these when the URL names no hostaddr or service, past the host the guard checks.
+_LIBPQ_REDIRECTS = ("PGHOSTADDR", "PGSERVICE")
 _USER_ID = 42
 # RUN_LIST_PAGE_SIZE of the ui: the page the dashboard really asks for, not the API default.
 _PAGE_SIZE = 20
@@ -313,6 +315,9 @@ def loopback_server_url(value: str) -> URL:
     if url.query:
         # libpq takes host, hostaddr and service from the query over the authority checked below.
         raise Refused("--server-url must not carry query parameters: it may leave loopback")
+    for variable in _LIBPQ_REDIRECTS:
+        if os.environ.get(variable):
+            raise Refused(f"{variable} is set: the connection may leave loopback; unset it")
     host = url.host or ""
     if host != "localhost":
         try:
