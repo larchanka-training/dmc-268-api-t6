@@ -201,3 +201,5 @@
   [rules-md-scenarios-163.md](test-plan/rules-md-scenarios-163.md),
   [bitbucket-acceptance-333.md](test-plan/bitbucket-acceptance-333.md),
   [eval-baselines.md](test-plan/eval-baselines.md), [rag-scenarios-146.md](test-plan/rag-scenarios-146.md).
+- Профиль дашборда, индексы и цена запросов `runs`, `findings`, `usage_events` (#456):
+  [db-profile-456.md](test-plan/db-profile-456.md).
