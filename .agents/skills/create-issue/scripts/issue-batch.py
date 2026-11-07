@@ -48,7 +48,8 @@ Errors: {"error": "..."} on stderr; the item scripts' stderr is passed through, 
 Exit
 ----
 0 every item done · 2 usage or invalid batch (nothing ran), a state entry that does
-not match its item, or an item exit 2 · 3 auth · 4 an item exit 4, or a duplicate
+not match its item, an item exit 2, or another run holding this batch's lock · 3 auth ·
+4 an item exit 4, or a duplicate
 that is not adopted · 5 network/unknown, or a create whose result could not be read
 or recorded · 6 an issue — created now or recorded earlier — whose board step failed
 · 7 a native link failed (wins over 6). 2-5 stop the batch: the state file keeps what
@@ -532,17 +533,17 @@ def how_to_record(key: str, state_file: str) -> str:
 
 def how_to_start(item: dict[str, Any], dup: dict[str, Any], path: Path) -> str:
     """The way out for a duplicate maybe_own() flags on a first run, before the state
-    file exists: the whole file load_state() accepts, ready to write — and its directory,
-    which a new container or machine lacks too. started_at is the issue's createdAt, so a
-    rerun also adopts the issues that lost run created after it."""
+    file exists: the whole file load_state() accepts, ready to write. The lock already
+    created its directory. started_at is the issue's createdAt, so a rerun also adopts
+    the issues that lost run created after it."""
     record = {"url": dup.get("url"), "number": dup.get("number"), "repo": item["repo"]}
     state = {
         "started_at": dup.get("createdAt"),
         "items": {item["key"]: {**record, "summary": item["summary"]}},
     }
     return (
-        "if it is this batch's own issue (a run whose state file is lost created it), create "
-        f"{path.parent} if it is missing, then write {path} as "
+        "if it is this batch's own issue (a run whose state file is lost created it), "
+        f"write {path} as "
         f"{json.dumps(state, ensure_ascii=False)} and rerun; {NO_RENAME}"
     )
 
@@ -769,9 +770,12 @@ def run(
                 links = ensure_links(key, entry, spec)
                 record(key, {**entry, "links": links}, new=False)
                 if entry.get("board") == "failed":
-                    code, board_out, msg, _ = call(
-                        "issue-board.py", [entry["url"], spec.get("status") or "Todo"]
-                    )
+                    code, board_out, msg = 6, None, ""
+                    if not no_board:
+                        code, board_out, msg, _ = call(
+                            "issue-board.py",
+                            [entry["url"], *([spec["status"]] if spec.get("status") else [])],
+                        )
                     if (
                         code == 0
                         and isinstance(board_out, dict)
@@ -781,10 +785,12 @@ def run(
                         record(key, {**entry, "links": links}, new=False)
                     elif code == 6:
                         worst = max(worst, 6)
+                        repair = BOARD_REPAIR.format(url=entry["url"])
+                        if spec.get("status"):
+                            repair += f", then set its Status to {spec['status']} on the board"
                         warn(
                             f'item "{key}": {entry["url"]} is recorded with a failed board step — '
-                            f"{BOARD_REPAIR.format(url=entry['url'])}, then set its Status "
-                            "on the board"
+                            f"{repair}"
                         )
                     else:
                         stop(

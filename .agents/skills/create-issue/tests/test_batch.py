@@ -408,7 +408,7 @@ def test_a_run_can_resume_after_its_process_crashes(tmp_path: Path) -> None:
     data = batch(item("a"))
     preview, _ = run(tmp_path, data, "--dry-run")
     assert preview.returncode == 0
-    (tmp_path / "cfg.json").write_text(json.dumps(cfg_create(a={"pause": 10})))
+    (tmp_path / "cfg.json").write_text(json.dumps(cfg_create(a={"pause": 60})))
     log = tmp_path / "calls.jsonl"
     proc = subprocess.Popen(
         [sys.executable, str(SCRIPT), str(tmp_path / "batch.json")],
@@ -427,7 +427,7 @@ def test_a_run_can_resume_after_its_process_crashes(tmp_path: Path) -> None:
         start_new_session=True,
     )
     try:
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if log.exists() and any(
                 row["script"] == "create" and "--dry-run" not in row["argv"]
@@ -450,9 +450,9 @@ def test_a_run_can_resume_after_its_process_crashes(tmp_path: Path) -> None:
     assert created_keys(calls) == ["a"]
 
 
-def load_driver() -> Any:
-    """issue-batch.py as a module (its name has a hyphen, so no plain import)."""
-    spec = importlib.util.spec_from_file_location("issue_batch", SCRIPT)
+def load_driver(path: Path = SCRIPT, name: str = "issue_batch") -> Any:
+    """Load a hyphenated script as a module for focused tests."""
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -897,8 +897,8 @@ def test_a_first_run_says_how_to_write_the_lost_state_of_a_fresh_issue_of_yours(
         f"https://github.com/acme/api/issues/55 (OPEN, by octocat, created {fresh}); not "
         "adopted: this run started without a state file, so it is the batch's first run, and a "
         "first run adopts nothing — nothing was created; if it is this batch's own issue (a run "
-        f"whose state file is lost created it), create {state_path(tmp_path).parent} if it is "
-        f'missing, then write {state_path(tmp_path)} as {{"started_at": "{fresh}", "items": {{"b": '
+        f"whose state file is lost created it), write {state_path(tmp_path)} as "
+        f'{{"started_at": "{fresh}", "items": {{"b": '
         '{"url": "https://github.com/acme/api/issues/55", "number": 55, "repo": "acme/api", '
         '"summary": "[x] b"}}} and rerun; do not rename the item, that files it a second '
         "time; only if that issue is other work, give the item another title or settle that "
@@ -923,7 +923,7 @@ def test_the_first_run_hint_at_its_edges(
     assert r.returncode == 4
     path = state_path(tmp_path)
     write = f'write {path} as {{"started_at": "{dup["createdAt"]}"'
-    assert f"create {path.parent} if it is missing, then {write}" in error(r)
+    assert write in error(r)
     assert error(r).endswith(f"and rerun; {NO_RENAME}")
 
 
@@ -936,14 +936,14 @@ def test_the_state_file_the_first_run_names_resumes_the_batch(tmp_path: Path) ->
     first, _ = run(tmp_path, data, cfg=cfg)
     assert first.returncode == 4
     hint = error(first)
-    said = re.search(r"create (\S+) if it is missing, then write (\S+) as ", hint)
+    said = re.search(r"write (\S+) as ", hint)
     assert said is not None, hint
-    folder, path = Path(said[1]), Path(said[2])
-    assert path == state_path(tmp_path) and folder == path.parent
+    path = Path(said[1])
+    folder = path.parent
+    assert path == state_path(tmp_path) and folder.is_dir()
     assert sorted(p.name for p in folder.iterdir()) == ["b1.lock"]
     start = hint.index('{"started_at"')
     _, end = json.JSONDecoder().raw_decode(hint, start)
-    folder.mkdir(parents=True, exist_ok=True)  # the directory the hint names
     path.write_text(hint[start:end], encoding="utf-8")
 
     r, calls = run(tmp_path, data, cfg={})
@@ -1304,8 +1304,16 @@ def test_a_recorded_board_failure_is_carried_into_exit_6_with_the_repair(tmp_pat
     url = "https://github.com/acme/api/issues/1"
     assert {
         "warning": f'item "a": {url} is recorded with a failed board step — gh project item-add '
-        f"12 --owner larchanka-training --url {url}, then set its Status on the board"
+        f"12 --owner larchanka-training --url {url}"
     } in [json.loads(line) for line in r.stderr.splitlines()]
+    assert recorded(tmp_path)["a"]["board"] == "failed"
+
+
+def test_no_board_does_not_recheck_a_recorded_board_failure(tmp_path: Path) -> None:
+    seed(tmp_path, {"a": entry(API, 1, "a", board="failed")})
+    r, calls = run(tmp_path, batch(item("a")), "--no-board")
+    assert r.returncode == 6
+    assert [c for c in calls if c["script"] == "board"] == []
     assert recorded(tmp_path)["a"]["board"] == "failed"
 
 
@@ -1323,6 +1331,15 @@ def test_a_recorded_board_failure_is_cleared_when_the_issue_is_on_the_board(
     assert recorded(tmp_path)["a"]["board"] == "added"
 
 
+def test_a_recorded_board_failure_without_status_checks_presence_only(tmp_path: Path) -> None:
+    url = "https://github.com/acme/api/issues/1"
+    seed(tmp_path, {"a": entry(API, 1, "a", board="failed")})
+    r, calls = run(tmp_path, batch(item("a")), cfg={"board": {url: {"found": True}}})
+    assert r.returncode == 0, r.stderr
+    assert [c["argv"] for c in calls if c["script"] == "board"] == [[url]]
+    assert recorded(tmp_path)["a"]["board"] == "added"
+
+
 def test_a_recorded_board_failure_still_exits_6_when_the_issue_is_missing(
     tmp_path: Path,
 ) -> None:
@@ -1335,9 +1352,137 @@ def test_a_recorded_board_failure_still_exits_6_when_the_issue_is_missing(
     assert recorded(tmp_path)["a"]["board"] == "failed"
 
 
+def test_board_check_preserves_a_manual_status_when_none_was_requested(tmp_path: Path) -> None:
+    fix = tmp_path / "fix"
+    fix.mkdir()
+    url = "https://github.com/acme/api/issues/1"
+    (fix / "project_items.json").write_text(
+        json.dumps({"items": [{"content": {"url": url}, "status": "In Progress"}]}),
+        encoding="utf-8",
+    )
+    r = subprocess.run(
+        [sys.executable, str(BOARD_SCRIPT), url],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "ISSUE_FIXTURE_DIR": str(fix)},
+        check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {"board": "added"}
+    assert (fix / "calls.log").read_text().splitlines() == ["project_items"]
+
+
+def board_edit_fixtures(fix: Path) -> None:
+    (fix / "project_view.json").write_text('{"id": "PVT_board12"}', encoding="utf-8")
+    (fix / "project_fields.json").write_text(
+        json.dumps(
+            {
+                "fields": [
+                    {
+                        "id": "PVTSSF_status",
+                        "name": "Status",
+                        "options": [{"id": "opt_progress", "name": "In Progress"}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_board_check_edits_status_with_gh_246_flags(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    gh = bindir / "gh"
+    shutil.copy(HERE / "fake_gh.py", gh)
+    gh.chmod(0o755)
+    url = "https://github.com/acme/api/issues/1"
+    rows = [
+        json.dumps({"items": [{"id": "PVTI_item1", "content": {"url": url}, "status": status}]})
+        for status in ("Todo", "In Progress", "In Progress")
+    ]
+    (tmp_path / "cfg.json").write_text(
+        json.dumps(
+            {
+                "repo": API,
+                "project_items": rows,
+                "project_view": json.dumps({"id": "PVT_board12"}),
+                "fields": json.dumps(
+                    {
+                        "fields": [
+                            {
+                                "id": "PVTSSF_status",
+                                "name": "Status",
+                                "options": [{"id": "opt_progress", "name": "In Progress"}],
+                            }
+                        ]
+                    }
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    log = tmp_path / "gh.jsonl"
+    r = subprocess.run(
+        [sys.executable, str(BOARD_SCRIPT), url, "In Progress"],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{bindir}:/usr/bin:/bin",
+            "STUB_CFG": str(tmp_path / "cfg.json"),
+            "STUB_LOG": str(log),
+            "ISSUE_STATUS_RETRY_DELAY": "0",
+        },
+        check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {"board": "added"}
+    item_list = [
+        "project",
+        "item-list",
+        "12",
+        "--owner",
+        "larchanka-training",
+        "--format",
+        "json",
+        "--limit",
+        "10000",
+    ]
+    assert [json.loads(line)[1:] for line in log.read_text().splitlines()] == [
+        item_list,
+        ["project", "view", "12", "--owner", "larchanka-training", "--format", "json"],
+        [
+            "project",
+            "field-list",
+            "12",
+            "--owner",
+            "larchanka-training",
+            "--format",
+            "json",
+            "--limit",
+            "100",
+        ],
+        [
+            "project",
+            "item-edit",
+            "--id",
+            "PVTI_item1",
+            "--project-id",
+            "PVT_board12",
+            "--field-id",
+            "PVTSSF_status",
+            "--single-select-option-id",
+            "opt_progress",
+        ],
+        item_list,
+        item_list,
+    ]
+
+
 def test_board_check_retries_a_status_reset_by_automation(tmp_path: Path) -> None:
     fix = tmp_path / "fix"
     fix.mkdir()
+    board_edit_fixtures(fix)
     url = "https://github.com/acme/api/issues/1"
     for name, status in (
         ("project_items", "In Progress"),
@@ -1345,7 +1490,9 @@ def test_board_check_retries_a_status_reset_by_automation(tmp_path: Path) -> Non
         ("project_items.final", "In Progress"),
     ):
         (fix / f"{name}.json").write_text(
-            json.dumps({"items": [{"content": {"url": url}, "status": status}]}),
+            json.dumps(
+                {"items": [{"id": "PVTI_item1", "content": {"url": url}, "status": status}]}
+            ),
             encoding="utf-8",
         )
     r = subprocess.run(
@@ -1364,6 +1511,8 @@ def test_board_check_retries_a_status_reset_by_automation(tmp_path: Path) -> Non
     assert (fix / "calls.log").read_text().splitlines() == [
         "project_items",
         "project_items.retry",
+        "project_view",
+        "project_fields",
         "project_edit",
         "project_items.final",
     ]
@@ -1374,6 +1523,7 @@ def test_board_check_waits_before_retrying_a_wrong_status(
 ) -> None:
     fix = tmp_path / "fix"
     fix.mkdir()
+    board_edit_fixtures(fix)
     url = "https://github.com/acme/api/issues/1"
     for name, status in (
         ("project_items", "Todo"),
@@ -1381,13 +1531,12 @@ def test_board_check_waits_before_retrying_a_wrong_status(
         ("project_items.final", "In Progress"),
     ):
         (fix / f"{name}.json").write_text(
-            json.dumps({"items": [{"content": {"url": url}, "status": status}]}),
+            json.dumps(
+                {"items": [{"id": "PVTI_item1", "content": {"url": url}, "status": status}]}
+            ),
             encoding="utf-8",
         )
-    spec = importlib.util.spec_from_file_location("issue_board", BOARD_SCRIPT)
-    assert spec is not None and spec.loader is not None
-    board_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(board_module)
+    board_module = load_driver(BOARD_SCRIPT, "issue_board")
     waits: list[float] = []
     monkeypatch.setattr(board_module, "time", SimpleNamespace(sleep=waits.append))
     monkeypatch.setenv("ISSUE_FIXTURE_DIR", str(fix))
@@ -1396,6 +1545,8 @@ def test_board_check_waits_before_retrying_a_wrong_status(
     assert waits == [3.0]
     assert (fix / "calls.log").read_text().splitlines() == [
         "project_items",
+        "project_view",
+        "project_fields",
         "project_edit",
         "project_items.confirm",
         "project_edit",

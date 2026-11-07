@@ -116,9 +116,11 @@ lookup:
 - an item recorded there is not created again; its links are ensured with `issue-link.sh`,
   which leaves what is in place alone and never replaces a parent (`created: false`), and
   the entry gets the new links result. For a recorded `board: failed`, the run checks
-  board 12 and ensures the requested Status. If the issue is there and Status reads
-  back, its state becomes `board: added`; otherwise it remains `failed`, the run exits
-  6 and prints `gh project item-add 12 --owner larchanka-training --url URL` on stderr.
+  board 12; it sets and reads back Status only if the item explicitly requests one.
+  Without `status`, a manual Status is left alone. If the issue is there, its state
+  becomes `board: added`; otherwise it remains `failed`, the run exits 6 and prints
+  `gh project item-add 12 --owner larchanka-training --url URL` on stderr. With
+  `--no-board`, the run makes no board call and retains `failed` and exit 6.
   After repairing the board, rerun the batch to update its state automatically.
 - an item not recorded may still exist: an earlier run created it and stopped — or crashed —
   before recording it. A rerun passes `--adopt-since <started_at − 120 s>` to
@@ -147,8 +149,8 @@ the lock when the process ends. Never delete the state file, and never start a n
 `id` for a batch that created anything: a new
 `id` has no `started_at`, so it adopts nothing and stops at the first issue that exists. Edit
 it by hand only for an issue of this batch a run refused — add
-`items.<key>` with its `url`, `number`, `repo` and `summary` (no state file yet: create its
-directory and write the whole file the stop names), and rerun — and for a recorded issue
+`items.<key>` with its `url`, `number`, `repo` and `summary` (no state file yet: write
+the whole file the stop names; the lock already created its directory), and rerun — and for a recorded issue
 that is gone: one that was **deleted** — remove its entry from `items`, and the rerun files
 it again; one that was **transferred** to another repo — remove its entry, drop the item
 from the batch file and replace its `@key` in the other items by the issue's new
@@ -164,10 +166,12 @@ from the batch file and replace its `@key` in the other items by the issue's new
 | 2, 3 or 4                                               | the batch stops: the state keeps what was created; fix the cause and rerun                                                                         |
 | 5, or a result that cannot be read or recorded          | the batch stops the same way, but the issue may exist: check the newest issues of the repo first — a rerun adopts it (§ 5); likewise after a crash |
 | `issue-link.sh` 2, 3 or 5 on a recorded or adopted item | the batch stops the same way; its 7 is a failed link and does not stop it                                                                          |
+| `issue-board.py` 2 or 5 on a recorded item              | the batch stops; fix its usage or board access and rerun                                                                                           |
 
 The driver exits 7 if any item had a failed link, else 6 if any had a failed board step —
 also one recorded by an earlier run — else 0; a stop exits with the item's code. Never roll
 back: a created issue is real work — report it with its URL.
+Another live run of the same batch exits 2 with `already running` before any GitHub call.
 
 ## 7. Verify the batch
 
