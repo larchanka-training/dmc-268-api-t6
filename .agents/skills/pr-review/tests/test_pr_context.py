@@ -4,13 +4,12 @@ Offline: no network, no tokens, no live `gh`. An autouse guard puts a fake `gh`
 first on PATH that fails with exit 97, so any request that escapes the fixture
 seam (`PR_REVIEW_FIXTURE_DIR`) or a test's own fake is an error, never a call.
 
-Covers: every `examples/*/` case (stdout byte-equal to `expected.json`, exit code from
-the verdict, the invocation read from the case's README); synthetic pull requests for the
-`Refs` rules (none, a bare `Refs #`, a ref that is a pull request, several issues, the other
-repo, a repo outside the project, any case), the part a pull request names and the criteria it
-selects, an issue without criteria,
-the state warnings, the data fence of the brief; the REF grammar, exit codes 2 and 3, and the
-argv the script hands to `gh` (read-only REST calls).
+Covers: every `examples/*/` case (stdout byte-equal to `expected.json`, exit code from the
+verdict, the invocation read from the case's README); synthetic pull requests for the `Refs`
+rules (none, a bare `Refs #`, a ref that is a pull request, several issues, the other repo, a
+repo outside the project, any case), the part a pull request names and the criteria it
+selects, an issue without criteria, the state warnings, the data fence of the brief; the REF
+grammar, exit codes 2 and 3, and the argv the script hands to `gh` (read-only REST calls).
 """
 # SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/pr-review/tests/test_pr_context.py
 

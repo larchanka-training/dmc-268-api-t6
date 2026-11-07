@@ -42,9 +42,9 @@ the issue's order (the ids of accept-issue's table). When the pull request names
 issue — in its title, else in the first mention in the first line of its `## What`, as
 implement-issue reads it — only the criteria of those parts (in the forms of its
 `references/parts.md`, the prefix cut off) and the criteria without a prefix are kept, with
-their ids. `key` is the row of the
-AC table: the issue as `api#N` / `ui#N` (`owner/name#N` for the own repo of a pull request in
-neither) and the id, so the criteria of two issues never share one.
+their ids. `key` is the row of the AC table: the issue as `api#N` / `ui#N` for the project's
+repos, or as `owner/name#N` when the pull request's own repo is neither of them, and the id,
+so the criteria of two issues never share one.
 
 A ref outside the pull request's own repo and the repos of `preflight.ALIASES`, compared in lower
 case, is skipped with a warning that names it, before any request: the text is the author's and
