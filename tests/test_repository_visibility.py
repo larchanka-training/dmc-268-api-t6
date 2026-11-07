@@ -126,14 +126,6 @@ def test_a_visibility_change_overwrites_the_saved_flag(action: str, private: boo
     )
 
 
-def test_a_visibility_change_of_a_repository_not_connected_is_final() -> None:
-    result = _dispatch(_Visibility(known=False), "repository", _repository_event("privatized"))
-
-    assert result == InstallationDeliveryDispatchResult(
-        InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT, "unknown_repository"
-    )
-
-
 @pytest.mark.parametrize("action", ["edited", "deleted", "archived", "created"])
 def test_other_repository_actions_change_nothing(action: str) -> None:
     visibility = _Visibility()
@@ -183,8 +175,17 @@ def test_a_suspended_installation_with_no_repositories_is_final() -> None:
     )
 
 
-def test_a_suspension_without_the_handler_is_deferred() -> None:
-    result = _dispatch(None, "installation", {"action": "suspend", "installation": {"id": 17}})
+@pytest.mark.parametrize(
+    ("event_name", "payload"),
+    [
+        pytest.param(
+            "installation", {"action": "suspend", "installation": {"id": 17}}, id="suspension"
+        ),
+        pytest.param("repository", _repository_event("privatized"), id="visibility-change"),
+    ],
+)
+def test_an_event_without_the_handler_is_deferred(event_name: str, payload: dict[str, Any]) -> None:
+    result = _dispatch(None, event_name, payload)
 
     assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
 
@@ -261,19 +262,13 @@ def test_a_transfer_forgets_the_flag_by_the_repository_id() -> None:
     )
 
 
-@pytest.mark.parametrize("action", ["renamed", "transferred"])
-def test_a_rename_or_transfer_of_a_repository_not_connected_is_final(action: str) -> None:
+@pytest.mark.parametrize("action", ["privatized", "publicized", "renamed", "transferred"])
+def test_a_change_of_a_repository_not_connected_is_final(action: str) -> None:
     result = _dispatch(_Visibility(known=False), "repository", _repository_event(action))
 
     assert result == InstallationDeliveryDispatchResult(
         InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT, "unknown_repository"
     )
-
-
-def test_a_visibility_change_without_the_handler_is_deferred() -> None:
-    result = _dispatch(None, "repository", _repository_event("privatized"))
-
-    assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
 
 
 @pytest.mark.parametrize("private", [True, False])

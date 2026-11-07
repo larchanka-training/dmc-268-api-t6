@@ -108,35 +108,40 @@ def test_a_final_answer_without_the_repository_reads_as_none(response: httpx.Res
     assert _read(lambda _: response) is None
 
 
+def _answer(response: httpx.Response) -> Callable[[httpx.Request], httpx.Response]:
+    return lambda _: response
+
+
+def _refused(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("refused", request=request)
+
+
 @pytest.mark.parametrize(
-    "response",
+    "handler",
     [
-        pytest.param(httpx.Response(500, json={}), id="server-error"),
-        pytest.param(httpx.Response(401, json={}), id="token-rejected"),
-        pytest.param(httpx.Response(429, json={}), id="too-many-requests"),
+        pytest.param(_answer(httpx.Response(500, json={})), id="server-error"),
+        pytest.param(_answer(httpx.Response(401, json={})), id="token-rejected"),
+        pytest.param(_answer(httpx.Response(429, json={})), id="too-many-requests"),
         pytest.param(
-            httpx.Response(403, json={}, headers={"retry-after": "60"}), id="secondary-rate-limit"
+            _answer(httpx.Response(403, json={}, headers={"retry-after": "60"})),
+            id="secondary-rate-limit",
         ),
         pytest.param(
-            httpx.Response(403, json={}, headers={"x-ratelimit-remaining": "0"}), id="rate-limit"
+            _answer(httpx.Response(403, json={}, headers={"x-ratelimit-remaining": "0"})),
+            id="rate-limit",
         ),
-        pytest.param(httpx.Response(200, text="not json"), id="not-json"),
-        pytest.param(httpx.Response(200, json=[]), id="not-an-object"),
+        pytest.param(_answer(httpx.Response(200, text="not json")), id="not-json"),
+        pytest.param(_answer(httpx.Response(200, json=[])), id="not-an-object"),
+        pytest.param(_refused, id="connection-refused"),
     ],
 )
-def test_a_failed_read_is_unavailable_not_unknown(response: httpx.Response) -> None:
+def test_a_failed_read_is_unavailable_not_unknown(
+    handler: Callable[[httpx.Request], httpx.Response],
+) -> None:
     with pytest.raises(RepositoryVisibilityUnavailable) as raised:
-        _read(lambda _: response)
+        _read(handler)
 
     assert "not json" not in str(raised.value)
-
-
-def test_a_failed_exchange_is_unavailable() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("refused", request=request)
-
-    with pytest.raises(RepositoryVisibilityUnavailable):
-        _read(handler)
 
 
 @pytest.mark.parametrize(
