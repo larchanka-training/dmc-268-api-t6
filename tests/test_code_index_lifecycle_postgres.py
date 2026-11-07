@@ -120,6 +120,22 @@ from app.modules.workspaces.application.link_github_installations import GitHubI
 from app.modules.workspaces.infrastructure.github_repository_rebinding import (
     SqlAlchemyGitHubRepositoryRebinding,
 )
+from tests.code_index_indexer_harness import (
+    _PACKAGE,
+    _PACKAGE_V2,
+    _SETTINGS,
+    _VERSIONS,
+    Branch,
+    Indexer,
+    Link,
+    Tree,
+    Vcs,
+    Wakeups,
+    _ActOnParse,
+    _changes,
+    _Database,
+    _raw_rows,
+)
 from tests.code_index_postgres import (
     _IMPORTER_BYTES,
     _MODULE_BYTES,
@@ -143,22 +159,6 @@ from tests.code_index_postgres import (
     collect_garbage,
     graph_rows,
     publish_index,
-)
-from tests.test_code_index_indexer_postgres import (
-    _PACKAGE,
-    _PACKAGE_V2,
-    _SETTINGS,
-    _VERSIONS,
-    Branch,
-    Indexer,
-    Link,
-    Tree,
-    Vcs,
-    Wakeups,
-    _ActOnParse,
-    _changes,
-    _Database,
-    _raw_rows,
 )
 from tests.test_github_installation_dispatch import _merge_delivery, _push_delivery
 
