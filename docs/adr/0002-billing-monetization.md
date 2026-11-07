@@ -808,12 +808,22 @@ deep: 5 цен единицы).
     `installation.created` и есть первый Owner; право `members: read` для этого
     не нужно;
   - установка на личный аккаунт: владелец этого аккаунта.
-  Из `installation.created` в `provider_metadata` установки пишутся
-  `installer_github_user_id` (`sender.id`) и `account_type`
-  (`Organization | User`), и в той же транзакции строка роли `owner` с
-  `source = install`. Сейчас в `provider_metadata` только `account_login`, а
-  payload вебхука живёт 30 дней (§1), поэтому у установок, созданных до #373,
-  установщика нет: они начинают в режиме без Owner до восстановления (ниже).
+  Workspace и установку на `main` создаёт OAuth-вход (`LinkGitHubInstallations`),
+  а доставка для ещё не связанной установки ждёт связывания (SD §6.5). Поэтому
+  первого Owner пишет проекция после связывания, а не обработчик вебхука: когда
+  установка связана с workspace, проекция берёт `sender.id` и `account.type` из
+  сохранённой доставки `installation.created` этой установки, пишет в
+  `provider_metadata` установки `installer_github_user_id` и `account_type`
+  (`Organization | User`) и, **только если у workspace ещё нет ни одного Owner**, в
+  той же транзакции строку роли `owner` с `source = install`. Исходы:
+  - переустановка на тот же аккаунт (новая установка получает прежний workspace,
+    `github_repository_rebinding.py`): метаданные новой установки пишутся, Owner
+    не добавляется, роли и баланс workspace не меняются;
+  - доставка `installation.created` истекла до связывания (payload живёт 30 дней,
+    §1) или не пришла: установщика нет, workspace начинает в режиме без Owner до
+    восстановления (ниже);
+  - установки, созданные до #373: сейчас в `provider_metadata` только
+    `account_login`, поэтому установщика нет, тот же режим без Owner.
 - **Дальше Owner живёт только в нашей БД.** Назначает и снимает Owner только Owner
   в продукте: делает Owner другого участника или приглашает с ролью Owner. Смена роли
   в организации GitHub наши роли не меняет: проверок роли GitHub при входе, перед
