@@ -9,7 +9,9 @@ constraints, package clause and which member declares a name; rule G), and a pac
 `__init__.py` that decides whether `from package import name` binds a symbol or a
 submodule (rule I). A Go record points at the package directory, its edges at the member
 files. A parse error in any Go member makes rule G `unsupported`/`ast_failed` with no
-member edges; a broken `__init__.py` makes rule I guess neither symbol nor submodule.
+member edges; a broken `__init__.py` makes rule I guess neither symbol nor submodule,
+even without a submodule candidate. An unavailable `__init__.py` only blocks the
+ambiguous symbol/submodule choice.
 Python and TypeScript/JavaScript target symbols from files with parse errors are not
 stored, so their name edges do not join to a symbol on read.
 
@@ -263,8 +265,13 @@ class IndexImportResolver:
         submodule = python_submodule_files(package_init, name, self._tree)
         symbol = [IndexedEdge(path, EdgeKind.USES_IMPORTED, package_init, name)]
         init = await self._facts.facts_for(package_init)
-        if isinstance(init, FileUnavailable) or init.has_errors:
+        if isinstance(init, FileUnavailable):
+            if len(submodule) != 1:
+                return symbol if _uses(reads, alias) else []
             # A symbol cannot be told from the submodule: neither is guessed.
+            return []
+        if init.has_errors:
+            # A broken init can hide either binding, even without a submodule candidate.
             return []
         if len(submodule) != 1:
             return symbol if _uses(reads, alias) else []

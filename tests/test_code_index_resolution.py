@@ -21,10 +21,12 @@ from app.modules.code_index.application.index_resolution import (
     affected_importers,
 )
 from app.modules.code_index.application.index_store import ImportRecord, IndexedEdge
+from app.modules.code_index.application.symbol_rows import symbol_rows
 from app.modules.code_index.domain.enums import EdgeKind
 from app.modules.reviews.application.ast_resolution import (
     FileUnavailable,
     ImportResolution,
+    ImportResolver,
     RevisionTree,
 )
 from app.modules.reviews.application.ast_symbols import AstFacts, AstLanguage, language_for_path
@@ -258,6 +260,15 @@ def test_python_package_binding_prefers_a_symbol_of_init_then_the_submodule() ->
     )
     assert provider.asked == [init]
 
+    unavailable_without_submodule, provider = _resolve(
+        _APP, _PACKAGE_APP, unavailable={init: "ast_limit"}
+    )
+    assert unavailable_without_submodule[0].edges == (
+        _imports(_APP, init),
+        _uses(_APP, init, "helpers"),
+    )
+    assert provider.asked == [init]
+
     declared, _ = _resolve(
         _APP, _PACKAGE_APP, paths=["pkg/helpers.py"], sources={init: "helpers = object()\n"}
     )
@@ -283,6 +294,7 @@ def test_python_package_binding_prefers_a_symbol_of_init_then_the_submodule() ->
     assert excluded[0].edges == (_imports(_APP, init),)
 
 
+@pytest.mark.parametrize("submodule", [True, False], ids=["with-submodule", "no-submodule"])
 @pytest.mark.parametrize(
     "init",
     [
@@ -359,11 +371,16 @@ def test_python_package_own_absolute_import_in_monorepo_indexes_submodule(init: 
     ],
     ids=["partial-symbol", "submodule-fallback"],
 )
-def test_python_package_binding_refuses_broken_init(init_source: str) -> None:
+def test_python_package_binding_refuses_broken_init(init_source: str, submodule: bool) -> None:
     init = "pkg/__init__.py"
     assert _facts(init, init_source).has_errors
 
-    item = _one(_APP, _PACKAGE_APP, paths=["pkg/helpers.py"], sources={init: init_source})
+    item = _one(
+        _APP,
+        _PACKAGE_APP,
+        paths=["pkg/helpers.py"] if submodule else [],
+        sources={init: init_source},
+    )
 
     assert item.edges == (_imports(_APP, init),)
 
@@ -374,6 +391,68 @@ def test_python_unused_submodule_binding_still_imports_the_submodule() -> None:
     item = _one(_APP, source, paths=["pkg/helpers.py"], sources={"pkg/__init__.py": ""})
 
     assert item.edges == (_imports(_APP, "pkg/__init__.py"), _imports(_APP, "pkg/helpers.py"))
+
+
+@pytest.mark.parametrize(
+    ("importer", "target", "import_source", "target_source"),
+    [
+        pytest.param(
+            "pkg/app.py",
+            "pkg/models.py",
+            "from .models import User\n\ndef run():\n    return User()\n",
+            "class User:\n    pass\n\ndef broken(:\n    pass\n",
+            id="py",
+        ),
+        pytest.param(
+            "pkg/app.py",
+            "pkg/models.py",
+            "from .models import User\n\ndef run():\n    return User()\n",
+            "class User(:\n    pass\n",
+            id="py-overlap",
+        ),
+        *(
+            pytest.param(
+                f"src/app{extension}",
+                f"src/models{extension}",
+                'import { User } from "./models";\nexport function run() { return new User(); }\n',
+                "export class User {}\nexport function broken( { }\n",
+                id=extension[1:],
+            )
+            for extension in (".ts", ".tsx", ".js", ".jsx")
+        ),
+        pytest.param(
+            "src/app.ts",
+            "src/models.ts",
+            'import { User } from "./models";\nexport function run() { return new User(); }\n',
+            "export class User { x = ; }\n",
+            id="ts-overlap",
+        ),
+    ],
+)
+def test_broken_script_target_matches_review_at_read_not_at_record(
+    importer: str, target: str, import_source: str, target_source: str
+) -> None:
+    sources = {importer: import_source, target: target_source}
+    target_facts = _facts(target, target_source)
+    assert target_facts.has_errors
+
+    indexed = _one(importer, import_source, sources={target: target_source})
+    assert indexed.record.resolution is RESOLVED
+    assert _uses(importer, target, "User") in indexed.edges
+    assert symbol_rows(target, target_facts) == ()
+
+    facts = _facts(importer, import_source)
+    symbols = [symbol for symbol in facts.symbols if symbol.name == "run"]
+    assert len(symbols) == 1
+    tree = RevisionTree(_HEAD, dict.fromkeys(sources, "b" * 40), True)
+    review = ImportResolver(tree=tree, provider=Provider(sources))
+    refs = asyncio.run(review.resolve(importer_path=importer, facts=facts, symbols=symbols))
+    assert len(refs) == 1
+    assert (refs[0].resolution, refs[0].reason, refs[0].resolved_symbols) == (
+        UNSUPPORTED,
+        "ast_failed",
+        (),
+    )
 
 
 # --- TypeScript and JavaScript -------------------------------------------------------------
@@ -624,6 +703,16 @@ def test_go_declaration_moving_between_members_moves_the_edge_under_rule_g() -> 
             "internal/store/open.go",
             "packag store\n\nfunc Open() error { return nil }\n",
             id="only-member-with-broken-clause",
+        ),
+        pytest.param(
+            "internal/store/open.go",
+            "package store\n\nfunc Open() error { return nil }\n\nfunc Close( {\n}\n",
+            id="parse-error-after-valid-open",
+        ),
+        pytest.param(
+            "internal/store/a.go",
+            "packag store\n",
+            id="member-without-a-clause-first",
         ),
     ],
 )
