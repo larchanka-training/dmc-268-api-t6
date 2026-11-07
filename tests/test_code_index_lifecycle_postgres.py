@@ -5,7 +5,7 @@
   repeated delivery changes nothing, a purged index keeps its first reason other than
   `ttl`, a sibling's Workspace quota stops counting it, and the GC leader task then
   leaves no graph rows.
-- On the indexer harness of `test_code_index_indexer_postgres.py`, a real trigger (the
+- On the indexer harness of `code_index_indexer_support.py`, a real trigger (the
   toggle off, or a removal) during the download, or run between two write batches of a
   running job, ends it `LEASE_LOST` with no write after the purge, and the GC leader task
   then leaves no graph rows. After the purge and a re-enable, an old message is `STALE`
