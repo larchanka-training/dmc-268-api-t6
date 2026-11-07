@@ -723,7 +723,7 @@ deep: 5 цен единицы).
 | Объект | Использование |
 |---|---|
 | Customer | один на workspace; `metadata.workspace_id`; создаётся нами до первого Checkout любого вида (`mode=payment`, `subscription` или `setup`) и передаётся в сессию как `customer` |
-| Checkout Session | пополнение (`mode=payment`), подписка (`mode=subscription`), сохранение карты (`mode=setup`); в каждой сессии `billing_address_collection=required` и `customer_update[address]=auto`: адрес сохраняется в Customer, по нему Stripe Tax считает налог и в Checkout, и в счёте авто-пополнения (§6.2) |
+| Checkout Session | пополнение (`mode=payment`), подписка (`mode=subscription`), сохранение карты (`mode=setup`); в каждой сессии `billing_address_collection=required`, `customer_update[address]=auto` и, раз включён `tax_id_collection` при существующем Customer, `customer_update[name]=auto` (имя компании и VAT ID сохраняются в Customer, docs.stripe.com/tax/checkout/tax-ids): адрес сохраняется в Customer, по нему Stripe Tax считает налог и в Checkout, и в счёте авто-пополнения (§6.2) |
 | Product, Price | Starter и Pro: фиксированная месячная цена (licensed), `tax_behavior=inclusive`; пополнение: `price_data` на выбранную сумму с `tax_behavior=inclusive` |
 | Subscription | один активный тариф на workspace |
 | SetupIntent | сохранение карты `off_session` |
