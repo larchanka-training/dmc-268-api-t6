@@ -17,7 +17,9 @@ def _python_labels() -> dict[str, set[tuple[str, ...]]]:
     for table in metadata.tables.values():
         for column in table.columns:
             if isinstance(column.type, Enum):
-                assert column.type.name is not None and column.type.enum_class is not None
+                where = f"{table.name}.{column.name}"
+                assert column.type.name is not None, where
+                assert column.type.enum_class is not None, where
                 labels.setdefault(column.type.name, set()).add(
                     tuple(member.value for member in column.type.enum_class)
                 )
