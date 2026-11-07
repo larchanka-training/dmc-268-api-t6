@@ -241,8 +241,8 @@ deep: 5 цен единицы).
 
 ### 4.3. Подписка
 
-- Подписка Stripe на месяц, автопродление. Смена тарифа и отмена через Customer
-  Portal (§10.1).
+- Подписка Stripe на месяц, автопродление. Повышение с нашего экрана, понижение и
+  отмена через Customer Portal (§4.4, §10.1).
 - Включённые ревью начисляются грантом `subscription_grant` в USD ($19 и $49) по
   `invoice.paid` только для счетов с `billing_reason` = `subscription_create` или
   `subscription_cycle`. Ключ идемпотентности: id счёта
@@ -272,12 +272,13 @@ deep: 5 цен единицы).
 | Переход | Когда действует | Деньги и гранты |
 |---|---|---|
 | PAYG → Starter или Pro | сразу, новая подписка | грант по `subscription_create` (§4.3) |
-| Starter → Pro (повышение) | сразу | Stripe выставляет доплату за остаток периода (`proration_behavior=always_invoice`); по её `invoice.paid` (`billing_reason=subscription_update`) пишется `subscription_grant` на оплаченную сумму со сроком текущего гранта; цена единицы Pro действует с момента смены |
+| Starter → Pro (повышение) | после оплаты доплаты | наш экран тарифа вызывает `subscriptions.update` с `payment_behavior=pending_if_incomplete` и `proration_behavior=always_invoice`: Stripe выставляет доплату за остаток периода и меняет тариф только после её оплаты. По `invoice.paid` (`billing_reason=subscription_update`) пишется `subscription_grant` на оплаченную сумму со сроком текущего гранта; цена единицы и лимиты Pro действуют с `customer.subscription.pending_update_applied`. Доплата не прошла: Stripe держит изменение до 23 часов, потом аннулирует счёт (`customer.subscription.pending_update_expired`); workspace остаётся на Starter, баннер «Повышение не оплачено» для Owner, Admin и Billing |
 | Pro → Starter (понижение) | в конце оплаченного периода | до конца периода работает Pro; новый грант $19 по `subscription_cycle`; остаток гранта Pro живёт до своего срока |
 | Подписка → PAYG (отмена) | в конце оплаченного периода | §4.3 |
 
-- Customer Portal настраивается так: повышение сразу с доплатой, понижение и
-  отмена в конце периода (`schedule_at_period_end`).
+- Customer Portal настраивается так: повышение в Portal выключено (оно идёт только
+  с нашего экрана, чтобы было `pending_if_incomplete`), понижение и отмена в конце
+  периода (`schedule_at_period_end`).
 - **Starter при числе репозиториев больше 5.** Правило одно для любого пути в
   Starter: понижение Pro → Starter, переход PAYG → Starter и новая подписка Starter
   после отмены. До оплаты или смены страница тарифа предупреждает и даёт Owner или
@@ -727,7 +728,7 @@ deep: 5 цен единицы).
 | Subscription | один активный тариф на workspace |
 | SetupIntent | сохранение карты `off_session` |
 | Invoice (разовый) | авто-пополнение (§6.2); счёт пополнения через Checkout `invoice_creation` |
-| Customer Portal | карта, счета, VAT ID, смена Starter/Pro по §4.4, отмена в конце периода |
+| Customer Portal | карта, счета, VAT ID, понижение Pro → Starter и отмена в конце периода (§4.4); повышение только с нашего экрана |
 | Stripe Tax | расчёт и reverse charge |
 | Billing Credits, Meters | не используем (§10.2) |
 
@@ -759,6 +760,8 @@ deep: 5 цен единицы).
 | `invoice.payment_failed`, `invoice.payment_action_required` | `metadata.source=auto_recharge`: авто-пополнение выключается, баннер (§6.2). Подписка: статус `past_due`, тариф работает, баннер «Оплата подписки не прошла» (§4.3), письмо шлёт Stripe |
 | `customer.subscription.created`, `.updated` | тариф workspace, лимит репозиториев, статус подписки (`active`, `past_due`) |
 | `customer.subscription.deleted` | тариф снимается, workspace на PAYG (§4.3) |
+| `customer.subscription.pending_update_applied` | повышение оплачено: тариф Pro, цена единицы и лимиты Pro (§4.4) |
+| `customer.subscription.pending_update_expired` | повышение не оплачено: тариф остаётся Starter, баннер «Повышение не оплачено» (§4.4) |
 | `customer.tax_id.created`, `.updated` | статус проверки VAT ID |
 | `charge.refunded` | по строке `refund` на каждый объект возврата из `charge.refunds`, которого ещё нет (ключ `provider_refund_id`, §5) |
 | `charge.dispute.created` | строка `adjustment` с причиной `dispute` на сумму спора в грант платежа (§5); авто-пополнение выключается; отметка для оператора |
