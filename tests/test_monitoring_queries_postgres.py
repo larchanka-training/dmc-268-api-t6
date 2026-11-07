@@ -7,7 +7,6 @@ disposable PostgreSQL database.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -19,27 +18,20 @@ from sqlalchemy import Connection, create_engine, text
 from sqlalchemy.pool import NullPool
 
 from tests.monitoring_deploy_host import MONITORING, _grants, _query, _read
-from tests.portal_postgres import PR_OPEN, PROMPT, RULE_A, RUN_DONE, WS_A, Env, portal_schema
+from tests.portal_postgres import PR_OPEN, PROMPT, RULE_A, RUN_DONE, WS_A, Env
+
+pytest_plugins = ("tests.portal_schema_postgres",)
 
 # UTC+14 all year: its calendar month starts 14 hours before the UTC one.
 FAR_EAST = "Pacific/Kiritimati"
 
 
 @pytest.fixture
-def env() -> Iterator[Env]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    with portal_schema(database_url, None) as schema:
-        yield schema
-
-
-@pytest.fixture
-def connection(env: Env) -> Iterator[Connection]:
+def connection(portal_env: Env) -> Iterator[Connection]:
     """One transaction per test, rolled back: now() is the same for the rows and the query."""
     engine = create_engine(
-        env.database_url,
-        connect_args={"options": f"-csearch_path={env.schema}"},
+        portal_env.database_url,
+        connect_args={"options": f"-csearch_path={portal_env.schema}"},
         poolclass=NullPool,
     )
     try:
