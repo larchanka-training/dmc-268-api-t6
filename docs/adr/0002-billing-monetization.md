@@ -780,6 +780,7 @@ save_card`), версия текста, параметры (цена и пери
 | Менять тариф, авто-пополнение, счета, VAT ID | да | да | да | нет |
 | Отказаться от покупки в 14 дней (§9) | да | да | да | нет |
 | Настройки репозиториев (вкл., движок, правила, RAG) | да | да | нет | нет |
+| Подключать и отключать интеграции GitLab и Bitbucket | да | да | нет | нет |
 | Приглашать, менять роли, удалять участников | да | да (кроме Owner) | нет | нет |
 | Назначать и снимать Owner | да, кроме последнего Owner (§11.2) | нет | нет | нет |
 
@@ -843,6 +844,8 @@ save_card`), версия текста, параметры (цена и пери
     `members: read` (сейчас прав организации нет, SD §8.2; добавление в #373); пока
     админ организации его не принял, ui пишет «Попросите админа организации
     принять новые права приложения в GitHub» со ссылкой на страницу установки.
+    Кроме заявки, это право читают только разовый скрипт назначения Owner при
+    включении флага (ниже) и экран «Команда» (членство в организации, выше).
   - Личный аккаунт: владелец аккаунта установки (проверка по id аккаунта)
     становится Owner, если он ещё не Owner.
   - Заявка пишет строку `owner` с `source = claim` и строку журнала
@@ -869,8 +872,8 @@ save_card`), версия текста, параметры (цена и пери
     репозиториев открыты всем с доступом GitHub, как на `main`. Баннер «Станьте
     Owner» с кнопкой «Стать Owner» (или текст про `members: read`).
   - Режим заканчивается с первым Owner (заявка или установка): дальше матрица
-    §11.1 и оплата с баланса 0 (§16). Ни оператор, ни порядок входа Owner не
-    назначают.
+    §11.1 и оплата с баланса 0 (§16). Кроме разового скрипта при включении
+    флага, ни оператор, ни порядок входа Owner не назначают.
 - **GitLab и Bitbucket.** Workspace рождается только при входе через GitHub
   (`LinkGitHubInstallations`), а подключение GitLab или Bitbucket требует
   существующего workspace
@@ -983,7 +986,7 @@ GitHub. Так Billing без доступа GitHub после принятия 
 | PIPELINE_SPEC §6 | С #372: коды `plan_repo_limit`, `plan_graph_rag_unavailable` (§4.4) |
 | PIPELINE_SPEC §7 (check-run, только GitHub) | С #371: у `skipped` с `balance_exhausted` в summary ссылка на пополнение (сейчас у `skipped` ссылки нет); комментарий в PR с той же ссылкой не чаще раза в сутки на PR (§8.1); при деградации deep → fast по балансу в summary «На deep не хватило баланса, выполнено fast-ревью» и ссылка на пополнение (§8.1) |
 | `AGENTS.md`, `.agents/rules/backend.md` §3, BACKEND_ARCHITECTURE (исключения короткой транзакции), ADR 0002 §3.3 | С #371: имя единственной точки записи строк списания (класс и метод модуля `billing`) вписывается рядом с `SqlAlchemyUsageLedger.record` во всех четырёх местах SYNC |
-| SD §6.5, §8.2, §12, `contracts/openapi.yaml` | С #373: роли, первый Owner от установщика (`installation.created`, `source = install`), Owner только в БД и минимум один Owner, восстановление Owner по роли организации (право App `members: read` нужно только для него), исключения, приглашения, проверка роли в БД; исключение проверяется на каждом запросе к workspace, включая чтение (`app/modules/auth/application/scope.py`, §11.3); членство в workspace одним определением (доступ GitHub плюс строки роли любого `source` минус исключения) при входе (`exchange_github_code` → `LinkGitHubInstallations`, `current_workspace_ids`), вход и принятие приглашения сразу выпускают токен, в `sessions.py`, `current_user.py` (`GET /api/auth/me`), `metrics_summary.py` и `connection_store.py` Bitbucket; доступ к репозиториям (`repository_access.py`) остаётся на доступе GitHub (§11.3) |
+| SD §6.5, §8.2, §12, `contracts/openapi.yaml` | С #373: роли, первый Owner от установщика (`installation.created`, `source = install`), Owner только в БД и минимум один Owner, восстановление Owner по роли организации; право App `members: read` нужно в трёх местах: заявка на восстановление Owner, разовый скрипт назначения Owner при включении `billing_enforcement` и показ членства в организации на экране «Команда» (§11.2), исключения, приглашения, проверка роли в БД; исключение проверяется на каждом запросе к workspace, включая чтение (`app/modules/auth/application/scope.py`, §11.3); членство в workspace одним определением (доступ GitHub плюс строки роли любого `source` минус исключения) при входе (`exchange_github_code` → `LinkGitHubInstallations`, `current_workspace_ids`), вход и принятие приглашения сразу выпускают токен, в `sessions.py`, `current_user.py` (`GET /api/auth/me`), `metrics_summary.py` и `connection_store.py` Bitbucket; доступ к репозиториям (`repository_access.py`) остаётся на доступе GitHub (§11.3) |
 | BACKEND_ARCHITECTURE «PostgreSQL и владение моделями», ERD | С #371, #372, #373 и #513: модели `billing` (`balance_holds`, `billing_consents`, новые поля `payments` и виды `credit_ledger`) и `workspaces` (строки ролей, `workspace_member_exclusions`, `workspace_owner_claims`) вместе с их DDL |
 | BACKEND_ARCHITECTURE (таблица задач worker, лидер-цикл) | С #371: задачи досписания и истечения (§10.6) и суточная сверка со Stripe (§10.5) в лидер-цикле |
 | `app/modules/reviews/application/get_metrics_summary.py` (флаг `paused` от `FAST_RUN_COST_LIMIT`) | С #371: флаг считается от цены единицы тарифа и остатка дня по списаниям, только при `daily_budget_usd > 0` (§8.1) |
@@ -1070,7 +1073,7 @@ workspace начинают с балансом 0 (строк `credit_ledger` у 
 | #372 | согласия подписки по §9 п. 1 (`immediate_start`, если есть право отказа) и п. 5 (`subscription_renewal`, всем подписчикам) пишутся в `billing_consents`; неоплата: `past_due` на время повторов, отмена по `customer.subscription.deleted`, поздний `invoice.paid` по отменённой подписке даёт `top_up` (§4.3, §10.3); строка `payments` на счёт подписки (§10.4); спор по счёту подписки в `subscription_grant` (§5) | ждёт правки |
 | #372, ui#208 | повышение Starter → Pro только с нашего экрана: `subscriptions.update` с `payment_behavior=pending_if_incomplete`, Pro по `customer.subscription.pending_update_applied`, `pending_update_expired` оставляет Starter; в Customer Portal повышение выключено (§4.4, §10.3); Checkout с `customer_update[name]=auto` (§10.1); `mode=subscription` строки `payments` на сессию не пишет (§10.4); сверка подписок (§10.5) | ждёт правки |
 | #373 | запись об исключении (§11.2) | внесено |
-| #373 | Owner по новой модели вместо «Owner из GitHub»: первый Owner это установщик из `installation.created` (`installer_github_user_id`, `account_type`), дальше Owner назначает и снимает только Owner в продукте, роль GitHub наши роли не меняет; право `members: read` только для восстановления Owner админом организации (§11.2) | ждёт правки |
+| #373 | Owner по новой модели вместо «Owner из GitHub»: первый Owner это установщик из `installation.created` (`installer_github_user_id`, `account_type`), дальше Owner назначает и снимает только Owner в продукте, роль GitHub наши роли не меняет; право `members: read` в трёх местах: восстановление Owner админом организации, разовый скрипт назначения Owner при включении флага и членство в организации на экране «Команда» (§11.2) | ждёт правки |
 | #373 AC Ч.1 | вместо «Owner выводится из GitHub по ADR §11.2, порядок входа на него не влияет; назначить, понизить или удалить Owner в продукте нельзя»: первый Owner от установщика, дальше Owner назначает и снимает только Owner в продукте, последнего Owner нельзя понизить или удалить (проверка в API); старые установки без установщика в режиме без Owner до восстановления (§11.2) | ждёт правки |
 | #373 | «Member получает 403 на изменение настроек и биллинга»: в режиме без Owner настройки репозиториев открыты всем с доступом GitHub (§11.2) | ждёт правки |
 | #373 | режим без Owner без веток Admin и Billing: при включении `billing_enforcement` разовый идемпотентный скрипт с журналом назначает Owner (личный аккаунт: владелец, организация: первый админ организации с пользователем у нас), иначе прежние бесплатные лимиты и баннер «Станьте Owner» (§11.2, §16); переустановка без Owner делает установщика Owner (§11.2); вход (`exchange_github_code` → `LinkGitHubInstallations`, `current_workspace_ids`), refresh и принятие приглашения сразу выпускают токен по одному определению членства (§11.3); кнопка «Стать Owner» и журнал восстановления; исключение проверяется и на чтении; одно определение членства: токен, `/api/auth/me`, сводка и Bitbucket читают доступ GitHub плюс строки роли минус исключения (§11.2, §11.3) | ждёт правки |
