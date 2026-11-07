@@ -143,6 +143,16 @@ class InstallationSuspendedEvent:
     installation_external_id: int
 
 
+# The events the visibility handler records (#454): one name for the annotations and the
+# dispatcher's isinstance, so a new one cannot be left out of either.
+RepositoryVisibilityChange = (
+    RepositoryVisibilityEvent
+    | RepositoryRenamedEvent
+    | RepositoryTransferredEvent
+    | InstallationSuspendedEvent
+)
+
+
 @dataclass(frozen=True)
 class GitHubDispatchEvent:
     """Validated application input from a claimed raw webhook receipt."""
@@ -154,10 +164,7 @@ class GitHubDispatchEvent:
         | CiTriggerEvent
         | InstallationRepositoriesEvent
         | PushEvent
-        | RepositoryVisibilityEvent
-        | RepositoryRenamedEvent
-        | RepositoryTransferredEvent
-        | InstallationSuspendedEvent
+        | RepositoryVisibilityChange
         | UnsupportedGitHubEvent
     )
     # When the service received it; a retried or revived delivery keeps this time.
@@ -295,13 +302,7 @@ class GitHubInstallationDeliveryDispatcher:
                 detail=_with_action(event.action, None),
             )
         observed_at = delivery.received_at or datetime.now(UTC)
-        if isinstance(
-            event,
-            RepositoryVisibilityEvent
-            | RepositoryRenamedEvent
-            | RepositoryTransferredEvent
-            | InstallationSuspendedEvent,
-        ):
+        if isinstance(event, RepositoryVisibilityChange):
             return await self._visibility_result(event, observed_at)
         if isinstance(event, PullRequestLabelEvent):
             await self._learn_visibility(event.pull_request, observed_at)
@@ -404,10 +405,7 @@ class GitHubInstallationDeliveryDispatcher:
 
     async def _visibility_result(
         self,
-        event: RepositoryVisibilityEvent
-        | RepositoryRenamedEvent
-        | RepositoryTransferredEvent
-        | InstallationSuspendedEvent,
+        event: RepositoryVisibilityChange,
         observed_at: datetime,
     ) -> InstallationDeliveryDispatchResult:
         visibility = self._repository_visibility

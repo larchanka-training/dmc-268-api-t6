@@ -32,11 +32,8 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     GitHubDispatchEvent,
     InstallationDeliveryDispatchResult,
     InstallationDeliveryDispatchStatus,
-    InstallationSuspendedEvent,
     PushEvent,
-    RepositoryRenamedEvent,
-    RepositoryTransferredEvent,
-    RepositoryVisibilityEvent,
+    RepositoryVisibilityChange,
     UnsupportedGitHubEvent,
     _with_action,
 )
@@ -104,10 +101,7 @@ class GitHubWebhookDispatchAdapter:
             | CiTriggerEvent
             | InstallationRepositoriesEvent
             | PushEvent
-            | RepositoryVisibilityEvent
-            | RepositoryRenamedEvent
-            | RepositoryTransferredEvent
-            | InstallationSuspendedEvent
+            | RepositoryVisibilityChange
             | UnsupportedGitHubEvent
         )
         if event_name == "pull_request":
