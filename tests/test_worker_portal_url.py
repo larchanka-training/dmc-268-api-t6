@@ -152,7 +152,8 @@ def test_worker_settings_reject_malformed_nonempty_portal_urls(portal_url: str) 
 @pytest.mark.parametrize(
     "portal_url",
     [
-        # No @host: the parser reads the password as the port and quotes it in its error.
+        # No @host: the parser reads the password as the port and quotes it in its ValueError,
+        # so this case fails without `from None` in app/worker.py. Keep the secret in that message.
         "https://alice:do-not-log-this",
         "https://alice:do-not-log-this@ui.test／x",
     ],
