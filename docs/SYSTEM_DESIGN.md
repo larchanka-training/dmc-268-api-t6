@@ -86,7 +86,8 @@ flowchart LR
 ## 4. C4 — уровень 2: контейнеры
 
 Диаграмма фиксирует целевую границу системы; развёртывание сервисов, включая одноразовый
-`migrator`, — в §14. Цепочка реального кода — [ARCHITECTURE.md](ARCHITECTURE.md).
+`migrator`, — в §14. Цепочка реального кода — [ARCHITECTURE.md](ARCHITECTURE.md). Sandbox Runner
+фазы 3 (Р-3) не показан: в коде его нет.
 
 ```mermaid
 flowchart TB
