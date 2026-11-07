@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from types import TracebackType
@@ -49,7 +48,7 @@ from app.modules.reviews.application.prompt_builder import (
     ReviewContext,
     file_block_id,
 )
-from app.modules.reviews.application.reflection_pass import ReflectionPass, VerifierReply
+from app.modules.reviews.application.reflection_pass import ReflectionPass, VerifierPrompt
 from app.modules.reviews.application.review_context import BuildReviewContext
 from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
@@ -57,6 +56,7 @@ from app.modules.reviews.application.review_context_stage import (
 )
 from app.modules.reviews.application.review_path import ReviewBinding
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
+from tests.llm_fakes import AbstainingVerifier
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
     make_complete_prompt_bindings,
@@ -373,27 +373,6 @@ class RecordingParser(Parser):
         return await super().parse_many(requests)
 
 
-@dataclass
-class Verifier:
-    """Abstains on every candidate; the prompts it was sent are recorded."""
-
-    prompts: list[str] = field(default_factory=list)
-
-    async def verify(self, *, system_prompt: str, user_prompt: str, **_: object) -> VerifierReply:
-        self.prompts.append("\n".join((system_prompt, user_prompt)))
-        decisions = [
-            {
-                "candidate_id": candidate,
-                "status": "insufficient_context",
-                "reason": "Not enough code.",
-                "evidence_refs": [],
-                "requirement_refs": [],
-            }
-            for candidate in re.findall(r'candidate candidate_id="([^"]+)"', user_prompt)
-        ]
-        return VerifierReply(output={"decisions": decisions})
-
-
 def _finding(path: str, line: int) -> dict[str, object]:
     return {
         "path": path,
@@ -420,7 +399,7 @@ class AliasRun:
     parsed: list[bytes]
     conventions: ConventionsRequest
     context: ReviewContext
-    verifier_prompts: list[str]
+    verifier_prompts: list[VerifierPrompt]
 
     @property
     def alias_row(self) -> DiffSnapshot:
@@ -433,7 +412,7 @@ class AliasRun:
         return (
             "\n".join((conventions.system, conventions.user)),
             PromptBuilder().build(self.context),
-            *self.verifier_prompts,
+            *("\n".join((prompt.system, prompt.user)) for prompt in self.verifier_prompts),
         )
 
     def context_paths(self) -> set[str | None]:
@@ -508,7 +487,7 @@ def _alias_run(status: FileStatus, old_name: str) -> AliasRun:
     answer: dict[str, object] = {"findings": [_finding("src/app.py", 5), _finding(_ALIAS, 1)]}
     meta = asyncio.run(github.get_pull_request(_LOCATOR, checkpoint=_checkpoint)).meta
     model = Model(meta, answer=answer)
-    verifier = Verifier()
+    verifier = AbstainingVerifier()
     pipeline = ExecuteReviewRun(
         processor,
         Prompts(runs),
