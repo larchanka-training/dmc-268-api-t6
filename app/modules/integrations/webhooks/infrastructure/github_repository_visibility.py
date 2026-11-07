@@ -2,14 +2,9 @@
 
 from __future__ import annotations
 
-import re
-
 import httpx
 
-from app.common.application.github_repository_name import (
-    REPOSITORY_FULL_NAME_MAX_LENGTH,
-    REPOSITORY_FULL_NAME_PATTERN,
-)
+from app.common.application.github_repository_name import is_github_repository_full_name
 from app.modules.integrations.webhooks.application.installation_access_token import (
     InstallationAccessTokenError,
 )
@@ -22,7 +17,6 @@ from app.modules.repositories.application.repository_visibility import (
 )
 
 _GITHUB_API_VERSION = "2022-11-28"
-_FULL_NAME = re.compile(REPOSITORY_FULL_NAME_PATTERN)
 # A token GitHub refuses for this installation: suspended or uninstalled. Not 401, which says
 # the App's own key is wrong and nothing about the repository.
 _TOKEN_REFUSED = frozenset({403, 404})
@@ -116,9 +110,7 @@ def _reading(payload: dict[str, object]) -> RepositoryVisibilityReading:
         private=private if isinstance(private, bool) else None,
         full_name=(
             full_name
-            if isinstance(full_name, str)
-            and len(full_name) <= REPOSITORY_FULL_NAME_MAX_LENGTH
-            and _FULL_NAME.fullmatch(full_name)
+            if isinstance(full_name, str) and is_github_repository_full_name(full_name)
             else None
         ),
         web_url=web_url if isinstance(web_url, str) and web_url else None,

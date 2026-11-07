@@ -2,19 +2,13 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
-from app.common.application.github_repository_name import (
-    REPOSITORY_FULL_NAME_MAX_LENGTH,
-    REPOSITORY_FULL_NAME_PATTERN,
-)
+from app.common.application.github_repository_name import is_github_repository_full_name
 from app.modules.reviews.application.list_pulls import run_verdict
 from app.modules.reviews.application.saved_review_result import SavedReviewResult
-
-_FULL_NAME = re.compile(REPOSITORY_FULL_NAME_PATTERN)
 
 
 class BadgeStatus(StrEnum):
@@ -57,7 +51,7 @@ class GetRepositoryBadge:
     async def execute(self, owner: str, repo: str) -> BadgeStatus:
         """An anonymous address: a name GitHub cannot have is simply a repository we don't know."""
         full_name = f"{owner}/{repo}"
-        if len(full_name) > REPOSITORY_FULL_NAME_MAX_LENGTH or not _FULL_NAME.fullmatch(full_name):
+        if not is_github_repository_full_name(full_name):
             return BadgeStatus.NO_DATA
         run = await self._queries.latest_succeeded_run(full_name)
         if run is None:

@@ -9,16 +9,10 @@ paths here, and an error never carries the rejected value.
 
 from __future__ import annotations
 
-import re
 from urllib.parse import quote
 
 from app.common.application.git_identity import is_commit_sha
-from app.common.application.github_repository_name import (
-    REPOSITORY_FULL_NAME_MAX_LENGTH,
-    REPOSITORY_FULL_NAME_PATTERN,
-)
-
-_REPOSITORY_FULL_NAME = re.compile(REPOSITORY_FULL_NAME_PATTERN)
+from app.common.application.github_repository_name import is_github_repository_full_name
 
 
 class InvalidGitHubPathSegment(ValueError):
@@ -27,12 +21,7 @@ class InvalidGitHubPathSegment(ValueError):
 
 def repository_path_from_full_name(full_name: str) -> str:
     """Return ``/repos/{owner}/{repo}``; a name of another shape raises before any request."""
-    # The length check comes first: the pattern backtracks quadratically on a crafted long
-    # name such as "o/a.a.a...!".
-    if (
-        len(full_name) > REPOSITORY_FULL_NAME_MAX_LENGTH
-        or _REPOSITORY_FULL_NAME.fullmatch(full_name) is None
-    ):
+    if not is_github_repository_full_name(full_name):
         raise InvalidGitHubPathSegment("GitHub repository must be owner/repo")
     return f"/repos/{full_name}"
 
