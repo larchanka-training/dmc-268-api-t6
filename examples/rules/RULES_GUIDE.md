@@ -61,13 +61,13 @@ templates pasted together as they are fail every run with `policy_ignore_block_d
 | `typescript-react` | 2113 | 1137 |
 | Largest stack + `security-baseline` | 4270 | 2207 |
 
-A file may take up to 64 KiB. Tokens are the service's estimate of the block the model sees, at 3
-characters per token. That block marks up every line, so the number is about 60 % above an estimate
-from the size of the file. The last row is the file the steps above give for the largest stack.
+Tokens are the service's estimate of the block the model sees, at 3 characters per token. That
+block marks up every line, so the number is about 60 % above an estimate from the size of the file.
+The last row is the file the steps above give for the largest stack.
 
-`.review/rules.md` and the root `AGENTS.md` share a budget of 12,000 tokens, and a run over it fails
-with `policy_prompt_budget_exceeded`. Each template stays under 6,000, which leaves at least half of
-the budget to your `AGENTS.md`. Keep to that when you add rules.
+The size limit of the file, and the token budget it shares with the root `AGENTS.md`, are in
+[§3.3](../../docs/RULES_FORMAT_SPEC.md#33-лимиты-policy-limitsv1). Each template stays under 6,000
+tokens to leave room for your `AGENTS.md`. Keep to that when you add rules.
 
 ## Exceptions
 
