@@ -238,8 +238,21 @@ deep: 5 цен единицы).
   описано в §4.4: доплата за повышение даёт грант на оплаченную сумму. Счёт с нулевой
   суммой (`amount_paid = 0`) грант не даёт.
 - Отмена действует в конце оплаченного периода; до него тариф работает.
-- Счёт не оплачен после повторов Stripe: тариф снимается, workspace переходит на
-  PAYG, остаток гранта живёт до своего срока.
+- **Неоплата счёта подписки** (стандартный путь Stripe):
+  - `invoice.payment_failed` по счёту `subscription_cycle`: подписка в статусе
+    Stripe `past_due`, Stripe повторяет списание (Smart Retries). Тариф работает,
+    гранта за этот счёт нет, баннер для Owner, Admin и Billing «Оплата подписки не
+    прошла» с кнопкой в Customer Portal;
+  - конец повторов: в настройках Stripe (Revenue recovery) задано «отменить
+    подписку» и «пометить счёт как uncollectible». По `customer.subscription.deleted`
+    тариф снимается, workspace переходит на PAYG и платит с баланса; остаток
+    прошлого гранта живёт до своего срока (§5);
+  - поздний `invoice.paid` по счёту, у которого подписка уже `canceled`: тариф не
+    возвращается и `subscription_grant` не пишется; оплаченная сумма зачисляется
+    грантом `top_up` (12 месяцев), чтобы деньги клиента не пропали. Вернуть тариф
+    можно только новой подпиской (§4.4);
+  - `invoice.paid` по счёту в `past_due` до конца повторов: обычный грант по
+    `billing_reason`, подписка снова `active`.
 
 ### 4.4. Смена тарифа
 
@@ -588,9 +601,10 @@ deep: 5 цен единицы).
 | `payment_intent.succeeded`, `payment_intent.payment_failed` | только лог: деньги пополнения по `checkout.session.completed`, авто-пополнения и подписки по событиям счёта |
 | `payment_method.detached`, `customer.updated` (смена карты по умолчанию) | если это карта авто-пополнения: авто-пополнение выключается, баннер «Карта изменена, включите авто-пополнение заново» (§6.2, §9 п. 3) |
 | `setup_intent.succeeded` | путь «Привязать карту»: карта сохранена; бонус §7, если флаг включён и условия выполнены |
-| `invoice.paid` | `metadata.source=auto_recharge`: грант `top_up` (§6.2). Иначе грант `subscription_grant`: полный для `billing_reason` = `subscription_create` или `subscription_cycle`, на оплаченную сумму для доплаты за повышение (§4.3, §4.4); иначе без гранта |
-| `invoice.payment_failed`, `invoice.payment_action_required` | `metadata.source=auto_recharge`: авто-пополнение выключается, баннер (§6.2). Подписка: отметка в ui, письмо шлёт Stripe |
-| `customer.subscription.created`, `.updated`, `.deleted` | тариф workspace, лимит репозиториев |
+| `invoice.paid` | `metadata.source=auto_recharge`: грант `top_up` (§6.2). Счёт подписки, подписка `canceled`: грант `top_up` на оплаченную сумму, тариф не возвращается (§4.3). Иначе грант `subscription_grant`: полный для `billing_reason` = `subscription_create` или `subscription_cycle`, на оплаченную сумму для доплаты за повышение (§4.3, §4.4); иначе без гранта |
+| `invoice.payment_failed`, `invoice.payment_action_required` | `metadata.source=auto_recharge`: авто-пополнение выключается, баннер (§6.2). Подписка: статус `past_due`, тариф работает, баннер «Оплата подписки не прошла» (§4.3), письмо шлёт Stripe |
+| `customer.subscription.created`, `.updated` | тариф workspace, лимит репозиториев, статус подписки (`active`, `past_due`) |
+| `customer.subscription.deleted` | тариф снимается, workspace на PAYG (§4.3) |
 | `customer.tax_id.created`, `.updated` | статус проверки VAT ID |
 | `charge.refunded` | строка `refund` |
 | `charge.dispute.created` | строка `adjustment` с причиной `dispute` на сумму спора в грант платежа (§5); авто-пополнение выключается; отметка для оператора |
