@@ -311,6 +311,9 @@ def loopback_server_url(value: str) -> URL:
         url = make_url(value)
     except ArgumentError as error:
         raise Refused(f"--server-url is not a loopback database URL: {error}") from error
+    if url.query:
+        # libpq takes host, hostaddr and service from the query over the authority checked below.
+        raise Refused("--server-url must not carry query parameters: it may leave loopback")
     host = url.host or ""
     if host != "localhost":
         try:
