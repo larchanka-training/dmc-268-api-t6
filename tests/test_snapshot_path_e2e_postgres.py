@@ -376,6 +376,7 @@ async def _scenario(
     prior_attempts: int = 0,
     checkpoint_retry: bool = False,
     missing_retrieved_on_retry: bool = False,
+    tamper_fitted_digest_on_retry: bool = False,
     transaction_probe: Callable[[str], None] | None = None,
     transaction_checks: list[str] | None = None,
 ) -> Observed:
@@ -510,6 +511,15 @@ async def _scenario(
                 else:
                     await _build(index, REPO_A, C2, _user_file(), base=C1)
             async with factory.begin() as session:
+                if tamper_fitted_digest_on_retry:
+                    await session.execute(
+                        text(
+                            "UPDATE review_candidate_checkpoints SET fitted_context="
+                            "jsonb_set(fitted_context, '{prompt_sha256}', '\"0\"') "
+                            "WHERE run_id=:id"
+                        ),
+                        {"id": run_id},
+                    )
                 if not rag:
                     # Newer conventions, review and verifier rows go live between the
                     # attempts; the run keeps its pins.
@@ -657,6 +667,7 @@ def _observe(
     prior_attempts: int = 0,
     checkpoint_retry: bool = False,
     missing_retrieved_on_retry: bool = False,
+    tamper_fitted_digest_on_retry: bool = False,
     check_transactions: bool = False,
 ) -> Observed:
     transaction_checks: list[str] = []
@@ -702,6 +713,7 @@ def _observe(
                 prior_attempts=prior_attempts,
                 checkpoint_retry=checkpoint_retry,
                 missing_retrieved_on_retry=missing_retrieved_on_retry,
+                tamper_fitted_digest_on_retry=tamper_fitted_digest_on_retry,
                 transaction_probe=transaction_probe if check_transactions else None,
                 transaction_checks=transaction_checks,
             )
@@ -965,6 +977,8 @@ def test_review_checkpoint_rejection_cancels_the_claimed_run(
     assert observed.queue.retries == []
     assert observed.queue.published == []
     assert "llm.verify" not in observed.tools
+    assert "llm.review_output" not in observed.tools
+    assert len(observed.bodies) == 2
 
 
 @pytest.mark.integration
@@ -1012,6 +1026,23 @@ def test_verifier_retry_rereviews_when_a_saved_retrieved_block_disappears(env: E
         "Fix parser (edited)",
     ]
     assert len(observed.actions["llm.review_output"]) == 2
+
+
+@pytest.mark.integration
+def test_verifier_retry_rereviews_when_saved_fitted_digest_is_corrupted(env: Env) -> None:
+    observed = _observe(
+        env,
+        version=4,
+        checkpoint_retry=True,
+        missing_retrieved_on_retry=True,
+        tamper_fitted_digest_on_retry=True,
+        verifier_kinds=("unavailable", "unavailable", "verifier"),
+    )
+
+    assert observed.state == ("publishing", None, 2)
+    calls = [request["operation"] for request, _ in observed.actions["llm.call"]]
+    assert calls.count("review") == 2
+    assert len(observed.queue.published) == 1
 
 
 @pytest.mark.integration
