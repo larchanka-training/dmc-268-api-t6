@@ -130,6 +130,8 @@ def test_sqlalchemy_run_repository_filters_and_orders_with_a_tied_timestamp_curs
         )
     )
 
+    assert items[0].status is RunState.SUCCEEDED
+    assert items[0].engine is Engine.FAST
     assert items[0].repo == "org/repo"
     assert items[0].model == "gpt-test"
     assert items[0].action_count == 3

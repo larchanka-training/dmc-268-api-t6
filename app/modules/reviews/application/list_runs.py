@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Literal, Protocol
 from uuid import UUID
 
+from app.common.domain.run_enums import Engine, RunStatus
 from app.modules.reviews.application.run_trigger import RunTrigger
 
 type RunProvider = Literal["github", "gitlab", "bitbucket"]
@@ -56,8 +57,8 @@ class RunUsage:
 @dataclass(frozen=True)
 class RunListItem:
     id: UUID
-    status: str
-    engine: str
+    status: RunStatus
+    engine: Engine
     attempt: int
     cancel_requested: bool
     started_at: datetime | None
