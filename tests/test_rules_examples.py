@@ -7,10 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from app.modules.reviews.application.policy_documents import (
-    MAX_DOCUMENT_BYTES,
-    normalize_document,
-)
+from app.modules.reviews.application.policy_documents import normalize_document
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH, PolicyDocument
 from app.modules.reviews.application.prompt_budget import EstimatedTokenCounter
@@ -20,6 +17,7 @@ from tests.policy_snapshot_fakes import make_policy_snapshot
 
 _CATALOG = Path(__file__).resolve().parents[1] / "examples" / "rules"
 _OPENING = "```review-ignore\n"
+_MAX_TEMPLATE_BYTES = 64 * 1024
 _MAX_TEMPLATE_TOKENS = 6_000
 # Literal masks, in the policy's code point order: a relabelled or deleted block parses to an
 # empty policy without an error, so "no PolicyError" alone would not notice it.
@@ -130,7 +128,7 @@ def test_a_template_with_a_relabelled_block_loses_its_masks(name: str, old: str,
 def test_a_template_fits_the_document_and_token_limits(name: str) -> None:
     raw = _template(name)
 
-    assert len(raw) <= MAX_DOCUMENT_BYTES
+    assert len(raw) <= _MAX_TEMPLATE_BYTES
     assert _tokens(raw) <= _MAX_TEMPLATE_TOKENS
 
 
