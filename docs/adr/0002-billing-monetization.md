@@ -788,7 +788,7 @@ save_card`), `text_version`, `params` (JSON: цена и период для `im
 | `payment_intent.succeeded`, `payment_intent.payment_failed` | только лог: деньги пополнения по `checkout.session.completed`, авто-пополнения и подписки по событиям счёта |
 | `payment_method.detached` | если это карта авто-пополнения: авто-пополнение выключается, баннер «Карта изменена, включите авто-пополнение заново» (§6.2, §9 п. 3) |
 | `setup_intent.succeeded` | `metadata.source=link_card`: карта сохранена; бонус §7 получателю из `metadata.github_user_id`, если флаг включён и условия выполнены. Без этой метки только лог |
-| `invoice.paid` | `metadata.source=auto_recharge`: грант `top_up` (§6.2). Счёт подписки, подписка `canceled`: грант `top_up` на оплаченную сумму, тариф не возвращается (§4.3). Иначе грант `subscription_grant`: полный для `billing_reason` = `subscription_create` или `subscription_cycle`, на оплаченную сумму для доплаты за повышение (§4.3, §4.4); иначе без гранта |
+| `invoice.paid` | `metadata.source=checkout`: только дописать `provider_invoice_id` строки Checkout, без гранта (§10.4). `metadata.source=auto_recharge`: грант `top_up` (§6.2). Счёт подписки, подписка `canceled`: грант `top_up` на оплаченную сумму, тариф не возвращается (§4.3). Иначе грант `subscription_grant`: полный для `billing_reason` = `subscription_create` или `subscription_cycle`, на оплаченную сумму для доплаты за повышение (§4.3, §4.4); иначе без гранта |
 | `invoice.payment_failed`, `invoice.payment_action_required` | `metadata.source=auto_recharge`: авто-пополнение выключается, баннер (§6.2). Подписка: статус `past_due`, тариф работает, баннер «Оплата подписки не прошла» (§4.3), письмо шлёт Stripe |
 | `customer.subscription.created`, `.updated` | тариф workspace, лимит репозиториев, статус подписки (`active`, `past_due`) |
 | `customer.subscription.deleted` | тариф снимается, workspace на PAYG (§4.3) |
@@ -807,9 +807,14 @@ save_card`), `text_version`, `params` (JSON: цена и период для `im
 - **Строка `payments` на каждый оплачиваемый объект Stripe.** Новые поля (#371):
   `source` (`checkout | auto_recharge | subscription`) и `provider_invoice_id`
   (уникальна пара `(provider, provider_invoice_id)`); `workspace_id` уже есть
-  (`app/modules/billing/infrastructure/models.py`). Checkout
-  пишет строку при создании сессии (`provider_checkout_id`, счёт `invoice_creation`
-  дописывается в `provider_invoice_id`); авто-пополнение при создании попытки
+  (`app/modules/billing/infrastructure/models.py`). Строку при создании сессии
+  пишет только Checkout `mode=payment` (`provider_checkout_id`); `mode=subscription`
+  строки на сессию не пишет (деньги подписки идут строкой её счёта ниже),
+  `mode=setup` ничего не оплачивает и строки не имеет. Счёт `invoice_creation`
+  получает `invoice_data.metadata` с `source=checkout` и id нашей строки; его id
+  дописывается в `provider_invoice_id` по `checkout.session.completed` (поле
+  `invoice` сессии) или по `invoice.paid` с этой меткой, что придёт раньше; такой
+  `invoice.paid` гранта не даёт. Авто-пополнение пишет строку при создании попытки
   (§6.2); счёт подписки при первом событии по нему (`invoice.paid` или
   `invoice.payment_failed`). Статусы те же: `pending | paid | failed | expired`.
   Грант `top_up` и `subscription_grant` ссылаются на строку через `payment_id`;
