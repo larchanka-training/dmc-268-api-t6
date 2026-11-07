@@ -145,6 +145,9 @@ snapshot-путь (v4 и v5, `SNAPSHOT_REVIEW_PROMPT_VERSIONS`) описываю
 В #213 ограниченная внутренняя coverage хранится в существующих snapshots и JSON
 `context.build`/`review.postprocess`, с привязкой к head, raw DiffMap digest и
 snapshot digest; списки ограничены 20 безопасными элементами при точных counts.
+В окне причин каждая причина с именем сохраняет первое имя, затем идут остальные
+имена, затем причины без имени: по этому окну чеклист Executive summary называет
+файлы (CONTEXT_AND_VERIFICATION_SPEC §8.2).
 Точный fully reviewed count опирается на полный доверенный набор changed patches,
 а не на первые 20 элементов диагностики: повторный пропуск уже непроверенного
 файла не уменьшает count снова. Этот внутренний набор не сериализуется;

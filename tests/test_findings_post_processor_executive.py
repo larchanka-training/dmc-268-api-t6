@@ -282,6 +282,36 @@ def test_executive_checklist_names_a_renamed_file_by_the_path_that_matched(
     assert _what_to_check(_process_snapshots([_text_change(), renamed])) == [line]
 
 
+@pytest.mark.parametrize(
+    ("snapshots", "line"),
+    [
+        (
+            [*(_text_change(f"src\\moved{n:02}.py") for n in range(20)), _truncated_change()],
+            "- Не проверено — patch неполон (1): `src/cut.py`",
+        ),
+        (
+            [
+                *(_text_change(f"src\\moved{n:02}.py") for n in range(20)),
+                *(_truncated_change(f"src/cut{n}.py") for n in range(3)),
+            ],
+            "- Не проверено — patch неполон (3): `src/cut0.py`, `src/cut1.py`, `src/cut2.py`",
+        ),
+        (
+            [
+                *(_truncated_change(f"src/cut{n:02}.py") for n in range(25)),
+                _too_large_change("z/huge.py"),
+            ],
+            "- Не проверено — Превышен лимит размера, содержимое не проверено (1): `z/huge.py`",
+        ),
+    ],
+)
+def test_executive_checklist_keeps_a_name_for_every_reason_past_twenty_saved_reasons(
+    snapshots: list[DiffSnapshot], line: str
+) -> None:
+    # Saved coverage keeps 20 reasons; the checklist names files from that window.
+    assert line in _what_to_check(_process_snapshots([_text_change(), *snapshots]))
+
+
 def test_executive_checklist_only_counts_sensitive_files_when_the_policy_hides_names() -> None:
     migration = "alembic/versions/1.py"
     result = _process_snapshots(

@@ -153,17 +153,35 @@ class RunCoverage:
     def to_json(self) -> dict[str, Any]:
         """Bound displayed paths while retaining exact reason counts and identities."""
 
+        def shown_path(item: CoverageItem) -> str | None:
+            return None if item.reason == "ignored" else item.path
+
         def items(values: tuple[CoverageItem, ...]) -> list[dict[str, Any]]:
+            order = sorted(
+                values, key=lambda item: (item.path or "", item.reason, item.change_type or "")
+            )
+            # The review-body checklist names files from this window (CVS §8.2): each reason
+            # with a name keeps its first name, then names go before the items without one.
+            first_named: dict[str, int] = {}
+            for index, item in enumerate(order):
+                if shown_path(item) is not None:
+                    first_named.setdefault(item.reason, index)
+            ranked = sorted(
+                range(len(order)),
+                key=lambda index: (
+                    first_named.get(order[index].reason) != index,
+                    shown_path(order[index]) is None,
+                    index,
+                ),
+            )
             return [
                 {
                     key: value
-                    for key, value in asdict(item).items()
+                    for key, value in asdict(order[index]).items()
                     if key != "empty_addition_candidate" or value
                 }
-                | {"path": None if item.reason == "ignored" else item.path}
-                for item in sorted(
-                    values, key=lambda item: (item.path or "", item.reason, item.change_type or "")
-                )[:20]
+                | {"path": shown_path(order[index])}
+                for index in sorted(ranked[:20])
             ]
 
         result = {
