@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 import httpx
+import pytest
 
 from app.modules.reviews.application.publish_run_review import (
     ReviewSubmission,
@@ -132,9 +133,26 @@ class _Tokens:
 
 
 _SUGGESTION_BODY = "**Guard order**\n\nCheck is inverted.\n\n```suggestion\nx = 1\n```"
+_RULE_LINK = (
+    "https://github.com/octo/repo/blob/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "/.review/rules.md?plain=1#L5-L8"
+)
 
 
-def test_redelivery_matches_inline_by_the_body_the_first_post_sent() -> None:
+@pytest.mark.parametrize(
+    ("rule_link", "expected_body"),
+    [
+        pytest.param(None, _SUGGESTION_BODY, id="no-link"),
+        pytest.param(
+            _RULE_LINK,
+            f"{_SUGGESTION_BODY}\n\nRule: [.review/rules.md#L5-L8]({_RULE_LINK})",
+            id="rule-link",
+        ),
+    ],
+)
+def test_redelivery_matches_inline_by_the_body_the_first_post_sent(
+    rule_link: str | None, expected_body: str
+) -> None:
     """POST → GET echo on the found-review path: what was sent is what is matched."""
     finding = PublishedFinding(
         path="src/app.py",
@@ -148,6 +166,7 @@ def test_redelivery_matches_inline_by_the_body_the_first_post_sent() -> None:
         confidence=0.9,
         rule_name=None,
         finding_id=_ID_A,
+        rule_link=rule_link,
     )
     posted_comments: list[dict[str, Any]] = []
     marker = f"<!-- ai-review findings_hash={_HASH} -->"
@@ -187,7 +206,7 @@ def test_redelivery_matches_inline_by_the_body_the_first_post_sent() -> None:
             "line": 3,
             "side": "RIGHT",
             "start_line": 2,
-            "body": _SUGGESTION_BODY,
+            "body": expected_body,
         }
     ]
 

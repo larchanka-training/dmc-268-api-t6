@@ -18,6 +18,7 @@ from app.modules.reviews.application.check_runs import (
     CheckRunView,
     RunProviderCheckpoint,
 )
+from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH
 from app.modules.reviews.application.publish_run_review import (
     PublishError,
     ReviewSubmission,
@@ -40,6 +41,15 @@ def _headers(token: str) -> dict[str, str]:
         "Authorization": f"Bearer {token}",
         "X-GitHub-Api-Version": _API_VERSION,
     }
+
+
+def _comment_body(finding: PublishedFinding) -> str:
+    """The text of an inline comment, the same when it is posted and when it is looked for."""
+    text = comment_body(finding.title, finding.body, finding.suggestion)
+    if finding.rule_link is None:
+        return text
+    lines = finding.rule_link.rpartition("#")[2]
+    return f"{text}\n\nRule: [{RULES_DOCUMENT_PATH}#{lines}]({finding.rule_link})"
 
 
 def _marker(findings_hash: str) -> str:
@@ -215,7 +225,7 @@ class GitHubPullRequestReviewGateway:
                         "line": item.line,
                         "side": "RIGHT",
                         **({"start_line": item.start_line} if item.start_line else {}),
-                        "body": comment_body(item.title, item.body, item.suggestion),
+                        "body": _comment_body(item),
                     }
                     for item in submission.findings
                 ],
@@ -293,7 +303,7 @@ def _posted_inline_finding_ids(
     for finding in findings:
         if finding.finding_id is None:
             continue
-        expected_body = comment_body(finding.title, finding.body, finding.suggestion)
+        expected_body = _comment_body(finding)
         for item in comments:
             comment_id = item.get("id")
             if not isinstance(comment_id, int) or comment_id in used:

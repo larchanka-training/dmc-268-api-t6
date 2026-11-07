@@ -11,7 +11,7 @@ import json
 import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from functools import cached_property
 from hashlib import sha256
@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from app.modules.reviews.application.context_provenance import SourceRole
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import (
+    RULES_DOCUMENT_PATH,
     CallManifest,
     ManifestBlock,
 )
@@ -51,6 +52,7 @@ from app.modules.reviews.application.review_output import (
     EvidenceRef,
     RequirementRef,
     ReviewFindingV2,
+    RuleLineRef,
 )
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
 
@@ -150,6 +152,8 @@ class VerificationRecord:
     candidate_ids: tuple[str, ...]
     accepted_call_id: uuid.UUID | None = None
     manifest_id: uuid.UUID | None = None
+    # Candidate id -> the rules lines its decision cites; what a GitHub comment links to (#465).
+    rule_line_refs: Mapping[str, RuleLineRef] = field(default_factory=dict)
 
 
 # The reference checks of a schema-valid verifier answer against the manifest of the call that
@@ -954,6 +958,24 @@ def _rule_requirement_error(
     )
 
 
+def _rule_line_ref(decision: VerificationDecision, manifest: CallManifest) -> RuleLineRef | None:
+    """The first requirement in the rules document; a decision may also cite other sources.
+
+    The manifest gives the revision (RULES_FORMAT_SPEC §8.2); the answer check has already
+    proved the range is shown, and a policy block numbers the lines of its file.
+    """
+    for req_ref in decision.requirement_refs:
+        block = manifest.get_block(req_ref.block_id)
+        if (
+            block is not None
+            and block.source_kind == "repository_rules"
+            and block.path == RULES_DOCUMENT_PATH
+            and block.revision is not None
+        ):
+            return RuleLineRef(block.revision, req_ref.start_line, req_ref.end_line)
+    return None
+
+
 class ReflectionPass:
     """Orchestrates candidate verification against visible code and policy requirements."""
 
@@ -1111,10 +1133,11 @@ class ReflectionPass:
 
         # The final guard: the same checks the gateway validator ran on the accepted answer,
         # against that call's manifest (CVS §7.2), the base one when the model names none.
+        answered_manifest = manifest if accepted_manifest is None else accepted_manifest
         errors = verification_answer_errors(
             parsed,
             candidates=candidates,
-            manifest=manifest if accepted_manifest is None else accepted_manifest,
+            manifest=answered_manifest,
             context=context,
             check_lines=check_lines,
         )
@@ -1126,6 +1149,11 @@ class ReflectionPass:
             candidate_ids=tuple(c.candidate_id for c in candidates),
             accepted_call_id=accepted_call_id,
             manifest_id=manifest_id,
+            rule_line_refs={
+                decision.candidate_id: ref
+                for decision in parsed.decisions
+                if (ref := _rule_line_ref(decision, answered_manifest)) is not None
+            },
         )
 
 
