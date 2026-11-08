@@ -19,6 +19,7 @@ from the database; the separate snapshot verifier still loads a pinned package r
 | `prompts/review.system.v5.md`           | current snapshot-path reviewer prompt: v4 + `<retrieved_excerpts>`, RAG v1 (#144) |
 | `prompts/review.verifier.v1.md`         | historical reflection verifier prompt from #133     |
 | `prompts/review.verifier.v2.md`         | current snapshot verifier default (#219): conventions & evidence refs |
+| `prompts/review.summary.v1.md`          | change summary agent (#316): what a PR changes, 1–3 sentences |
 | `prompts/review.conventions.v1.md`      | pre-review prompt: repository patterns, review plan |
 | `prompts/review.conventions.v2.md`      | v1 + explicit counts for omitted input context    |
 | `rules/schema.json`                     | JSON Schema (draft 2020-12) of a custom rule set    |
@@ -29,6 +30,7 @@ from the database; the separate snapshot verifier still loads a pinned package r
 | `schemas/review-output.schema.json`     | JSON Schema (draft 2020-12) of v1 model output      |
 | `schemas/review-output.schema.v2.json`  | JSON Schema (draft 2020-12) of v2 model output      |
 | `schemas/verifier-output.schema.v1.json`| JSON Schema of reflection verifier decisions        |
+| `schemas/change-summary-output.schema.v1.json` | JSON Schema of the change summary agent's answer |
 | `scripts/validate_findings.py`          | validator of model outputs: schema + semantic rules |
 | `examples/`                             | synthetic diff and sample outputs (proof run)       |
 
@@ -64,7 +66,11 @@ migration (pending api #4) or a `seed` command owned by the backend. The snapsho
 checks its raw bytes against the snapshot checksum before use. The mandatory-envelope guard also
 reads that selected resource. #216 deliberately retains this loader: replacing it with a DB-backed
 pinned-content resolver remains outside #216 scope. Main F1’s lazy per-attempt prompt-builder
-cache is preserved; runtime package I/O remains. The Docker
+cache is preserved; runtime package I/O remains. The change summary agent (`review.summary`,
+#316) is another exception: its version is fixed in code and pinned by checksum in
+`PINNED_PROMPT_CHECKSUMS` (`app/modules/reviews/application/policy_snapshot.py`), and it reads
+the packaged `review.summary.v1.md` at runtime and refuses bytes that miss the pin. A run does not
+pin it: `PromptBindings` has no field for it, and its `llm.call` records no prompt version. The Docker
 image carries `review/prompts`, `review/postprocess` and `review/rules` for seeding and `review/schemas` for runtime
 validation of the model output (LLM gateway, api #33). Prompts are global rows of `prompt_versions`.
 A `rule_versions` row belongs to one repository, so a default set becomes a repository's first `rule_versions`
@@ -72,7 +78,7 @@ row when that repository is onboarded; where the backend keeps the defaults unti
 
 | Column                      | Value                                                                        |
 | --------------------------- | ---------------------------------------------------------------------------- |
-| `prompt_versions.key`       | frontmatter `key` (`review.system`, `review.conventions`, `review.verifier`) |
+| `prompt_versions.key`       | frontmatter `key` (`review.system`, `review.conventions`, `review.verifier`, `review.summary`) |
 | `prompt_versions.version`   | frontmatter `version`; equals the `vN` in the file name                      |
 | `prompt_versions.content`   | the full file bytes, frontmatter included                                    |
 | `prompt_versions.checksum`  | `sha256(content)`, hex — verifiable against the file                         |
