@@ -51,6 +51,7 @@ from app.modules.reviews.application.vcs_diff import parse_file_patch
 from app.modules.reviews.infrastructure.llm.answers import (
     conventions_answer_validator,
     review_answer_contract,
+    validate_change_summary_answer,
     validate_review_answer,
     validate_review_answer_v2,
     validate_verifier_answer,
@@ -469,6 +470,16 @@ def test_stub_llm_answers_validate_against_both_schemas(stub: ModuleType) -> Non
     }
     assert delays == [3.0, 3.0]
     assert state.stats()["llm_calls"] == {"RepoConventionsDraft": 1, "ReviewOutput": 1}
+
+
+def test_stub_change_summary_answer_validates_against_its_schema(stub: ModuleType) -> None:
+    state = stub.StubState(prs=5, llm_delay_ms=0)
+
+    summary = _content(state.handle("POST", "/v1/chat/completions", _chat("ChangeSummaryOutput")))
+
+    assert validate_change_summary_answer(summary) == {
+        "sentences": ["The load stub describes the change in one sentence."]
+    }
 
 
 def test_stub_rejects_an_unknown_schema_without_delay(stub: ModuleType) -> None:
