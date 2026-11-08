@@ -5,8 +5,8 @@ paid ``eval-live`` workflow on one model, one prompt and one corpus. The CI step
 replays every one of them offline; this file is the fast local signal that a capture was not
 dropped, relabelled or mixed in from another run. A replay takes about 40 seconds of CPU (it
 revalidates the 24 cases), so it is left to that CI step and not repeated in the unit job. The
-prompts of the hallucination oracle (``oracle/context``) are bound here to the ``prompt_digest``
-recorded for each answer.
+user messages of the hallucination oracle (``oracle/context``) and the v5 system prompt are
+bound here to the ``prompt_digest`` recorded for each answer.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "test-prs-dataset" / "rag"
 CAPTURES = CORPUS / "responses"
 PROMPTS = CORPUS / "oracle" / "context"
+SYSTEM_PROMPT = ROOT / "review" / "prompts" / "review.system.v5.md"  # the captures record v5
 EXPECTED = {
     f"{arm}-run{run}": rag_arm
     for run in (1, 2, 3)
@@ -209,11 +210,11 @@ def _prompt_files(captures: Path) -> dict[str, str]:
 
 
 def test_the_oracle_holds_the_exact_prompt_of_every_valid_answer_with_findings() -> None:
-    """The prompts the tech lead read are committed byte for byte and pinned to the recording."""
+    """The user messages the tech lead read are committed byte for byte, pinned to the recording."""
     wanted = _prompt_files(CAPTURES)
-    system = (PROMPTS / "_system.txt").read_bytes().decode("utf-8")
+    system = SYSTEM_PROMPT.read_bytes().decode("utf-8")
 
-    assert {path.name for path in PROMPTS.iterdir()} == {*wanted, "_system.txt"}
+    assert {path.name for path in PROMPTS.iterdir()} == set(wanted)
     for name, digest in wanted.items():
         user = (PROMPTS / name).read_bytes().decode("utf-8")
         assert _prompt_digest(system, user) == digest, name
