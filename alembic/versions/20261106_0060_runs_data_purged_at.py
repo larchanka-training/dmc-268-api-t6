@@ -1,7 +1,7 @@
 """Mark the runs the retention task has cleared and index the blobs it clears (#457).
 
-Revision ID: 20261106_0059
-Revises: 20261104_0058
+Revision ID: 20261106_0060
+Revises: 20261106_0059
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "20261106_0059"
-down_revision = "20261104_0058"
+revision = "20261106_0060"
+down_revision = "20261106_0059"
 branch_labels = None
 depends_on = None
 
