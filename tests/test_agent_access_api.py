@@ -49,6 +49,9 @@ def test_public_agent_instructions_describe_complete_sequence() -> None:
         assert operation in response.text
     assert "HTTP 502 or another server error" in response.text
     assert "restart from step 2" in response.text
+    assert "After enabling reviews, add the `ai-review` label" in response.text
+    assert "remove and reapply the label" in response.text
+    assert "If no run appears" in response.text
 
     review_events = re.search(r"`reviewEvent` \(([^)]+)\)", response.text)
     assert review_events is not None
