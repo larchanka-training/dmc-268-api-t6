@@ -8,8 +8,7 @@ import json
 import re
 import shutil
 import tempfile
-from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -24,7 +23,6 @@ from app.modules.reviews.application.policy_errors import PolicyError, PolicyErr
 from app.modules.reviews.application.policy_snapshot import PINNED_PROMPT_CHECKSUMS
 from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.infrastructure.llm.settings import (
-    GatewayPolicy,
     LlmSettings,
     ModelPrice,
     ModelProfile,
@@ -44,23 +42,22 @@ from review.scripts.eval_live import RecorderError, main, record_live
 from review.scripts.eval_provenance import digest_files, rule_json_paths, static_input_paths
 from review.scripts.eval_replay import format_console, replay
 from review.scripts.eval_replay import main as replay_main
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DATASET_ROOT = REPO_ROOT / "test-prs-dataset"
-SYSTEM = REPO_ROOT / "review/prompts/review.system.v2.md"
-BACKEND_RULES = REPO_ROOT / "review/rules/default-backend.v1.json"
-FRONTEND_RULES = REPO_ROOT / "review/rules/default-frontend.v1.json"
-RECORDED_AT = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)
-VALID = json.dumps(
-    {
-        "findings": [],
-        "summary": {
-            "problem": "No issue was found.",
-            "done_well": "The change is clear.",
-            "effort": "none",
-        },
-    }
+from tests.eval_live_fakes import (
+    BACKEND_RULES,
+    FRONTEND_RULES,
+    RECORDED_AT,
+    REPO_ROOT,
+    RULES_ROOT,
+    SYSTEM,
+    VALID,
+    FakeTransport,
+    answer,
+    record_arm,
+    rules_fixture_root,
+    settings,
 )
+
+DATASET_ROOT = REPO_ROOT / "test-prs-dataset"
 INVALID = '{"findings":[]}'
 
 
@@ -73,71 +70,6 @@ def fixture_root(tmp_path: Path, case_ids: tuple[str, ...]) -> Path:
     for case_id in case_ids:
         shutil.copytree(DATASET_ROOT / "cases" / case_id, root / "cases" / case_id)
     return root
-
-
-def settings() -> LlmSettings:
-    price = ModelPrice(Decimal(0), Decimal(0))
-    primary = ModelProfile(
-        "fake",
-        "http://localhost:8888",
-        "primary-model",
-        100_000,
-        1_000,
-        price,
-        api_keys=("SENSITIVE_TEST_KEY",),
-    )
-    fallback = ModelProfile(
-        "fake",
-        "http://localhost:8888",
-        "fallback-model",
-        100_000,
-        1_000,
-        price,
-        api_keys=("SENSITIVE_TEST_KEY",),
-    )
-    return LlmSettings(
-        primary,
-        fallback,
-        GatewayPolicy(
-            timeout_retry_delays_s=(),
-            unavailable_retry_delays_s=(),
-            max_jitter_s=0,
-        ),
-    )
-
-
-def answer(
-    model: str, content: str | list[dict[str, str]] | None, *, provider: str | None = None
-) -> ChatResponse:
-    raw: dict[str, Any] = {
-        "model": model,
-        "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 100, "completion_tokens": 30},
-    }
-    if provider is not None:
-        raw["provider"] = provider
-    text = (
-        "".join(part.get("text", "") for part in content if part.get("type") == "text")
-        if isinstance(content, list)
-        else content
-    )
-    return ChatResponse(raw, text, "stop", model, 100, 30, 0, None, None)
-
-
-@dataclass
-class FakeTransport:
-    outcomes: list[ChatResponse | TransportError]
-    requests: list[ChatRequest] = field(default_factory=list)
-
-    async def complete(
-        self, request: ChatRequest, *, checkpoint: RunProviderCheckpoint
-    ) -> ChatResponse:
-        await checkpoint()
-        self.requests.append(request)
-        outcome = self.outcomes.pop(0)
-        if isinstance(outcome, TransportError):
-            raise outcome
-        return outcome
 
 
 def record(
@@ -1787,44 +1719,12 @@ def test_custom_synthetic_subset_keeps_empty_history_and_explicit_identity_pins(
 
 # --- #163: policy arms, responses directories and usage ---------------------------------------
 
-RULES_ROOT = REPO_ROOT / "test-prs-dataset" / "rules"
 ABSENT_RULES = (
     '<repository_rules block_id="policy-rules" path=".review/rules.md" status="absent" />'
 )
 ABSENT_AGENTS = (
     '<project_conventions_document block_id="policy-agents" path="AGENTS.md" status="absent" />'
 )
-
-
-def rules_fixture_root(tmp_path: Path, case_ids: tuple[str, ...]) -> Path:
-    root = tmp_path / "rules-dataset"
-    for case_id in case_ids:
-        shutil.copytree(RULES_ROOT / "cases" / case_id, root / "cases" / case_id)
-    return root
-
-
-def record_arm(
-    root: Path,
-    transport: FakeTransport,
-    arm: str,
-    *,
-    responses_dir: Path | None = None,
-    model_settings: LlmSettings | None = None,
-    system_prompt: Path = SYSTEM,
-) -> dict[str, Any]:
-    return asyncio.run(
-        record_live(
-            root,
-            model_settings or settings(),
-            system_prompt=system_prompt,
-            backend_rules=BACKEND_RULES,
-            frontend_rules=FRONTEND_RULES,
-            transport=transport,
-            recorded_at=RECORDED_AT,
-            policy_arm=arm,
-            responses_dir=responses_dir,
-        )
-    )
 
 
 def user_message(transport: FakeTransport) -> str:
@@ -2505,21 +2405,21 @@ def _oracle_answer(record: dict[str, Any], arm: str) -> str:
     [
         (
             "none",
-            9,
-            {"found": 0, "total": 5, "expected": 0, "share": 0.0},
-            {"total": 4, "exempt": 0, "flagged": 4, "respected": 0, "share": 0.0},
+            16,
+            {"found": 0, "total": 7, "expected": 0, "share": 0.0},
+            {"total": 6, "exempt": 0, "flagged": 6, "respected": 0, "share": 0.0},
         ),
         (
             "valid",
-            10,
-            {"found": 5, "total": 5, "expected": 5, "share": 1.0},
-            {"total": 4, "exempt": 4, "flagged": 0, "respected": 4, "share": 1.0},
+            17,
+            {"found": 7, "total": 7, "expected": 7, "share": 1.0},
+            {"total": 6, "exempt": 6, "flagged": 0, "respected": 6, "share": 1.0},
         ),
         (
             "malicious",
-            10,
-            {"found": 5, "total": 5, "expected": 5, "share": 1.0},
-            {"total": 4, "exempt": 4, "flagged": 0, "respected": 4, "share": 1.0},
+            17,
+            {"found": 7, "total": 7, "expected": 7, "share": 1.0},
+            {"total": 6, "exempt": 6, "flagged": 0, "respected": 6, "share": 1.0},
         ),
     ],
 )
@@ -2543,9 +2443,9 @@ def test_oracle_answers_score_perfectly_in_every_arm_of_the_committed_corpus(
     record_arm(root, transport, arm)
     report = replay(root)
 
-    assert case_ids == tuple(f"RUL-0{number}" for number in range(1, 9))
+    assert case_ids == tuple(f"RUL-{number:02}" for number in range(1, 12))
     assert report["corpus"] == "rules"
-    assert (report["valid_response_count"], report["case_count"]) == (8, 8)
+    assert (report["valid_response_count"], report["case_count"]) == (11, 11)
     assert report["micro"] == {
         "tp": truths,
         "fp": 0,
@@ -2554,7 +2454,7 @@ def test_oracle_answers_score_perfectly_in_every_arm_of_the_committed_corpus(
         "recall": 1.0,
     }
     assert report["critical"] == {"matched": 1, "total": 1, "recall": 1.0}
-    assert report["verdict"] == {"agreed": 8, "total": 8, "agreement": 1.0}
+    assert report["verdict"] == {"agreed": 11, "total": 11, "agreement": 1.0}
     assert report["rule_constraints"] == rule_constraints
     assert report["exceptions"] == exceptions
 

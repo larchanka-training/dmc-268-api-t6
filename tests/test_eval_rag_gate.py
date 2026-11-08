@@ -51,7 +51,7 @@ from review.scripts.eval_rag_gate import (
     main,
     run_from_report,
 )
-from tests.test_eval_live import RECORDED_AT
+from tests.eval_live_fakes import RECORDED_AT
 from tests.test_eval_live_rag import rag_root, record_rag, valid_answers
 from tests.test_eval_replay import edit_manifest
 

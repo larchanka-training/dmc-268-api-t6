@@ -35,7 +35,7 @@ from review.scripts.eval_provenance import (
 )
 from review.scripts.eval_replay import ReplayError, format_console, nonpublishable_case_ids, replay
 from review.scripts.rag_snapshot import build_case_snapshot, render_snapshot
-from tests.test_eval_live import settings as rag_settings
+from tests.eval_live_fakes import settings as rag_settings
 from tests.test_eval_live_rag import (
     CASES,
     rag_root,
