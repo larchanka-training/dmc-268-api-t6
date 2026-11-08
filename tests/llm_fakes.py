@@ -1,8 +1,10 @@
-"""Explicit checkpoints and provider fakes for standalone LLM tests without persisted Runs."""
+"""Explicit checkpoints and fakes of the provider and the verifier model for standalone LLM
+tests without persisted Runs."""
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -10,6 +12,7 @@ from typing import Any
 import httpx
 
 from app.modules.reviews.application.llm import RunCallContext
+from app.modules.reviews.application.reflection_pass import VerifierPrompt, VerifierReply
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
@@ -96,3 +99,28 @@ class ScriptedProvider:
 
     def kinds(self) -> list[str]:
         return [record.kind.value for _, record in self.trace.records]
+
+
+@dataclass
+class AbstainingVerifier:
+    """A verifier model that answers insufficient_context for every candidate it is shown.
+
+    It records every prompt it is sent; it knows no route window, so the pass fits the prompt
+    to the execution profile alone.
+    """
+
+    prompts: list[VerifierPrompt] = field(default_factory=list)
+
+    async def verify(self, *, system_prompt: str, user_prompt: str, **_: object) -> VerifierReply:
+        self.prompts.append(VerifierPrompt(system_prompt, user_prompt))
+        decisions = [
+            {
+                "candidate_id": candidate,
+                "status": "insufficient_context",
+                "reason": "Not enough code.",
+                "evidence_refs": [],
+                "requirement_refs": [],
+            }
+            for candidate in re.findall(r'candidate candidate_id="([^"]+)"', user_prompt)
+        ]
+        return VerifierReply(output={"decisions": decisions})

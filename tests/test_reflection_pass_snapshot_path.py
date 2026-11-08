@@ -62,6 +62,7 @@ from app.modules.reviews.application.review_context import (
 )
 from app.modules.reviews.application.review_output import EvidenceRef, ReviewFindingV2
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
+from tests.llm_fakes import AbstainingVerifier
 from tests.test_gateway_review_model import _Pipeline
 from tests.test_review_context_blocks import (
     BASE,
@@ -377,30 +378,15 @@ def test_every_candidate_keeps_its_own_lines_before_any_file_is_topped_up() -> N
     assert _prompt_tokens(prompt) <= window
 
 
-class _Abstainer:
+class _Abstainer(AbstainingVerifier):
     """Knows its window; answers insufficient_context for every candidate it is shown."""
 
     def __init__(self, window: int) -> None:
+        super().__init__()
         self.window = window
-        self.prompts: list[VerifierPrompt] = []
 
     def max_prompt_tokens(self) -> int:
         return self.window
-
-    async def verify(self, *, system_prompt: str, user_prompt: str, **_: object) -> VerifierReply:
-        self.prompts.append(VerifierPrompt(system_prompt, user_prompt))
-        ids = re.findall(r'candidate candidate_id="([^"]+)"', user_prompt)
-        decisions = [
-            {
-                "candidate_id": candidate,
-                "status": "insufficient_context",
-                "reason": "Not enough code.",
-                "evidence_refs": [],
-                "requirement_refs": [],
-            }
-            for candidate in ids
-        ]
-        return VerifierReply(output={"decisions": decisions})
 
 
 def test_a_fitted_prompt_never_trips_the_pre_send_guard() -> None:
