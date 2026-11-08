@@ -20,6 +20,10 @@ class RepositoryNotAvailable(Exception):
     """The user does not currently have access to the requested GitHub repository."""
 
 
+class AgentTokenRevocationForbidden(Exception):
+    """An agent credential cannot revoke credentials."""
+
+
 @dataclass(frozen=True)
 class AgentTokenRecord:
     id: UUID
@@ -102,9 +106,11 @@ class AgentTokens:
             agent_repository_id=record.repository_id,
         )
 
-    async def revoke(self, user_id: int, token_id: UUID) -> bool:
+    async def revoke(self, scope: AuthScope, token_id: UUID) -> bool:
+        if scope.agent_repository_id is not None:
+            raise AgentTokenRevocationForbidden
         async with self._uow_factory() as uow:
-            revoked = await uow.tokens.revoke(token_id, user_id, self._now())
+            revoked = await uow.tokens.revoke(token_id, scope.user_id, self._now())
             if revoked:
                 await uow.commit()
             return revoked

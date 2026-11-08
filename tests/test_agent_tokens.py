@@ -12,9 +12,11 @@ import pytest
 
 from app.modules.auth.application.agent_tokens import (
     AgentTokenRecord,
+    AgentTokenRevocationForbidden,
     AgentTokens,
     RepositoryNotAvailable,
 )
+from app.modules.auth.application.scope import AuthScope
 
 
 class FakeTokenStore:
@@ -94,7 +96,7 @@ def test_agent_token_is_repository_bound_hashed_and_revocable() -> None:
     assert scope.workspace_ids == (workspace_id,)
     assert scope.agent_repository_id == repo_id
 
-    assert asyncio.run(tokens.revoke(42, issued.id))
+    assert asyncio.run(tokens.revoke(AuthScope(42, ()), issued.id))
     assert asyncio.run(tokens.resolve(issued.secret)) is None
     assert store.commits == 2
 
@@ -111,3 +113,13 @@ def test_agent_token_requires_live_repository_grant_and_expires() -> None:
     issued = asyncio.run(tokens.issue(42, "octo/repo"))
     expired = AgentTokens(store.uow, now=lambda: now + timedelta(days=31))
     assert asyncio.run(expired.resolve(issued.secret)) is None
+
+
+def test_agent_credential_cannot_revoke_a_token() -> None:
+    store = FakeTokenStore(uuid4(), uuid4())
+    tokens = AgentTokens(store.uow)
+    scope = AuthScope(42, (), agent_repository_id=store.repo_id)
+
+    with pytest.raises(AgentTokenRevocationForbidden):
+        asyncio.run(tokens.revoke(scope, uuid4()))
+    assert store.commits == 0

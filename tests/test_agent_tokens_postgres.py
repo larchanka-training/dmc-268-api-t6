@@ -10,6 +10,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.modules.auth.application.agent_tokens import AgentTokens, RepositoryNotAvailable
+from app.modules.auth.application.scope import AuthScope
 from app.modules.auth.infrastructure.agent_tokens import SqlAlchemyAgentTokenUnitOfWork
 from app.modules.auth.infrastructure.models import AuthAgentToken
 from app.modules.repositories.infrastructure.models import Repository
@@ -53,7 +54,7 @@ def test_agent_token_persists_only_hash_and_limits_repository_queries() -> None:
             async with factory() as session:
                 repos = await SqlAlchemyRepositorySettingsStore(session, scope).list_repositories()
                 assert repos == []
-            assert await tokens.revoke(42, issued.id)
+            assert await tokens.revoke(AuthScope(42, ()), issued.id)
             assert await tokens.resolve(issued.secret) is None
 
         try:
