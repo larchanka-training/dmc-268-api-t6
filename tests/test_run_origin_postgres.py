@@ -112,7 +112,7 @@ def test_run_origin_migration_backfills_terminal_and_nonterminal_history_and_rou
                         "SELECT id,to_jsonb(r)-'origin_provider_installation_id'"
                         "-'severity_threshold'-'max_comments'"
                         "-'conventions_prompt_version_id'-'verifier_prompt_version_id'"
-                        "-'triggered_by' FROM runs"
+                        "-'triggered_by'-'data_purged_at' FROM runs"
                         " r ORDER BY id"
                     )
                 )
