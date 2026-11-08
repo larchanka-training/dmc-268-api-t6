@@ -1,0 +1,71 @@
+<repository_rules block_id="policy-rules" path=".review/rules.md" status="absent" />
+<project_conventions_document block_id="policy-agents" path="AGENTS.md" status="absent" />
+<repo_conventions>
+<key_patterns>
+
+</key_patterns>
+<recommendations>
+
+</recommendations>
+</repo_conventions>
+<pr_meta>
+<title>Review proposed change</title>
+<description></description>
+<author>gold-corpus</author>
+<source_branch>eval</source_branch>
+<target_branch>main</target_branch>
+<labels></labels>
+<files_changed>1</files_changed>
+<lines_added>1</lines_added>
+<lines_removed>1</lines_removed>
+<draft>false</draft>
+<fork>false</fork>
+<head_sha>6ae7e821f0e643d611d47343e7bfa85a845dc7a8</head_sha>
+</pr_meta>
+<changed_files>
+<file block_id="file-src-sensors-ts-067f5b48" path="src/sensors.ts" status="modified" language="TypeScript">
+<line n="1" type="context">import { SENSORS } from "./config";</line>
+<line n="2" type="context">import type { Reading } from "./types";</line>
+<line n="3" type="context"></line>
+<line n="4" type="removed">export function readSensor(id: string): Reading {</line>
+<line n="4" type="added">export function sampleSensor(id: string): Reading {</line>
+<line n="5" type="context">  const sensor = SENSORS[id];</line>
+<line n="6" type="context">  return { id, celsius: sensor.raw() / 10 };</line>
+<line n="7" type="context">}</line>
+</file>
+</changed_files>
+<context_excerpts>
+<excerpt block_id="L4:6ae7e821f0e6:cd6590bc92ca2734" level="L4" path="src/config.ts" revision="6ae7e821f0e643d611d47343e7bfa85a845dc7a8" side="RIGHT" representation="signature">
+<line n="3">export const SENSORS: Record&lt;string, Sensor&gt; = {</line>
+<line n="4">  intake: { raw: () =&gt; 214 },</line>
+<line n="5">  exhaust: { raw: () =&gt; 388 },</line>
+<line n="6">};</line>
+</excerpt>
+<excerpt block_id="L4:6ae7e821f0e6:e57e332578a78774" level="L4" path="src/types.ts" revision="6ae7e821f0e643d611d47343e7bfa85a845dc7a8" side="RIGHT" representation="signature">
+<line n="1">export interface Reading {</line>
+</excerpt>
+<excerpt block_id="L3:101d89a276a69a5bf00e614cab6cba7d:1-7" level="L3" path="src/sensors.ts" revision="6ae7e821f0e643d611d47343e7bfa85a845dc7a8" side="RIGHT" representation="exact_lines">
+<line n="1">import { SENSORS } from "./config";</line>
+<line n="2">import type { Reading } from "./types";</line>
+<line n="3"></line>
+<line n="4">export function sampleSensor(id: string): Reading {</line>
+<line n="5">  const sensor = SENSORS[id];</line>
+<line n="6">  return { id, celsius: sensor.raw() / 10 };</line>
+<line n="7">}</line>
+</excerpt>
+</context_excerpts>
+<retrieved_excerpts>
+<excerpt block_id="RAG:6ae7e821f0e6:3aff2c4bc1044be0" level="RAG" path="src/alerts.ts" revision="6ae7e821f0e643d611d47343e7bfa85a845dc7a8" side="RIGHT" representation="exact_lines">
+<line n="2">import { readSensor } from "./sensors";</line>
+<line n="4">export function isOverLimit(id: string): boolean {</line>
+<line n="5">  const reading = readSensor(id);</line>
+<line n="6">  return reading.celsius &gt; LIMIT_CELSIUS;</line>
+<line n="7">}</line>
+</excerpt>
+<excerpt block_id="RAG:cbe3da3914ff:2493a70ab23e303a" level="RAG" path="src/sensors.ts" revision="cbe3da3914ffef9cd60f185eb13468f6948dbb4b" side="LEFT" representation="signature">
+<line n="4">export function readSensor(id: string): Reading {</line>
+</excerpt>
+</retrieved_excerpts>
+<omitted_files>
+
+</omitted_files>

@@ -1,0 +1,78 @@
+<repository_rules block_id="policy-rules" path=".review/rules.md" status="absent" />
+<project_conventions_document block_id="policy-agents" path="AGENTS.md" status="absent" />
+<repo_conventions>
+<key_patterns>
+
+</key_patterns>
+<recommendations>
+
+</recommendations>
+</repo_conventions>
+<pr_meta>
+<title>Review proposed change</title>
+<description></description>
+<author>gold-corpus</author>
+<source_branch>eval</source_branch>
+<target_branch>main</target_branch>
+<labels></labels>
+<files_changed>1</files_changed>
+<lines_added>4</lines_added>
+<lines_removed>0</lines_removed>
+<draft>false</draft>
+<fork>false</fork>
+<head_sha>53d7a8c44dbd85114c8a16177acd95ce927b95c0</head_sha>
+</pr_meta>
+<changed_files>
+<file block_id="file-src-calendar-ts-12f5efd9" path="src/calendar.ts" status="modified" language="TypeScript">
+<line n="1" type="context">import { addMinutes } from "./clock";</line>
+<line n="2" type="added">import { SLOT_MINUTES } from "./rooms";</line>
+<line n="3" type="context">import type { Booking, Room } from "./types";</line>
+<line n="4" type="context"></line>
+<line n="5" type="context">export function bookSlot(room: Room, start: Date, minutes: number): Booking {</line>
+<line n="6" type="added">  if (minutes % SLOT_MINUTES !== 0) {</line>
+<line n="7" type="added">    throw new RangeError(`Slots come in steps of ${SLOT_MINUTES} minutes`);</line>
+<line n="8" type="added">  }</line>
+<line n="9" type="context">  const end = addMinutes(start, minutes);</line>
+<line n="10" type="context">  const clash = room.bookings.some((b) =&gt; b.start &lt; end &amp;&amp; start &lt; b.end);</line>
+<line n="11" type="context">  if (clash) {</line>
+</file>
+</changed_files>
+<context_excerpts>
+<excerpt block_id="L4:53d7a8c44dbd:48d8b88e539ce671" level="L4" path="src/clock.ts" revision="53d7a8c44dbd85114c8a16177acd95ce927b95c0" side="RIGHT" representation="signature">
+<line n="1">export function addMinutes(date: Date, minutes: number): Date {</line>
+</excerpt>
+<excerpt block_id="L4:53d7a8c44dbd:e9dbfa6762de0b2f" level="L4" path="src/rooms.ts" revision="53d7a8c44dbd85114c8a16177acd95ce927b95c0" side="RIGHT" representation="signature">
+<line n="3">export const SLOT_MINUTES = 15;</line>
+</excerpt>
+<excerpt block_id="L4:53d7a8c44dbd:83f86c64dee1a8e8" level="L4" path="src/types.ts" revision="53d7a8c44dbd85114c8a16177acd95ce927b95c0" side="RIGHT" representation="signature">
+<line n="1">export interface Booking {</line>
+</excerpt>
+<excerpt block_id="L4:53d7a8c44dbd:95dbc683151d85eb" level="L4" path="src/types.ts" revision="53d7a8c44dbd85114c8a16177acd95ce927b95c0" side="RIGHT" representation="signature">
+<line n="7">export interface Room {</line>
+</excerpt>
+<excerpt block_id="L3:eb9b0dfaaadc6c9b3989690a0b5e2be3:1-17" level="L3" path="src/calendar.ts" revision="53d7a8c44dbd85114c8a16177acd95ce927b95c0" side="RIGHT" representation="exact_lines">
+<line n="1">import { addMinutes } from "./clock";</line>
+<line n="2">import { SLOT_MINUTES } from "./rooms";</line>
+<line n="3">import type { Booking, Room } from "./types";</line>
+<line n="4"></line>
+<line n="5">export function bookSlot(room: Room, start: Date, minutes: number): Booking {</line>
+<line n="6">  if (minutes % SLOT_MINUTES !== 0) {</line>
+<line n="7">    throw new RangeError(`Slots come in steps of ${SLOT_MINUTES} minutes`);</line>
+<line n="8">  }</line>
+<line n="9">  const end = addMinutes(start, minutes);</line>
+<line n="10">  const clash = room.bookings.some((b) =&gt; b.start &lt; end &amp;&amp; start &lt; b.end);</line>
+<line n="11">  if (clash) {</line>
+<line n="12">    throw new Error(`Room ${room.name} is taken`);</line>
+<line n="13">  }</line>
+<line n="14">  const booking = { room: room.name, start, end };</line>
+<line n="15">  room.bookings.push(booking);</line>
+<line n="16">  return booking;</line>
+<line n="17">}</line>
+</excerpt>
+</context_excerpts>
+<retrieved_excerpts>
+
+</retrieved_excerpts>
+<omitted_files>
+
+</omitted_files>

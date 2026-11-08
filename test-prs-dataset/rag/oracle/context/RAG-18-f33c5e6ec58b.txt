@@ -1,0 +1,60 @@
+<repository_rules block_id="policy-rules" path=".review/rules.md" status="absent" />
+<project_conventions_document block_id="policy-agents" path="AGENTS.md" status="absent" />
+<repo_conventions>
+<key_patterns>
+
+</key_patterns>
+<recommendations>
+
+</recommendations>
+</repo_conventions>
+<pr_meta>
+<title>Review proposed change</title>
+<description></description>
+<author>gold-corpus</author>
+<source_branch>eval</source_branch>
+<target_branch>main</target_branch>
+<labels></labels>
+<files_changed>1</files_changed>
+<lines_added>4</lines_added>
+<lines_removed>1</lines_removed>
+<draft>false</draft>
+<fork>false</fork>
+<head_sha>c087bcdb11c4f71d0b6328f6f533e65cb9dd6fa8</head_sha>
+</pr_meta>
+<changed_files>
+<file block_id="file-contacts-emails-py-80363128" path="contacts/emails.py" status="modified" language="Python">
+<line n="3" type="context"></line>
+<line n="4" type="context">def normalize_email(raw: str) -&gt; str:</line>
+<line n="5" type="context">    """Canonical form of an address, used as the contact key."""</line>
+<line n="6" type="removed">    return raw.strip().lower()</line>
+<line n="6" type="added">    cleaned = raw.strip().lower()</line>
+<line n="7" type="added">    if "@" not in cleaned:</line>
+<line n="8" type="added">        raise ValueError(f"not an email address: {raw!r}")</line>
+<line n="9" type="added">    return cleaned</line>
+</file>
+</changed_files>
+<context_excerpts>
+<excerpt block_id="L3:c98c2bf124a612ee2f8364191f49b3b7:1-9" level="L3" path="contacts/emails.py" revision="c087bcdb11c4f71d0b6328f6f533e65cb9dd6fa8" side="RIGHT" representation="exact_lines">
+<line n="1">"""Addresses of the contacts."""</line>
+<line n="2"></line>
+<line n="3"></line>
+<line n="4">def normalize_email(raw: str) -&gt; str:</line>
+<line n="5">    """Canonical form of an address, used as the contact key."""</line>
+<line n="6">    cleaned = raw.strip().lower()</line>
+<line n="7">    if "@" not in cleaned:</line>
+<line n="8">        raise ValueError(f"not an email address: {raw!r}")</line>
+<line n="9">    return cleaned</line>
+</excerpt>
+</context_excerpts>
+<retrieved_excerpts>
+<excerpt block_id="RAG:c087bcdb11c4:bda0dcef942cfe0f" level="RAG" path="contacts/keys.py" revision="c087bcdb11c4f71d0b6328f6f533e65cb9dd6fa8" side="RIGHT" representation="exact_lines">
+<line n="5">from .emails import normalize_email</line>
+<line n="8">def contact_key(row: Mapping[str, str]) -&gt; str:</line>
+<line n="9">    """Key of the contact a row describes."""</line>
+<line n="10">    return normalize_email(row["email"])</line>
+</excerpt>
+</retrieved_excerpts>
+<omitted_files>
+
+</omitted_files>

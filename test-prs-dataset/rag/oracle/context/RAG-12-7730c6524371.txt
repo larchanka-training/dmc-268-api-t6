@@ -1,0 +1,75 @@
+<repository_rules block_id="policy-rules" path=".review/rules.md" status="absent" />
+<project_conventions_document block_id="policy-agents" path="AGENTS.md" status="absent" />
+<repo_conventions>
+<key_patterns>
+
+</key_patterns>
+<recommendations>
+
+</recommendations>
+</repo_conventions>
+<pr_meta>
+<title>Review proposed change</title>
+<description></description>
+<author>gold-corpus</author>
+<source_branch>eval</source_branch>
+<target_branch>main</target_branch>
+<labels></labels>
+<files_changed>1</files_changed>
+<lines_added>8</lines_added>
+<lines_removed>0</lines_removed>
+<draft>false</draft>
+<fork>false</fork>
+<head_sha>bab414331c9055a0d913ceb6b2f204f63085f0a1</head_sha>
+</pr_meta>
+<changed_files>
+<file block_id="file-promos-sales-py-cff96f6b" path="promos/sales.py" status="modified" language="Python">
+<line n="1" type="context">"""Sale prices."""</line>
+<line n="2" type="context"></line>
+<line n="3" type="context">from .catalog import price_of</line>
+<line n="4" type="added">from .pricing import apply_discount</line>
+<line n="5" type="context"></line>
+<line n="6" type="context"></line>
+<line n="7" type="context">def list_price_cents(sku: str) -&gt; int:</line>
+<line n="8" type="context">    return price_of(sku)</line>
+<line n="9" type="added"></line>
+<line n="10" type="added"></line>
+<line n="11" type="added">def spring_price_cents(sku: str) -&gt; int:</line>
+<line n="12" type="added">    """Price of the item during the spring sale."""</line>
+<line n="13" type="added">    base = list_price_cents(sku)</line>
+<line n="14" type="added">    rate = 0.2</line>
+<line n="15" type="added">    return apply_discount(base, rate)</line>
+</file>
+</changed_files>
+<context_excerpts>
+<excerpt block_id="L4:bab414331c90:681d3b1b0956ad04" level="L4" path="promos/pricing.py" revision="bab414331c9055a0d913ceb6b2f204f63085f0a1" side="RIGHT" representation="signature">
+<line n="4">def apply_discount(price_cents: int, percent: int) -&gt; int:</line>
+<line n="5">    """Return the price after a discount of `percent` percent.</line>
+<line n="6"></line>
+<line n="7">    `percent` is a whole number from 0 to 100.</line>
+<line n="8">    """</line>
+</excerpt>
+<excerpt block_id="L3:43d5ecaf1cfa1967f802f45a90a7539a:1-15" level="L3" path="promos/sales.py" revision="bab414331c9055a0d913ceb6b2f204f63085f0a1" side="RIGHT" representation="exact_lines">
+<line n="1">"""Sale prices."""</line>
+<line n="2"></line>
+<line n="3">from .catalog import price_of</line>
+<line n="4">from .pricing import apply_discount</line>
+<line n="5"></line>
+<line n="6"></line>
+<line n="7">def list_price_cents(sku: str) -&gt; int:</line>
+<line n="8">    return price_of(sku)</line>
+<line n="9"></line>
+<line n="10"></line>
+<line n="11">def spring_price_cents(sku: str) -&gt; int:</line>
+<line n="12">    """Price of the item during the spring sale."""</line>
+<line n="13">    base = list_price_cents(sku)</line>
+<line n="14">    rate = 0.2</line>
+<line n="15">    return apply_discount(base, rate)</line>
+</excerpt>
+</context_excerpts>
+<retrieved_excerpts>
+
+</retrieved_excerpts>
+<omitted_files>
+
+</omitted_files>

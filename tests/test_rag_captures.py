@@ -4,7 +4,9 @@ Three runs of arm A (``rag_arm`` ``none``) and three of arm B (``graph``), all r
 paid ``eval-live`` workflow on one model, one prompt and one corpus. The CI step "RAG sub-corpus"
 replays every one of them offline; this file is the fast local signal that a capture was not
 dropped, relabelled or mixed in from another run. A replay takes about 40 seconds of CPU (it
-revalidates the 24 cases), so it is left to that CI step and not repeated in the unit job.
+revalidates the 24 cases), so it is left to that CI step and not repeated in the unit job. The
+prompts of the hallucination oracle (``oracle/context``) are bound here to the ``prompt_digest``
+recorded for each answer.
 """
 
 from __future__ import annotations
@@ -18,10 +20,13 @@ from typing import Any
 import pytest
 
 from review.scripts.eval_ab import SAME_PROVENANCE, SAME_RUN_METADATA
+from review.scripts.eval_live import _prompt_digest
+from review.scripts.validate_findings import validate_review_output_v2
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "test-prs-dataset" / "rag"
 CAPTURES = CORPUS / "responses"
+PROMPTS = CORPUS / "oracle" / "context"
 EXPECTED = {
     f"{arm}-run{run}": rag_arm
     for run in (1, 2, 3)
@@ -184,3 +189,31 @@ def test_a_missing_or_mislabelled_capture_is_reported(
     mutate(copy)
 
     assert any(fragment in problem for problem in _problems(copy, _case_ids()))
+
+
+def _prompt_files(captures: Path) -> dict[str, str]:
+    """File name -> recorded digest of the prompt of every (run, case) with findings to review.
+
+    The gate reviews the findings of the valid answers only; an answer the validator refuses
+    is left out, as it was for the tech lead.
+    """
+    wanted: dict[str, str] = {}
+    for name in sorted(EXPECTED):
+        manifest = _manifest(captures / name)
+        for case_id, raw in sorted(manifest["responses"].items()):
+            answer = json.loads((captures / name / Path(raw).name).read_text(encoding="utf-8"))
+            if answer["findings"] and not validate_review_output_v2(answer):
+                digest = manifest["run_metadata"]["rag_evidence"][case_id]["prompt_digest"]
+                wanted[f"{case_id}-{digest.removeprefix('sha256-v1:')[:12]}.txt"] = digest
+    return wanted
+
+
+def test_the_oracle_holds_the_exact_prompt_of_every_valid_answer_with_findings() -> None:
+    """The prompts the tech lead read are committed byte for byte and pinned to the recording."""
+    wanted = _prompt_files(CAPTURES)
+    system = (PROMPTS / "_system.txt").read_bytes().decode("utf-8")
+
+    assert {path.name for path in PROMPTS.iterdir()} == {*wanted, "_system.txt"}
+    for name, digest in wanted.items():
+        user = (PROMPTS / name).read_bytes().decode("utf-8")
+        assert _prompt_digest(system, user) == digest, name

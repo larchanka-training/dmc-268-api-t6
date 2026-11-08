@@ -1,0 +1,92 @@
+<repository_rules block_id="policy-rules" path=".review/rules.md" status="absent" />
+<project_conventions_document block_id="policy-agents" path="AGENTS.md" status="absent" />
+<repo_conventions>
+<key_patterns>
+
+</key_patterns>
+<recommendations>
+
+</recommendations>
+</repo_conventions>
+<pr_meta>
+<title>Review proposed change</title>
+<description></description>
+<author>gold-corpus</author>
+<source_branch>eval</source_branch>
+<target_branch>main</target_branch>
+<labels></labels>
+<files_changed>1</files_changed>
+<lines_added>6</lines_added>
+<lines_removed>3</lines_removed>
+<draft>false</draft>
+<fork>false</fork>
+<head_sha>133714ccf4f81c8d90a391746030037e5d3e0b63</head_sha>
+</pr_meta>
+<changed_files>
+<file block_id="file-ledger-recording-py-6534e023" path="ledger/recording.py" status="modified" language="Python">
+<line n="1" type="context">"""Recording of settled payments."""</line>
+<line n="2" type="context"></line>
+<line n="3" type="context">from .models import Payment</line>
+<line n="4" type="removed">from .store import save</line>
+<line n="4" type="added">from .store import find_by_key, save</line>
+<line n="5" type="context"></line>
+<line n="6" type="context"></line>
+<line n="7" type="removed">def record_payment(order_id: str, amount_cents: int) -&gt; Payment:</line>
+<line n="8" type="removed">    payment = Payment.create(order_id, amount_cents)</line>
+<line n="7" type="added">def record_payment(order_id: str, amount_cents: int, idempotency_key: str) -&gt; Payment:</line>
+<line n="8" type="added">    existing = find_by_key(idempotency_key)</line>
+<line n="9" type="added">    if existing is not None:</line>
+<line n="10" type="added">        return existing</line>
+<line n="11" type="added">    payment = Payment.create(order_id, amount_cents, idempotency_key)</line>
+<line n="12" type="context">    save(payment)</line>
+<line n="13" type="context">    return payment</line>
+</file>
+</changed_files>
+<context_excerpts>
+<excerpt block_id="L4:133714ccf4f8:2580d624c28e4521" level="L4" path="ledger/models.py" revision="133714ccf4f81c8d90a391746030037e5d3e0b63" side="RIGHT" representation="signature">
+<line n="8">@dataclass(frozen=True)</line>
+<line n="9">class Payment:</line>
+<line n="10">    """One settled payment of an order."""</line>
+</excerpt>
+<excerpt block_id="L4:133714ccf4f8:a33467f90c0435a9" level="L4" path="ledger/store.py" revision="133714ccf4f81c8d90a391746030037e5d3e0b63" side="RIGHT" representation="signature">
+<line n="12">def find_by_key(key: str) -&gt; Payment | None:</line>
+</excerpt>
+<excerpt block_id="L4:133714ccf4f8:7490bd3b01463729" level="L4" path="ledger/store.py" revision="133714ccf4f81c8d90a391746030037e5d3e0b63" side="RIGHT" representation="signature">
+<line n="8">def save(payment: Payment) -&gt; None:</line>
+</excerpt>
+<excerpt block_id="L3:bda2b3facce8803e6b624e7dc208ab26:1-13" level="L3" path="ledger/recording.py" revision="133714ccf4f81c8d90a391746030037e5d3e0b63" side="RIGHT" representation="exact_lines">
+<line n="1">"""Recording of settled payments."""</line>
+<line n="2"></line>
+<line n="3">from .models import Payment</line>
+<line n="4">from .store import find_by_key, save</line>
+<line n="5"></line>
+<line n="6"></line>
+<line n="7">def record_payment(order_id: str, amount_cents: int, idempotency_key: str) -&gt; Payment:</line>
+<line n="8">    existing = find_by_key(idempotency_key)</line>
+<line n="9">    if existing is not None:</line>
+<line n="10">        return existing</line>
+<line n="11">    payment = Payment.create(order_id, amount_cents, idempotency_key)</line>
+<line n="12">    save(payment)</line>
+<line n="13">    return payment</line>
+</excerpt>
+</context_excerpts>
+<retrieved_excerpts>
+<excerpt block_id="RAG:133714ccf4f8:9c7567d720c96d05" level="RAG" path="ledger/webhooks.py" revision="133714ccf4f81c8d90a391746030037e5d3e0b63" side="RIGHT" representation="exact_lines">
+<line n="7">from .recording import record_payment</line>
+<line n="12">def handle_event(event: dict[str, Any]) -&gt; tuple[int, str]:</line>
+<line n="13">    """Return the HTTP status and body for one provider event."""</line>
+<line n="14">    if event.get("type") != "payment.succeeded":</line>
+<line n="15">        return 200, "ignored"</line>
+<line n="16">    data = event["data"]</line>
+<line n="17">    try:</line>
+<line n="18">        record_payment(data["order_id"], data["amount_cents"])</line>
+<line n="19">        mark_paid(data["order_id"])</line>
+<line n="20">    except Exception:</line>
+<line n="21">        # Always acknowledge: the provider retries any non-2xx answer for three days.</line>
+<line n="22">        logger.exception("payment event %s was not processed", event.get("id"))</line>
+<line n="23">    return 200, "ok"</line>
+</excerpt>
+</retrieved_excerpts>
+<omitted_files>
+
+</omitted_files>
