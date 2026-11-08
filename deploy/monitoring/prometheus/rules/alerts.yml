@@ -282,7 +282,9 @@ groups:
           summary: "Container {{ $labels.name }} was OOM-killed"
           description: "The kernel killed a process of {{ $labels.name }} for lack of memory in the last 10 minutes."
 
-  # PostgreSQL backups of the pg-backup service (textfile metrics through node-exporter).
+  # PostgreSQL backups of the pg-backup and pg-backup-prod services and their off-host copies
+  # (textfile metrics through node-exporter). The rules do not aggregate: an alert keeps the
+  # environment label of its series, and its text names the service of that environment.
   - name: backups
     rules:
       - alert: PostgresBackupStale
@@ -301,12 +303,18 @@ groups:
           time() - dmc_pg_backup_heartbeat_timestamp_seconds > 2 * 3600
           or
           absent(dmc_pg_backup_heartbeat_timestamp_seconds{environment="staging"})
+          or
+          (
+            absent(dmc_pg_backup_heartbeat_timestamp_seconds{environment="prod"})
+            and on()
+            (count(up{job="postgres", environment="prod"}) > 0)
+          )
         for: 10m
         labels:
           severity: critical
         annotations:
           summary: "The PostgreSQL backup service has not run for 2 hours"
-          description: "pg-backup is stopped, removed or cannot write the textfile dir; see docker compose -p dmc-268-monitoring ps pg-backup."
+          description: '{{ $s := "pg-backup" }}{{ if eq $labels.environment "prod" }}{{ $s = "pg-backup-prod" }}{{ end }}{{ $s }} is stopped, removed or cannot write the textfile dir; see docker compose -p dmc-268-monitoring ps {{ $s }}.'
 
       - alert: PostgresBackupFailed
         expr: dmc_pg_backup_last_run_success == 0
@@ -314,7 +322,7 @@ groups:
           severity: warning
         annotations:
           summary: "The last PostgreSQL backup attempt failed"
-          description: "See docker compose -p dmc-268-monitoring logs pg-backup; the next attempt runs within an hour."
+          description: 'See docker compose -p dmc-268-monitoring logs {{ if eq $labels.environment "prod" }}pg-backup-prod{{ else }}pg-backup{{ end }}; the next attempt runs within an hour.'
 
       # Off-host copy (backup-offsite, only when BACKUP_S3_* are set): without it the dumps would
       # not survive the loss of the VPS.
@@ -325,7 +333,7 @@ groups:
           severity: critical
         annotations:
           summary: "Off-host backup copy last succeeded {{ $value | humanizeDuration }} ago"
-          description: "backup-offsite has not reached the bucket for 3 hours; see docker compose -p dmc-268-monitoring logs backup-offsite."
+          description: '{{ $s := "backup-offsite" }}{{ if eq $labels.environment "prod" }}{{ $s = "backup-offsite-prod" }}{{ end }}{{ $s }} has not reached the bucket for 3 hours; see docker compose -p dmc-268-monitoring logs {{ $s }}.'
 
       - alert: PostgresBackupOffsiteFailing
         expr: dmc_pg_backup_offsite_last_run_success == 0
@@ -334,4 +342,4 @@ groups:
           severity: warning
         annotations:
           summary: "Off-host backup copy fails"
-          description: "Every backup-offsite pass of the last hour failed (bucket, keys or network)."
+          description: 'Every {{ if eq $labels.environment "prod" }}backup-offsite-prod{{ else }}backup-offsite{{ end }} pass of the last hour failed (bucket, keys or network).'

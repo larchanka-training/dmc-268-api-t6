@@ -4,20 +4,36 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import stat
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from tests.monitoring_deploy_host import MONITORING, Host, _job, _read
+from tests.monitoring_deploy_host import (
+    MONITORING,
+    NO_OFFSITE,
+    OFFSITE,
+    PASSPHRASE,
+    Host,
+    _job,
+    _read,
+)
 
 pytest_plugins = ("tests.monitoring_deploy_host",)
 
 # --- pg-backup.sh with fake PostgreSQL tools -----------------------------------------------
 
 SOURCE_FINGERPRINT = "alembic_version=20261015_0032\nrun_actions=10\nruns=3"
+
+# GNU/busybox `stat -c %Y FILE` on any platform.
+FAKE_STAT = """\
+#!/bin/sh
+python3 -c 'import os, sys; print(int(os.path.getmtime(sys.argv[1])))' "$3"
+"""
 
 FAKE_PG_TOOLS = {
     # Writes the dump unless told to fail; logs every call.
@@ -58,11 +74,7 @@ echo "createdb $*" >> "${STUB_PG_LOG}"
 #!/bin/sh
 echo "dropdb $*" >> "${STUB_PG_LOG}"
 """,
-    # GNU/busybox `stat -c %Y FILE` on any platform.
-    "stat": """\
-#!/bin/sh
-python3 -c 'import os, sys; print(int(os.path.getmtime(sys.argv[1])))' "$3"
-""",
+    "stat": FAKE_STAT,
 }
 
 
@@ -72,9 +84,61 @@ class BackupRun:
     backups: Path
     metrics: dict[str, str]
     calls: list[str]
+    textfile: str = ""
+    heartbeat: str = ""
 
 
-def _run_backup(tmp_path: Path, **env: str) -> BackupRun:
+def _metric_values(text: str) -> dict[str, str]:
+    """Series name (without labels) -> value of the non-comment lines of a textfile."""
+    values = {}
+    for line in text.splitlines():
+        if line and not line.startswith("#"):
+            series, _, value = line.rpartition(" ")
+            values[series.partition("{")[0]] = value
+    return values
+
+
+def _run_script(
+    name: str,
+    mode: str,
+    environment: dict[str, str],
+    *,
+    stop: tuple[float, signal.Signals] | None = None,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a backup script; `stop` sends the signal after that many seconds if it still runs."""
+    # /bin/sh, not PATH: a local sh wrapper first on PATH would run instead of the system shell.
+    command = ["/bin/sh", str(MONITORING / "backup" / name), mode]
+    if stop is None:
+        return subprocess.run(
+            command, env=environment, capture_output=True, text=True, check=False, timeout=timeout
+        )
+    seconds, sig = stop
+    process = subprocess.Popen(
+        command,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        # The whole group, as GNU timeout does: no stub sleep stays behind with the pipes open.
+        os.killpg(process.pid, sig)
+        stdout, stderr = process.communicate(timeout=10)
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _run_backup(
+    tmp_path: Path,
+    *,
+    mode: str = "once",
+    stop: tuple[float, signal.Signals] | None = None,
+    unset: tuple[str, ...] = (),
+    **env: str,
+) -> BackupRun:
     tools = tmp_path / "pgbin"
     tools.mkdir(exist_ok=True)
     for name, source in FAKE_PG_TOOLS.items():
@@ -83,34 +147,34 @@ def _run_backup(tmp_path: Path, **env: str) -> BackupRun:
     backups = tmp_path / "backups"
     backups.mkdir(exist_ok=True)
     textfile = tmp_path / "pg_backup.prom"
+    heartbeat = tmp_path / "pg_backup_heartbeat.prom"
     log = tmp_path / "pg.log"
-    # /bin/sh, not PATH: a local sh wrapper first on PATH would run instead of the system shell.
-    result = subprocess.run(
-        ["/bin/sh", str(MONITORING / "backup" / "pg-backup.sh"), "once"],
-        env={
-            "PATH": f"{tools}:{os.environ['PATH']}",
-            "PGDATABASE": "app",
-            "BACKUP_DIR": str(backups),
-            "TEXTFILE": str(textfile),
-            "BACKUP_SNAPSHOT_WAIT_SECONDS": "10",
-            "STUB_PG_LOG": str(log),
-            "STUB_SOURCE_FINGERPRINT": SOURCE_FINGERPRINT,
-            "STUB_RESTORED_FINGERPRINT": SOURCE_FINGERPRINT,
-            **env,
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=60,
-    )
-    metrics = {}
-    if textfile.exists():
-        for line in _read(textfile).splitlines():
-            if not line.startswith("#"):
-                name, _, value = line.partition(" ")
-                metrics[name] = value
+    environment = {
+        "PATH": f"{tools}:{os.environ['PATH']}",
+        "PGDATABASE": "app",
+        "BACKUP_ENVIRONMENT": "staging",
+        "BACKUP_DIR": str(backups),
+        "TEXTFILE": str(textfile),
+        "HEARTBEAT": str(heartbeat),
+        "BACKUP_SNAPSHOT_WAIT_SECONDS": "10",
+        "STUB_PG_LOG": str(log),
+        "STUB_SOURCE_FINGERPRINT": SOURCE_FINGERPRINT,
+        "STUB_RESTORED_FINGERPRINT": SOURCE_FINGERPRINT,
+        **env,
+    }
+    for name in unset:
+        del environment[name]
+    result = _run_script("pg-backup.sh", mode, environment, stop=stop, timeout=60)
+    text = _read(textfile) if textfile.exists() else ""
     calls = _read(log).splitlines() if log.exists() else []
-    return BackupRun(result, backups, metrics, calls)
+    return BackupRun(
+        result,
+        backups,
+        _metric_values(text),
+        calls,
+        text,
+        _read(heartbeat) if heartbeat.exists() else "",
+    )
 
 
 def _commands(run: BackupRun) -> list[str]:
@@ -190,17 +254,93 @@ def test_backup_refuses_without_disk_for_the_dump_and_the_restore(tmp_path: Path
     assert list(run.backups.iterdir()) == []
 
 
-# --- off-host copy of the dumps ------------------------------------------------------------
+def _seed_dump(directory: Path, name: str, mtime: int) -> Path:
+    dump = directory / name
+    dump.write_text("dump", encoding="utf-8")
+    os.utime(dump, (mtime, mtime))
+    return dump
 
-PASSPHRASE = "test-passphrase-with-enough-entropy-0123456789"
-OFFSITE = {
-    "BACKUP_S3_ENDPOINT": "https://0123456789abcdef.r2.cloudflarestorage.com",
-    "BACKUP_S3_BUCKET": "dmc268-t6-backups",
-    "BACKUP_S3_ACCESS_KEY_ID": "FAKE_TEST_KEY_ID_DO_NOT_USE",
-    "BACKUP_S3_SECRET_ACCESS_KEY": "FAKE_TEST_CREDENTIAL_DO_NOT_USE",
-    "BACKUP_ENCRYPTION_PASSPHRASE": PASSPHRASE,
-}
-NO_OFFSITE = dict.fromkeys(OFFSITE, "")
+
+@pytest.mark.parametrize("environment", ["staging", "prod"])
+def test_backup_metrics_carry_the_environment_label(tmp_path: Path, environment: str) -> None:
+    run = _run_backup(tmp_path, BACKUP_ENVIRONMENT=environment)
+
+    series = [line for line in run.textfile.splitlines() if not line.startswith("#")]
+    assert run.result.returncode == 0, run.result.stderr
+    assert len(series) >= 5
+    for line in series:
+        assert re.fullmatch(
+            rf'dmc_pg_backup_[a-z_]+\{{environment="{environment}"\}}\s+\d+', line
+        ), line
+
+
+@pytest.mark.parametrize("environment", [None, "", "shared", "Prod", "prod "])
+def test_backup_refuses_a_missing_or_unknown_environment(
+    tmp_path: Path, environment: str | None
+) -> None:
+    if environment is None:
+        run = _run_backup(tmp_path, unset=("BACKUP_ENVIRONMENT",))
+    else:
+        run = _run_backup(tmp_path, BACKUP_ENVIRONMENT=environment)
+
+    assert run.result.returncode == 2
+    assert "BACKUP_ENVIRONMENT" in run.result.stderr
+    assert run.calls == []
+    assert list(run.backups.iterdir()) == []
+    assert run.textfile == ""
+
+
+@pytest.mark.parametrize("environment", ["staging", "prod"])
+def test_heartbeat_carries_the_environment_label(tmp_path: Path, environment: str) -> None:
+    (tmp_path / "backups").mkdir()
+    _seed_dump(tmp_path / "backups", "app-20261103T000000Z.dump", int(time.time()))
+
+    run = _run_backup(
+        tmp_path,
+        mode="loop",
+        stop=(2, signal.SIGTERM),
+        BACKUP_ENVIRONMENT=environment,
+        BACKUP_POLL_SECONDS="1",
+    )
+
+    assert run.result.returncode == 0, run.result.stderr
+    assert run.calls == []  # the fresh dump is not due
+    heartbeat = [line for line in run.heartbeat.splitlines() if not line.startswith("#")]
+    assert len(heartbeat) == 1
+    assert re.fullmatch(
+        rf'dmc_pg_backup_heartbeat_timestamp_seconds\{{environment="{environment}"\}} \d+',
+        heartbeat[0],
+    )
+
+
+def test_an_old_unlabeled_textfile_is_labeled_at_start(tmp_path: Path) -> None:
+    (tmp_path / "backups").mkdir()
+    _seed_dump(tmp_path / "backups", "app-20261103T000000Z.dump", int(time.time()))
+    textfile = tmp_path / "pg_backup.prom"
+    textfile.write_text(
+        "# HELP dmc_pg_backup_last_run_success 1 if the last backup attempt succeeded.\n"
+        "# TYPE dmc_pg_backup_last_run_success gauge\n"
+        "dmc_pg_backup_last_run_success 1\n"
+        "# HELP dmc_pg_backup_files Dumps kept in the backup directory.\n"
+        "# TYPE dmc_pg_backup_files gauge\n"
+        "dmc_pg_backup_files 4\n",
+        encoding="utf-8",
+    )
+    stop_after_two_seconds = (2, signal.SIGTERM)
+
+    first = _run_backup(tmp_path, mode="loop", stop=stop_after_two_seconds, BACKUP_POLL_SECONDS="1")
+    second = _run_backup(
+        tmp_path, mode="loop", stop=stop_after_two_seconds, BACKUP_POLL_SECONDS="1"
+    )
+
+    assert first.result.returncode == 0, first.result.stderr
+    assert 'dmc_pg_backup_last_run_success{environment="staging"} 1\n' in first.textfile
+    assert 'dmc_pg_backup_files{environment="staging"} 4\n' in first.textfile
+    assert "# TYPE dmc_pg_backup_files gauge\n" in first.textfile
+    assert second.textfile == first.textfile
+
+
+# --- off-host copy of the dumps ------------------------------------------------------------
 
 
 def test_offsite_names_reach_only_the_monitoring_deploy() -> None:
@@ -307,6 +447,12 @@ def test_invalid_offsite_settings_fail_before_the_host_changes(
 FAKE_RCLONE = """\
 #!/bin/sh
 echo "rclone $*" >> "${STUB_RCLONE_LOG}"
+# A dump finishing while the copy runs: pg-backup renames the .partial file to .dump.
+if [ "$1" = copy ] && [ -n "${STUB_PROMOTE_PARTIAL:-}" ]; then
+  mv "${STUB_PROMOTE_PARTIAL}" "${STUB_PROMOTE_PARTIAL%.partial}"
+fi
+# A slow copy: the first pass is still running when the test stops the service.
+if [ "$1" = copy ] && [ -n "${STUB_COPY_SLEEP:-}" ]; then sleep "${STUB_COPY_SLEEP}"; fi
 if [ "$1" = copy ] && [ -n "${STUB_COPY_FAILS:-}" ]; then
   echo "Failed to copy: 403 Forbidden" >&2
   exit 1
@@ -315,28 +461,31 @@ fi
 
 
 def _run_offsite(
-    tmp_path: Path, **env: str
+    tmp_path: Path,
+    *,
+    mode: str = "once",
+    stop: tuple[float, signal.Signals] | None = None,
+    unset: tuple[str, ...] = (),
+    **env: str,
 ) -> tuple[subprocess.CompletedProcess[str], list[str], str]:
     tools = tmp_path / "rclonebin"
     tools.mkdir(exist_ok=True)
-    (tools / "rclone").write_text(FAKE_RCLONE, encoding="utf-8")
-    (tools / "rclone").chmod(0o755)
+    for name, source in (("rclone", FAKE_RCLONE), ("stat", FAKE_STAT)):
+        (tools / name).write_text(source, encoding="utf-8")
+        (tools / name).chmod(0o755)
     textfile = tmp_path / "pg_backup_offsite.prom"
     log = tmp_path / "rclone.log"
-    # /bin/sh, not PATH: a local sh wrapper first on PATH would run instead of the system shell.
-    result = subprocess.run(
-        ["/bin/sh", str(MONITORING / "backup" / "offsite.sh"), "once"],
-        env={
-            "PATH": f"{tools}:{os.environ['PATH']}",
-            "BACKUP_DIR": str(tmp_path),
-            "TEXTFILE": str(textfile),
-            "STUB_RCLONE_LOG": str(log),
-            **env,
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    environment = {
+        "PATH": f"{tools}:{os.environ['PATH']}",
+        "BACKUP_ENVIRONMENT": "staging",
+        "BACKUP_DIR": str(tmp_path),
+        "TEXTFILE": str(textfile),
+        "STUB_RCLONE_LOG": str(log),
+        **env,
+    }
+    for name in unset:
+        del environment[name]
+    result = _run_script("offsite.sh", mode, environment, stop=stop)
     calls = _read(log).splitlines() if log.exists() else []
     return result, calls, _read(textfile) if textfile.exists() else ""
 
@@ -349,8 +498,8 @@ def test_offsite_copies_finished_dumps_then_prunes_old_copies(tmp_path: Path) ->
         f"rclone copy {tmp_path} secure: --include *.dump --immutable --no-traverse",
         "rclone delete secure: --include *.dump --min-age 30d",
     ]
-    assert "dmc_pg_backup_offsite_last_run_success 1" in metrics
-    assert "dmc_pg_backup_offsite_last_success_timestamp_seconds " in metrics
+    assert 'dmc_pg_backup_offsite_last_run_success{environment="staging"} 1\n' in metrics
+    assert "dmc_pg_backup_offsite_last_success_timestamp_seconds{" in metrics
 
 
 def test_failed_offsite_copy_never_deletes_remote_dumps(tmp_path: Path) -> None:
@@ -358,5 +507,128 @@ def test_failed_offsite_copy_never_deletes_remote_dumps(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert [call.split()[1] for call in calls] == ["copy"]
-    assert "dmc_pg_backup_offsite_last_run_success 0" in metrics
+    assert 'dmc_pg_backup_offsite_last_run_success{environment="staging"} 0\n' in metrics
     assert "last_success_timestamp" not in metrics
+
+
+@pytest.mark.parametrize("environment", ["staging", "prod"])
+def test_offsite_metrics_carry_the_environment_label(tmp_path: Path, environment: str) -> None:
+    _seed_dump(tmp_path, "app-20261103T000000Z.dump", 1_793_000_000)
+
+    result, _, metrics = _run_offsite(tmp_path, BACKUP_ENVIRONMENT=environment)
+
+    series = [line for line in metrics.splitlines() if not line.startswith("#")]
+    assert result.returncode == 0, result.stderr
+    assert len(series) == 3
+    for line in series:
+        assert re.fullmatch(
+            rf'dmc_pg_backup_offsite_[a-z_]+\{{environment="{environment}"\}} \d+', line
+        ), line
+
+
+@pytest.mark.parametrize("environment", [None, "", "shared", "Prod"])
+def test_offsite_refuses_a_missing_or_unknown_environment(
+    tmp_path: Path, environment: str | None
+) -> None:
+    if environment is None:
+        result, calls, metrics = _run_offsite(tmp_path, unset=("BACKUP_ENVIRONMENT",))
+    else:
+        result, calls, metrics = _run_offsite(tmp_path, BACKUP_ENVIRONMENT=environment)
+
+    assert result.returncode == 2
+    assert "BACKUP_ENVIRONMENT" in result.stderr
+    assert calls == []
+    assert metrics == ""
+
+
+def test_offsite_records_the_dump_a_successful_pass_covered(tmp_path: Path) -> None:
+    _seed_dump(tmp_path, "app-20261101T000000Z.dump", 1_793_000_000)
+    _seed_dump(tmp_path, "app-20261102T000000Z.dump", 1_793_086_400)
+    key = "dmc_pg_backup_offsite_last_copied_dump_timestamp_seconds"
+
+    result, _, metrics = _run_offsite(tmp_path, BACKUP_ENVIRONMENT="prod")
+
+    assert result.returncode == 0, result.stderr
+    assert f'{key}{{environment="prod"}} 1793086400\n' in metrics
+    assert f"# TYPE {key} gauge\n" in metrics
+
+
+def test_offsite_names_the_dump_that_existed_before_the_copy_started(tmp_path: Path) -> None:
+    # pg-backup renames a finished .partial file to .dump while rclone runs: that pass may have
+    # skipped it, so it must not be claimed as copied.
+    _seed_dump(tmp_path, "app-20261101T000000Z.dump", 1_793_000_000)
+    partial = _seed_dump(tmp_path, "app-20261102T000000Z.dump.partial", 1_793_086_400)
+
+    result, calls, metrics = _run_offsite(tmp_path, STUB_PROMOTE_PARTIAL=str(partial))
+
+    assert result.returncode == 0, result.stderr
+    assert calls[0].startswith("rclone copy")
+    assert (tmp_path / "app-20261102T000000Z.dump").exists()
+    assert 'last_copied_dump_timestamp_seconds{environment="staging"} 1793000000\n' in metrics
+
+
+def test_offsite_records_no_dump_after_a_failed_pass_or_without_dumps(tmp_path: Path) -> None:
+    key = "last_copied_dump_timestamp_seconds"
+    (tmp_path / "empty").mkdir()
+    nothing, _, nothing_metrics = _run_offsite(tmp_path / "empty")
+    _seed_dump(tmp_path, "app-20261101T000000Z.dump", 1_793_000_000)
+    failed, _, failed_metrics = _run_offsite(tmp_path, STUB_COPY_FAILS="1")
+
+    assert nothing.returncode == 0, nothing.stderr
+    assert "dmc_pg_backup_offsite_last_run_success" in nothing_metrics
+    assert key not in nothing_metrics
+    assert failed.returncode == 1
+    assert 'dmc_pg_backup_offsite_last_run_success{environment="staging"} 0' in failed_metrics
+    assert key not in failed_metrics
+
+
+def test_both_environments_emit_the_same_help_and_type_lines(tmp_path: Path) -> None:
+    # node-exporter merges one metric family written by two textfiles only when HELP and TYPE of
+    # both are identical.
+    def comments(text: str) -> list[str]:
+        return sorted(line for line in text.splitlines() if line.startswith("#"))
+
+    texts = {}
+    for environment in ("staging", "prod"):
+        directory = tmp_path / environment
+        (directory / "backups").mkdir(parents=True)
+        _seed_dump(directory / "backups", "app-20261103T000000Z.dump", int(time.time()) - 90000)
+        backup = _run_backup(directory, BACKUP_ENVIRONMENT=environment)
+        _seed_dump(directory, "app-20261103T000000Z.dump", 1_793_000_000)
+        _, _, offsite = _run_offsite(directory, BACKUP_ENVIRONMENT=environment)
+        texts[environment] = (comments(backup.textfile), comments(offsite))
+
+    assert texts["staging"][0] == texts["prod"][0]
+    assert texts["staging"][1] == texts["prod"][1]
+    assert len(texts["prod"][0]) == 12  # six families
+    assert len(texts["prod"][1]) == 6  # three families
+
+
+def test_an_old_unlabeled_offsite_textfile_is_labeled_before_the_first_pass(
+    tmp_path: Path,
+) -> None:
+    # Until the first pass of the recreated service ends, the old file would sit beside the
+    # labeled one of the prod copy: one metric family with two label sets.
+    textfile = tmp_path / "pg_backup_offsite.prom"
+    text = (
+        "# HELP dmc_pg_backup_offsite_last_run_success 1 if the last copy pass succeeded.\n"
+        "# TYPE dmc_pg_backup_offsite_last_run_success gauge\n"
+        "dmc_pg_backup_offsite_last_run_success 1\n"
+        "# HELP dmc_pg_backup_offsite_last_success_timestamp_seconds Time of the last pass.\n"
+        "# TYPE dmc_pg_backup_offsite_last_success_timestamp_seconds gauge\n"
+        "dmc_pg_backup_offsite_last_success_timestamp_seconds 1793000000\n"
+    )
+    textfile.write_text(text, encoding="utf-8")
+    # SIGKILL while the slow first pass runs: only the start-up relabel can have touched the file.
+    stop = (2, signal.SIGKILL)
+
+    _, _, first = _run_offsite(tmp_path, mode="loop", stop=stop, STUB_COPY_SLEEP="3")
+    _, _, second = _run_offsite(tmp_path, mode="loop", stop=stop, STUB_COPY_SLEEP="3")
+
+    assert 'dmc_pg_backup_offsite_last_run_success{environment="staging"} 1\n' in first
+    assert (
+        'dmc_pg_backup_offsite_last_success_timestamp_seconds{environment="staging"} 1793000000\n'
+        in first
+    )
+    assert "# TYPE dmc_pg_backup_offsite_last_run_success gauge\n" in first
+    assert second == first

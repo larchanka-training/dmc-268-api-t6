@@ -16,7 +16,15 @@ from typing import Any
 import pytest
 import yaml  # type: ignore[import-untyped]
 
-from tests.monitoring_deploy_host import METADATA_GRANTS, Host, _grants, _job
+from tests.monitoring_deploy_host import (
+    METADATA_GRANTS,
+    NO_OFFSITE,
+    OFFSITE,
+    PASSPHRASE,
+    Host,
+    _grants,
+    _job,
+)
 
 pytest_plugins = ("tests.monitoring_deploy_host",)
 
@@ -70,6 +78,29 @@ def test_every_alert_that_groups_by_environment_has_a_prod_case() -> None:
     # A rule that groups by environment can hide a fault of one environment behind the other
     # one if it is changed: each needs a case where only prod is faulty.
     assert grouping - prod_cases == set()
+
+
+def test_every_backup_alert_has_a_prod_case() -> None:
+    # The backup rules read the series as they are (no aggregation), so they fire for the
+    # environment of the series; each needs a case where only prod is faulty.
+    rules = _load(MONITORING / "prometheus" / "rules" / "alerts.yml")
+    reading_backups = {
+        rule["alert"]
+        for group in rules["groups"]
+        for rule in group["rules"]
+        if "dmc_pg_backup_" in rule.get("expr", "")
+    }
+    cases = _load(ROOT / "tests" / "monitoring" / "alerts.test.yml")
+    prod_cases = {
+        check["alertname"]
+        for case in cases["tests"]
+        for check in case.get("alert_rule_test", [])
+        for expected in check.get("exp_alerts") or []
+        if expected.get("exp_labels", {}).get("environment") == "prod"
+    }
+
+    assert len(reading_backups) == 5
+    assert reading_backups - prod_cases == set()
 
 
 PROMETHEUS_YML = MONITORING / "prometheus" / "prometheus.yml"
@@ -196,15 +227,40 @@ def test_request_series_get_the_environment_of_their_host(name: str, environment
 
 
 @pytest.mark.parametrize(
-    ("metric", "environment"),
+    ("series", "environment"),
     [
-        ("dmc_pg_backup_last_success_timestamp_seconds", "staging"),
-        ("dmc_llm_monthly_budget_usd", "shared"),
-        ("node_cpu_seconds_total", "shared"),
+        # The textfile series carry their environment, written by the backup scripts.
+        (
+            {
+                "__name__": "dmc_pg_backup_last_success_timestamp_seconds",
+                "environment": "staging",
+            },
+            "staging",
+        ),
+        (
+            {"__name__": "dmc_pg_backup_last_success_timestamp_seconds", "environment": "prod"},
+            "prod",
+        ),
+        ({"__name__": "dmc_pg_backup_offsite_last_run_success", "environment": "prod"}, "prod"),
+        # Unlabeled node and textfile series stay shared; no mapping by metric name any more.
+        ({"__name__": "dmc_llm_monthly_budget_usd"}, "shared"),
+        ({"__name__": "node_cpu_seconds_total"}, "shared"),
+        ({"__name__": "dmc_pg_backup_last_success_timestamp_seconds"}, "shared"),
     ],
 )
-def test_node_series_get_their_environment(metric: str, environment: str) -> None:
-    assert _series_environment("node", {"__name__": metric}) == environment
+def test_node_series_get_their_environment(series: dict[str, str], environment: str) -> None:
+    assert _series_environment("node", series) == environment
+
+
+def test_node_job_honors_the_labels_of_its_textfile_series() -> None:
+    # Without honor_labels Prometheus renames the exposed label to exported_environment and the
+    # job's own "shared" wins. _series_environment lets series labels win either way, so this
+    # direct assertion is the guard.
+    job = _jobs()["node"]
+
+    assert job["honor_labels"] is True
+    for rule in job.get("metric_relabel_configs", []):
+        assert "dmc_pg_backup" not in rule.get("regex", "")
 
 
 # --- prod scrapers and the relay (compose.prod.yml) -----------------------------------------
@@ -233,9 +289,9 @@ def _members(network: str) -> set[str]:
 def test_prod_scrapers_sit_on_the_prod_network_and_never_on_staging() -> None:
     prod = _load(MONITORING / "compose.prod.yml")
 
-    assert _members("api-prod") == PROD_SCRAPERS
+    assert _members("api-prod") == PROD_SCRAPERS | {"pg-backup-prod"}
     # check-isolation.sh fails a container on both application networks.
-    assert not PROD_SCRAPERS & _members("api")
+    assert not (PROD_SCRAPERS | {"pg-backup-prod"}) & _members("api")
     assert not _members("api") & _members("api-prod")
     assert prod["networks"]["api-prod"] == {
         "name": "${PROD_API_NETWORK:?PROD_API_NETWORK is required}",
@@ -295,6 +351,122 @@ def test_relay_forwards_only_postgres_and_rabbitmq_metrics() -> None:
     assert forwarded == {15692: "rabbitmq:15692", 5432: "postgres:5432"}
     assert len(servers) == 2
     assert re.search(r"^\s*resolver\s+127\.0\.0\.11\b", config, re.M)
+
+
+def test_prod_backup_sits_on_the_prod_network_only() -> None:
+    # PGHOST=postgres must resolve to the prod store: the staging names live on the other network.
+    service = _merged_services()["pg-backup-prod"]
+
+    assert set(service["networks"]) == {"api-prod"}
+    assert "ports" not in service
+
+
+def test_prod_backup_runs_the_image_of_staging_backup() -> None:
+    # pg_dump must match the prod server, which runs the postgres image of staging.yml.
+    staging = _load(MONITORING / "compose.yml")["services"]["pg-backup"]
+    prod = _load(MONITORING / "compose.prod.yml")["services"]["pg-backup-prod"]
+
+    assert prod["image"] == staging["image"]
+    assert prod["entrypoint"] == staging["entrypoint"] == ["sh", "/opt/pg-backup/pg-backup.sh"]
+    assert prod["command"] == ["loop"]
+    assert prod["user"] == "70:70"
+    assert re.fullmatch(r"\d+m", str(prod["mem_limit"]))
+    assert prod["restart"] == "unless-stopped"
+    assert prod["labels"] == {"dmc.config-digest": "${PG_BACKUP_CONFIG_DIGEST:-none}"}
+
+
+def test_prod_backup_env_and_mounts_are_prod_only() -> None:
+    prod = _load(MONITORING / "compose.prod.yml")["services"]["pg-backup-prod"]
+    environment = prod["environment"]
+
+    assert environment["PGHOST"] == "postgres"
+    assert environment["PGUSER"] == "backup_agent"
+    assert environment["PGPASSWORD"] == (
+        "${PROD_PG_BACKUP_PASSWORD:?PROD_PG_BACKUP_PASSWORD is required}"
+    )
+    assert environment["PGDATABASE"] == "${PROD_POSTGRES_DB:?PROD_POSTGRES_DB is required}"
+    assert environment["BACKUP_ENVIRONMENT"] == "prod"
+    assert environment["TEXTFILE"] == "/textfile/pg_backup_prod.prom"
+    assert environment["HEARTBEAT"] == "/textfile/pg_backup_prod_heartbeat.prom"
+    assert prod["volumes"] == [
+        "./backup:/opt/pg-backup:ro",
+        "${PROD_BACKUP_DIR:?PROD_BACKUP_DIR is required}:/backups",
+        "${TEXTFILE_DIR:-./textfile}:/textfile",
+    ]
+    # Nothing of staging: not its password, database or dump dir.
+    assert "PG_BACKUP_PASSWORD" not in str(prod).replace("PROD_PG_BACKUP_PASSWORD", "")
+    assert "${BACKUP_DIR" not in str(prod)
+    assert "${POSTGRES_DB" not in str(prod)
+
+
+def test_backup_textfile_names_do_not_collide() -> None:
+    # node-exporter reads every *.prom of the dir; two writers of one file would overwrite each
+    # other. Staging keeps the script defaults.
+    staging = [
+        "/textfile/pg_backup.prom",
+        "/textfile/pg_backup_heartbeat.prom",
+        "/textfile/pg_backup_offsite.prom",
+    ]
+    prod_backup = _load(MONITORING / "compose.prod.yml")["services"]["pg-backup-prod"][
+        "environment"
+    ]
+    prod_offsite = _load(MONITORING / "compose.offsite-prod.yml")["services"][
+        "backup-offsite-prod"
+    ]["environment"]
+    prod = [prod_backup["TEXTFILE"], prod_backup["HEARTBEAT"], prod_offsite["TEXTFILE"]]
+
+    assert len(set(prod)) == 3
+    assert not set(staging) & set(prod)
+
+
+def test_offsite_prod_copies_to_its_own_prefix() -> None:
+    staging = _load(MONITORING / "compose.offsite.yml")["services"]["backup-offsite"]["environment"]
+    prod = _load(MONITORING / "compose.offsite-prod.yml")["services"]["backup-offsite-prod"][
+        "environment"
+    ]
+    staging_remote = staging["RCLONE_CONFIG_SECURE_REMOTE"]
+    prod_remote = prod["RCLONE_CONFIG_SECURE_REMOTE"]
+
+    assert staging_remote == "store:${BACKUP_S3_BUCKET:?BACKUP_S3_BUCKET is required}/postgres"
+    assert prod_remote == "store:${BACKUP_S3_BUCKET:?BACKUP_S3_BUCKET is required}/postgres-prod"
+    # The delete of one pass may never reach the other's copies: neither prefix contains the other.
+    assert not prod_remote.startswith(staging_remote + "/")
+    assert not staging_remote.startswith(prod_remote + "/")
+    # One bucket, one set of keys and one passphrase for both (decision of the tech lead).
+    assert prod["RCLONE_CONFIG_SECURE_FILENAME_ENCRYPTION"] == "off"
+    differing = {key for key in staging.keys() | prod.keys() if staging.get(key) != prod.get(key)}
+    assert differing == {
+        "RCLONE_CONFIG_SECURE_REMOTE",
+        "BACKUP_ENVIRONMENT",
+        "TEXTFILE",
+    }
+
+
+def test_offsite_prod_reads_only_the_prod_dumps() -> None:
+    staging = _load(MONITORING / "compose.offsite.yml")["services"]["backup-offsite"]
+    prod = _load(MONITORING / "compose.offsite-prod.yml")["services"]["backup-offsite-prod"]
+
+    assert prod["image"] == staging["image"]
+    assert prod["entrypoint"] == staging["entrypoint"]
+    assert prod["command"] == ["loop"]
+    assert prod["user"] == "70:70"
+    assert re.fullmatch(r"\d+m", str(prod["mem_limit"]))
+    assert prod["environment"]["BACKUP_ENVIRONMENT"] == "prod"
+    assert prod["environment"]["TEXTFILE"] == "/textfile/pg_backup_offsite_prod.prom"
+    assert prod["volumes"] == [
+        "./backup:/opt/pg-backup:ro",
+        "${PROD_BACKUP_DIR:?PROD_BACKUP_DIR is required}:/backups:ro",
+        "${TEXTFILE_DIR:-./textfile}:/textfile",
+    ]
+    assert "${BACKUP_DIR" not in str(prod)
+    # Like the staging copy it needs the Internet only: no application network.
+    assert "networks" not in prod
+    assert prod["labels"] == {"dmc.config-digest": "${PG_BACKUP_CONFIG_DIGEST:-none}"}
+
+
+def test_the_prod_overlay_is_not_needed_without_prod() -> None:
+    # compose interpolates every service of a loaded file: the staging overlay must not need prod.
+    assert "PROD_" not in (MONITORING / "compose.offsite.yml").read_text()
 
 
 # --- deploy.sh with the prod stack ---------------------------------------------------------
@@ -359,17 +531,326 @@ def test_prod_roles_get_the_column_grants_of_staging(prod_host: Host) -> None:
     assert _grants(_sql_of(prod_host, "pgcontainer")) == METADATA_GRANTS
 
 
-def test_prod_database_gets_no_backup_role(prod_host: Host) -> None:
+def test_prod_database_gets_the_backup_role(prod_host: Host) -> None:
     result = _deploy_with_prod(prod_host)
     sql = _sql_of(prod_host, "pgcontainer-prod")
+    password = prod_host.env()["PROD_PG_BACKUP_PASSWORD"]
 
     assert result.returncode == 0, result.stderr
-    # The backup of prod comes with its own part: no unused high-privilege role in the database.
-    assert "backup_agent" not in sql
-    assert "pg_read_all_data" not in sql
-    assert "PROD_PG_BACKUP_PASSWORD" not in prod_host.env_file.read_text(encoding="utf-8")
-    # Staging is unchanged.
-    assert "GRANT pg_read_all_data TO backup_agent;" in _sql_of(prod_host, "pgcontainer")
+    assert "GRANT pg_read_all_data TO backup_agent;" in sql
+    assert (
+        "ALTER ROLE backup_agent WITH LOGIN NOSUPERUSER CREATEDB NOCREATEROLE NOREPLICATION "
+        "CONNECTION LIMIT 3;"
+    ) in sql
+    assert 'GRANT CONNECT ON DATABASE "app" TO backup_agent;' in sql
+    assert "pg_write_all_data" not in sql
+    # The grants of the metadata roles are unchanged, and the password is its own statement.
+    assert _grants(sql) == METADATA_GRANTS
+    assert sql.count(password) == 1
+    assert f"ALTER ROLE backup_agent PASSWORD '{password}';" in sql
+
+
+def test_prod_backup_password_is_its_own_stays_on_the_next_deploy_and_is_never_printed(
+    prod_host: Host,
+) -> None:
+    first = _deploy_with_prod(prod_host)
+    env = prod_host.env()
+    second = _deploy_with_prod(prod_host)
+    password = env["PROD_PG_BACKUP_PASSWORD"]
+
+    assert first.returncode == 0, first.stderr
+    assert re.fullmatch(r"[0-9a-f]{48}", password)
+    assert password != env["PG_BACKUP_PASSWORD"]
+    assert prod_host.env()["PROD_PG_BACKUP_PASSWORD"] == password
+    assert second.returncode == 0, second.stderr
+    assert "generated PROD_PG_BACKUP_PASSWORD" in first.stderr
+    assert "generated PROD_PG_BACKUP_PASSWORD" not in second.stderr
+    assert env["PG_BACKUP_PASSWORD"] not in _sql_of(prod_host, "pgcontainer-prod")
+    for output in (first.stdout + first.stderr, second.stdout + second.stderr):
+        assert password not in output
+    assert password not in prod_host.log("docker.log")  # argv of every docker call
+
+
+def test_prod_backup_dir_is_owned_by_the_backup_user(prod_host: Host) -> None:
+    result = _deploy_with_prod(prod_host)
+    prod_backups = prod_host.root / "backups-prod"
+    env = prod_host.env()
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(prod_backups.stat().st_mode) == 0o700
+    assert f"70:70 {prod_backups}" in prod_host.log("chown.log")
+    assert env["PROD_BACKUP_DIR"] == str(prod_backups)
+    assert env["PROD_BACKUP_DIR"] != env["BACKUP_DIR"]
+
+
+def test_prod_backup_dir_defaults_to_the_directory_of_the_prod_project() -> None:
+    script = (MONITORING / "deploy.sh").read_text(encoding="utf-8")
+
+    assert (
+        'PROD_BACKUP_DIR="${PROD_BACKUP_DIR:-/var/backups/dmc-268/${PROD_API_PROJECT}}"' in script
+    )
+    assert 'BACKUP_DIR="${BACKUP_DIR:-/var/backups/dmc-268/${API_PROJECT}}"' in script
+
+
+@pytest.mark.parametrize(
+    ("backup_dir", "prod_backup_dir"),
+    [
+        ("backups", "backups"),
+        ("backups", "backups/"),
+        ("backups/", "backups//"),
+        ("backups", "backups/../backups"),
+        ("backups", "backups/prod"),
+        ("backups/staging", "backups"),
+    ],
+)
+def test_prod_and_staging_dumps_never_share_a_directory(
+    prod_host: Host, backup_dir: str, prod_backup_dir: str
+) -> None:
+    result = _deploy_with_prod(
+        prod_host,
+        BACKUP_DIR=str(prod_host.root / backup_dir),
+        PROD_BACKUP_DIR=str(prod_host.root / prod_backup_dir),
+    )
+
+    assert result.returncode == 1
+    assert "PROD_BACKUP_DIR must not be BACKUP_DIR nor inside it" in result.stderr
+    # Refused before anything on the host changed.
+    assert not prod_host.env_file.exists()
+    assert prod_host.log("psql.log") == ""
+    assert " up " not in prod_host.log("docker.log")
+    assert not (prod_host.root / "backups").exists()
+
+
+def test_a_sibling_directory_is_not_inside_the_other(prod_host: Host) -> None:
+    # "backups-prod" starts with "backups" but is another directory.
+    result = _deploy_with_prod(
+        prod_host,
+        BACKUP_DIR=str(prod_host.root / "backups"),
+        PROD_BACKUP_DIR=str(prod_host.root / "backups-prod"),
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def _link_dump_dirs(root: Path, layout: str) -> tuple[Path, Path]:
+    """Build the dump dirs of one case on disk; the pair is (BACKUP_DIR, PROD_BACKUP_DIR)."""
+    backups = root / "backups"
+    if layout == "prod_is_a_link_to_staging":
+        backups.mkdir()
+        (root / "prod-link").symlink_to(backups)
+        return backups, root / "prod-link"
+    if layout == "parent_of_prod_is_a_link_to_staging":
+        backups.mkdir()
+        (root / "prod-parent").symlink_to(backups)
+        return backups, root / "prod-parent" / "not-yet" / "prod"
+    if layout == "staging_is_a_link_to_prod":
+        (root / "prod-real").mkdir()
+        (root / "staging-link").symlink_to(root / "prod-real")
+        return root / "staging-link", root / "prod-real"
+    # The text of the path names another directory; the kernel goes through the link before "..".
+    backups.mkdir()
+    (root / "elsewhere" / "deeper").mkdir(parents=True)
+    (root / "elsewhere" / "deeper" / "back").symlink_to(backups)
+    return backups, root / "elsewhere" / "deeper" / "back" / ".." / "backups" / "prod"
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "prod_is_a_link_to_staging",
+        "parent_of_prod_is_a_link_to_staging",
+        "staging_is_a_link_to_prod",
+        "prod_reaches_staging_through_dotdot_after_a_link",
+    ],
+)
+def test_prod_and_staging_dumps_never_share_a_physical_directory(
+    prod_host: Host, layout: str
+) -> None:
+    backup_dir, prod_backup_dir = _link_dump_dirs(prod_host.root, layout)
+
+    result = _deploy_with_prod(
+        prod_host, BACKUP_DIR=str(backup_dir), PROD_BACKUP_DIR=str(prod_backup_dir)
+    )
+
+    assert result.returncode == 1
+    assert "PROD_BACKUP_DIR must not be BACKUP_DIR nor inside it" in result.stderr
+    # Refused before anything on the host changed.
+    assert not prod_host.env_file.exists()
+    assert prod_host.log("psql.log") == ""
+    assert " up " not in prod_host.log("docker.log")
+    assert not (prod_host.root / "backups" / "prod").exists()
+
+
+@pytest.mark.parametrize("target", ["missing", "file"])
+def test_a_symlink_that_is_not_a_directory_stops_a_prod_deploy(
+    prod_host: Host, target: str
+) -> None:
+    # A dangling link may point at a directory created later: it is not "does not exist yet".
+    (prod_host.root / "file").write_text("", encoding="utf-8")
+    dangling = prod_host.root / "prod-link"
+    dangling.symlink_to(prod_host.root / ("file" if target == "file" else "gone"))
+
+    result = _deploy_with_prod(
+        prod_host,
+        BACKUP_DIR=str(prod_host.root / "backups"),
+        PROD_BACKUP_DIR=str(dangling / "prod"),
+    )
+
+    assert result.returncode == 1
+    assert str(dangling) in result.stderr
+    assert "not a directory" in result.stderr
+    # Refused before anything on the host changed.
+    assert not prod_host.env_file.exists()
+    assert prod_host.log("psql.log") == ""
+    assert " up " not in prod_host.log("docker.log")
+    assert not (prod_host.root / "backups").exists()
+
+
+@pytest.mark.parametrize("layout", ["link_to_a_separate_directory", "nothing_exists_yet"])
+def test_a_link_to_a_separate_directory_passes_the_dump_dir_check(
+    prod_host: Host, layout: str
+) -> None:
+    if layout == "link_to_a_separate_directory":
+        (prod_host.root / "separate").mkdir()
+        (prod_host.root / "prod-link").symlink_to(prod_host.root / "separate")
+        prod_backup_dir = prod_host.root / "prod-link" / "dumps"
+    else:
+        prod_backup_dir = prod_host.root / "new" / "prod"
+
+    result = _deploy_with_prod(
+        prod_host,
+        BACKUP_DIR=str(prod_host.root / "backups"),
+        PROD_BACKUP_DIR=str(prod_backup_dir),
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def _assert_relative_dump_dir_refused(
+    stack: Host, result: subprocess.CompletedProcess[str], named: str
+) -> None:
+    assert result.returncode == 1
+    assert "BACKUP_DIR and PROD_BACKUP_DIR must be absolute paths" in result.stderr
+    assert named in result.stderr
+    # Refused before anything on the host changed.
+    assert not stack.env_file.exists()
+    assert stack.log("psql.log") == ""
+    assert " up " not in stack.log("docker.log")
+    assert not (stack.root / "dumps").exists()
+    assert not (stack.monitoring_dir / "dumps").exists()
+
+
+@pytest.mark.parametrize("variable", ["BACKUP_DIR", "PROD_BACKUP_DIR"])
+def test_a_relative_dump_dir_stops_a_prod_deploy(
+    prod_host: Host, monkeypatch: pytest.MonkeyPatch, variable: str
+) -> None:
+    monkeypatch.chdir(prod_host.root)
+
+    result = _deploy_with_prod(prod_host, **{variable: "./dumps"})
+
+    _assert_relative_dump_dir_refused(prod_host, result, f"{variable}=./dumps")
+
+
+def test_a_relative_dump_dir_cannot_pass_for_another_directory(
+    prod_host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # From this $PWD the two paths differ, but Compose resolves the relative one from the first
+    # compose file: one directory would be mounted for both services.
+    monkeypatch.chdir(prod_host.root)
+
+    result = _deploy_with_prod(
+        prod_host,
+        BACKUP_DIR="./dumps",
+        PROD_BACKUP_DIR=str(prod_host.monitoring_dir / "dumps"),
+    )
+
+    _assert_relative_dump_dir_refused(prod_host, result, "BACKUP_DIR=./dumps")
+
+
+# BSD realpath has no -m: the check of the dump dirs must not depend on it.
+FAKE_BSD_REALPATH = """\
+#!/bin/sh
+echo "realpath: illegal option -- m" >&2
+exit 1
+"""
+
+
+@pytest.mark.parametrize(
+    ("backup_dir", "prod_backup_dir", "refused"),
+    [
+        ("backups", "backups-prod", False),
+        ("backups", "backups/prod", True),
+        ("backups", "backups/./", True),
+        ("backups/staging", "backups/staging/../../backups/staging", True),
+    ],
+)
+def test_the_dump_dir_check_needs_no_gnu_realpath(
+    prod_host: Host, backup_dir: str, prod_backup_dir: str, refused: bool
+) -> None:
+    (prod_host.stubs / "realpath").write_text(FAKE_BSD_REALPATH, encoding="utf-8")
+    (prod_host.stubs / "realpath").chmod(0o755)
+
+    result = _deploy_with_prod(
+        prod_host,
+        BACKUP_DIR=str(prod_host.root / backup_dir),
+        PROD_BACKUP_DIR=str(prod_host.root / prod_backup_dir),
+    )
+
+    assert "illegal option" not in result.stderr
+    if refused:
+        assert result.returncode == 1
+        assert "PROD_BACKUP_DIR must not be BACKUP_DIR nor inside it" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+
+
+def _up(stack: Host) -> str:
+    return [line for line in stack.log("docker.log").splitlines() if " up " in line][-1]
+
+
+def test_prod_backup_services_reach_compose_with_their_overlays(prod_host: Host) -> None:
+    result = _deploy_with_prod(prod_host, **OFFSITE)
+    up = _up(prod_host)
+    monitoring = prod_host.monitoring_dir
+
+    assert result.returncode == 0, result.stderr
+    assert f"-f {monitoring}/compose.prod.yml" in up
+    assert f"-f {monitoring}/compose.offsite.yml" in up
+    assert f"-f {monitoring}/compose.offsite-prod.yml" in up
+    assert PASSPHRASE not in prod_host.env_file.read_text(encoding="utf-8")
+
+
+def test_prod_offsite_overlay_needs_prod_and_the_offsite_settings(prod_host: Host) -> None:
+    no_offsite = _deploy_with_prod(prod_host, **NO_OFFSITE)
+    up_without_offsite = _up(prod_host)
+    # The prod backup itself does not need the bucket.
+    assert no_offsite.returncode == 0, no_offsite.stderr
+    assert f"-f {prod_host.monitoring_dir}/compose.prod.yml" in up_without_offsite
+    assert "compose.offsite" not in up_without_offsite
+
+    without_prod = prod_host.deploy(extra=OFFSITE, PROD_API_DIR="")
+    up_without_prod = _up(prod_host)
+    assert without_prod.returncode == 0, without_prod.stderr
+    assert f"-f {prod_host.monitoring_dir}/compose.offsite.yml" in up_without_prod
+    assert "compose.offsite-prod.yml" not in up_without_prod
+    assert "compose.prod.yml" not in up_without_prod
+
+
+def test_without_prod_nothing_of_the_prod_backup_reaches_the_host(prod_host: Host) -> None:
+    result = prod_host.deploy(extra=OFFSITE, PROD_API_DIR="")
+
+    assert result.returncode == 0, result.stderr
+    assert not {key for key in prod_host.env() if key.startswith("PROD_")}
+    assert "backup_agent" not in _sql_of(prod_host, "pgcontainer-prod")
+    assert not (prod_host.root / "backups-prod").exists()
+    assert "generated PROD_PG_BACKUP_PASSWORD" not in result.stderr
+
+
+def test_the_header_of_deploy_says_both_databases_get_the_backup_role() -> None:
+    header = "".join((MONITORING / "deploy.sh").read_text(encoding="utf-8").splitlines(True)[:8])
+
+    assert "backup_agent" in header
+    assert "in the staging one" not in header
 
 
 def test_prod_role_passwords_are_their_own_and_go_through_stdin(prod_host: Host) -> None:
@@ -733,8 +1214,14 @@ def test_deploy_script_defines_no_nested_functions() -> None:
 
 def test_the_backup_role_follows_the_backup_password(prod_host: Host) -> None:
     result = _deploy_with_prod(prod_host)
+    env = prod_host.env()
 
     assert result.returncode == 0, result.stderr
-    # Staging holds a backup password and gets the role, prod holds none and gets no role.
-    assert "ALTER ROLE backup_agent PASSWORD" in _sql_of(prod_host, "pgcontainer")
-    assert "backup_agent" not in _sql_of(prod_host, "pgcontainer-prod")
+    # Each database holds its own backup password and gets the role with it.
+    assert f"ALTER ROLE backup_agent PASSWORD '{env['PG_BACKUP_PASSWORD']}';" in _sql_of(
+        prod_host, "pgcontainer"
+    )
+    assert f"ALTER ROLE backup_agent PASSWORD '{env['PROD_PG_BACKUP_PASSWORD']}';" in _sql_of(
+        prod_host, "pgcontainer-prod"
+    )
+    assert env["PROD_PG_BACKUP_PASSWORD"] != env["PG_BACKUP_PASSWORD"]
