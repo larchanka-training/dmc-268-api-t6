@@ -6,11 +6,12 @@ import asyncio
 import base64
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import timedelta
 
 import httpx
 import pytest
 
-from app.modules.reviews.application.run_failures import RunCancelled
+from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
 from app.modules.reviews.application.vcs_diff import (
     BlobTooLargeError,
     FetchVcsReviewInput,
@@ -19,6 +20,7 @@ from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
 )
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
+from app.modules.reviews.infrastructure.vcs_failures import ClassifiedVcsProvider
 from tests.installation_onboarding_fakes import provider_checkpoint
 
 _HEAD = "a" * 40
@@ -317,6 +319,35 @@ def test_http_rate_limit_and_invalid_blob_fail_closed() -> None:
                 )
 
     asyncio.run(exercise())
+
+
+def test_blob_secondary_rate_limit_without_headers_is_retryable() -> None:
+    encodings: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith(f"/git/blobs/{_BLOB}")
+        encodings.append(request.headers["Accept-Encoding"])
+        return httpx.Response(
+            403, json={"message": "You have exceeded a secondary rate limit. Please retry."}
+        )
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), base_url="https://api.github.test"
+        ) as client:
+            provider = ClassifiedVcsProvider(
+                HttpGitHubVcsProvider(client=client, token_provider=Tokens())
+            )
+            with pytest.raises(RunFailure) as caught:
+                await provider.get_blob(
+                    PullRequestLocator(17, "octo/repo", 7), _BLOB, checkpoint=provider_checkpoint
+                )
+        assert caught.value.error_code == "diff_fetch_failed"
+        assert caught.value.rate_limited is True
+        assert caught.value.retry_after == timedelta(seconds=60)
+
+    asyncio.run(exercise())
+    assert encodings == ["identity"]
 
 
 def test_blob_retrieval_stops_before_consuming_an_oversized_response() -> None:

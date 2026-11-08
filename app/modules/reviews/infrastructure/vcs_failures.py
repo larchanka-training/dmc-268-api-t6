@@ -65,8 +65,8 @@ async def raise_for_streamed_status(response: httpx.Response) -> None:
 
 async def _error_body(response: httpx.Response) -> bytes:
     if response.headers.get("Content-Encoding", "").strip().casefold() not in {"", "identity"}:
-        # Never decoded: a decoder could expand one chunk far past the cap. The policy and
-        # commit streams ask for identity; get_repository_blob keeps the client default.
+        # Never decoded: a decoder could expand one chunk far past the cap. Streamed GitHub
+        # reads ask for identity, but a server may ignore that request.
         return b""
     body = bytearray()
     # The status and the headers are the answer; a body cut short only lacks the marker.
@@ -160,7 +160,7 @@ def classify_vcs_error(
 
 
 class ClassifiedVcsProvider:
-    """Decorate the diff reads of the attempt; blob reads stay best effort."""
+    """Decorate diff reads; blob failures are best effort except confirmed rate limits."""
 
     def __init__(self, inner: VcsMetadataProvider) -> None:
         self._inner = inner
@@ -192,7 +192,18 @@ class ClassifiedVcsProvider:
     async def get_blob(
         self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
     ) -> bytes:
-        return await self._inner.get_blob(locator, sha, checkpoint=checkpoint)
+        try:
+            return await self._inner.get_blob(locator, sha, checkpoint=checkpoint)
+        except httpx.HTTPStatusError as exc:
+            limited, delay = github_rate_limit(exc)
+            if limited:
+                raise RunFailure(
+                    "diff_fetch_failed",
+                    f"GitHub answered {exc.response.status_code}",
+                    retry_after=delay,
+                    rate_limited=True,
+                ) from exc
+            raise
 
     async def verify_current(self, *, checkpoint: RunProviderCheckpoint) -> None:
         if isinstance(self._inner, VcsStageVerifier):

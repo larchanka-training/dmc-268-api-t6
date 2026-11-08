@@ -542,6 +542,13 @@ Fallback-модель — вторая модель шлюза с тем же st
 | 400/422 по body/event/schema, spam/abuse или неизвестная validation error | `github.publish_review` | endpoint + structured fields/codes; один HTTP-код 422 недостаточен | нет координатного fallback; подтверждённый rate limit классифицируется отдельно | `failed`, `github_publish_failed` | check-run `neutral` | причина в trace |
 | 401 | `github.publish_review` | подтверждённый отказ авторизации | одно обновление токена, безопасный повтор; затем access failure | `failed`, `github_forbidden` | check-run `neutral`, если доступен | `failed` |
 
+Чтения GitHub blob (`get_blob` / `get_repository_blob`) просят `Accept-Encoding: identity`, чтобы
+прочитать до 4 KiB тела ошибки. Без заголовков лимита 403/429 с `message` JSON-тела, содержащим
+«secondary rate limit», определяется так же, как у остальных чтений: `get_blob` через
+`ClassifiedVcsProvider` даёт retryable `diff_fetch_failed` с паузой 60 с. Другие сбои blob
+остаются best effort. Если сервер всё же вернул сжатое тело ошибки, оно не разбирается и без
+других признаков лимит не подтверждается.
+
 Ошибка при обновлении check-run состояние Run не меняет: пишется лог и метрика.
 
 **Сбои GitLab (`gitlab.publish_review`, SD §8.4).**
