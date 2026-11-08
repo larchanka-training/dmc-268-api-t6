@@ -7,7 +7,7 @@
 | Связанные документы | [`.agents/rules/git-workflow.md`](../.agents/rules/git-workflow.md) — ветки, коммиты, оформление PR |
 | Задача | [#28](https://github.com/larchanka-training/dmc-268-api-t6/issues/28), [#56](https://github.com/larchanka-training/dmc-268-api-t6/issues/56), [dmc-268-ui-t6#173](https://github.com/larchanka-training/dmc-268-ui-t6/issues/173), [#273](https://github.com/larchanka-training/dmc-268-api-t6/issues/273), [#271](https://github.com/larchanka-training/dmc-268-api-t6/issues/271), [#272](https://github.com/larchanka-training/dmc-268-api-t6/issues/272) |
 
-Здесь записано, кто, что и когда делает на пути от issue до мержа и приёмки, чтобы вопросы о процессе решались ссылкой на этот документ, а не спором. Как называть ветки, писать коммиты и оформлять тело PR — в `git-workflow.md`, здесь это не повторяется. Файл канонический для обоих репозиториев; в `dmc-268-ui-t6` лежит `docs/CONTRIBUTING.md` со ссылкой сюда.
+Здесь записано, кто, что и когда делает на пути от issue до мержа и приёмки, чтобы вопросы о процессе решались ссылкой на этот документ, а не спором. Как называть ветки, писать коммиты и оформлять тело PR — в `git-workflow.md`, здесь это не повторяется. Файл канонический для обоих репозиториев; в `dmc-268-ui-t6` лежит `docs/CONTRIBUTING.md` со ссылкой сюда. Автору вне команды — [§10](#10-внешнему-контрибьютору).
 
 ---
 
@@ -311,3 +311,33 @@ gh issue edit <номер issue> --milestone "Спринт 4"
 ```
 
 Граф Спринта 4 опубликован [комментарием в #261](https://github.com/larchanka-training/dmc-268-api-t6/issues/261#issuecomment-6396929696).
+
+## 10. Внешнему контрибьютору
+
+Для автора вне команды: как поднять стек, проверить правку и куда её отправить. Устройство кода — [`ARCHITECTURE.md`](ARCHITECTURE.md). Что дальше происходит с PR, описано в §2–§7, оформление веток, коммитов и тела PR — в [`git-workflow.md`](../.agents/rules/git-workflow.md); здесь это не повторяется.
+
+**Поднять стек.** Нужны [uv](https://docs.astral.sh/uv/) и Docker. Стек поднимает одна команда:
+
+```bash
+docker compose up --build --wait
+```
+
+API отвечает на `http://localhost:8000/healthcheck`. Источник этой команды — [README «Run»](../README.md#run): там же сервисы, запуск без Compose и `webhook-worker`.
+
+**Прогнать гейты.** То же проверяет CI в `Python lint / type / test`:
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy .
+uv run pytest
+```
+
+Тесты `-m integration` без PostgreSQL и RabbitMQ пропускаются; как их включить — в [README](../README.md#tests).
+
+**Куда слать PR.** В ветку `main` нужного репозитория:
+
+| Что меняете | Репозиторий |
+|---|---|
+| Backend, спеки в `docs/`, контракты, выкат | [`larchanka-training/dmc-268-api-t6`](https://github.com/larchanka-training/dmc-268-api-t6) |
+| Web UI и пользовательская документация в `docs-site/` | [`larchanka-training/dmc-268-ui-t6`](https://github.com/larchanka-training/dmc-268-ui-t6) |
