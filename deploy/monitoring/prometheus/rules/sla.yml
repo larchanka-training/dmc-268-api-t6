@@ -14,6 +14,13 @@
 # Each window counts the share of its probes that failed, in seconds (1 - avg of probe_success). A
 # window with a gap counts the probes that exist in it, and the first window of a name that has just
 # joined the probes counts as a whole, so a name that starts failing counts up to an hour at once.
+# A name with no completed hour yet (first probed in the current hour) has no hourly series, and
+# `+` keeps only the pairs that match, so the current-hour term is repeated after `or` and counts
+# it alone: its series and the panels start at the first 5-minute step after its first probe, not
+# at the next whole hour. The parentheses around the `or` are required: `and` binds tighter than
+# `or`, and without them the main term would lose the gate. There is no symmetric fallback to the
+# hourly term: the gate means a probe in the last 30 minutes, and that probe gives the current-hour
+# term a series.
 # Why not a single subquery of 31 days with a 5-minute step: promtool, which runs the unit tests,
 # stops a query at 10 000 samples, and that subquery has 8 928 steps with several values each. Not
 # a rolling [30d] either: the window is the calendar month. Not a counter reset on the 1st: a
@@ -48,13 +55,22 @@ groups:
       - record: sla:downtime_seconds:month
         expr: |
           (
-            3600 * sum by (environment, host) (
-              sum_over_time(
-                ((1 - avg_over_time(probe_success{job="blackbox", environment="prod"}[1h]))
-                  * (time() > bool scalar(sla:month_start_timestamp_seconds @ end())))[31d:1h]
+            (
+              3600 * sum by (environment, host) (
+                sum_over_time(
+                  ((1 - avg_over_time(probe_success{job="blackbox", environment="prod"}[1h]))
+                    * (time() > bool scalar(sla:month_start_timestamp_seconds @ end())))[31d:1h]
+                )
+              )
+              +
+              300 * sum by (environment, host) (
+                sum_over_time(
+                  ((1 - avg_over_time(probe_success{job="blackbox", environment="prod"}[5m]))
+                    * (time() > bool scalar(sla:hour_start_timestamp_seconds @ end())))[1h:5m]
+                )
               )
             )
-            +
+            or
             300 * sum by (environment, host) (
               sum_over_time(
                 ((1 - avg_over_time(probe_success{job="blackbox", environment="prod"}[5m]))
