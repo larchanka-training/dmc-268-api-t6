@@ -9,6 +9,7 @@ from functools import partial
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.bootstrap.environment import positive_integer
 from app.modules.reviews.application.run_data_retention import PurgeExpiredRunData
 from app.modules.reviews.infrastructure.run_data_retention import (
     SqlAlchemyRunDataRetentionUnitOfWork,
@@ -17,8 +18,6 @@ from app.modules.reviews.infrastructure.run_data_retention import (
 _VARIABLE = "RUN_DATA_RETENTION_DAYS"
 # At most ten years: the purge threshold stays far inside the timestamp range.
 MAX_RETENTION_DAYS = 3_650
-# Far above the limit; it keeps `int()` off a pathological value.
-_MAX_DIGITS = 18
 
 
 @dataclass(frozen=True)
@@ -37,10 +36,7 @@ class RunDataRetentionSettings:
         raw = env.get(_VARIABLE)
         if not raw:
             return cls()
-        text = raw.strip()
-        if not (text.isascii() and text.isdecimal()) or len(text) > _MAX_DIGITS:
-            raise ValueError(f"{_VARIABLE} must be a positive integer")
-        return cls(days=int(text))
+        return cls(days=positive_integer(_VARIABLE, raw))
 
 
 def run_data_retention_task(

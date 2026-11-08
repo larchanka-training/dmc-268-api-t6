@@ -32,6 +32,7 @@ import httpx
 from aio_pika.abc import AbstractIncomingMessage, AbstractQueue, AbstractRobustConnection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.bootstrap.environment import positive_integer
 from app.common.infrastructure.amqp_consumer import consume_queue
 from app.modules.code_index.application.build_index import (
     BuildRepositoryIndex,
@@ -124,8 +125,6 @@ MAX_RECONCILE_INTERVAL_SECONDS = 86_400
 MAX_RECONCILE_BATCH = 500
 # Converge runs at most this often, so a re-arm waits up to a minute (SD §11).
 CONVERGE_INTERVAL_SECONDS = 60
-# Far above any limit; it keeps `int()` off a pathological value.
-_MAX_DIGITS = 18
 
 
 @dataclass(frozen=True)
@@ -210,7 +209,7 @@ class CodeIndexSettings:
         for name in _field_names():
             raw = env.get(_variable(name))
             if raw:
-                values[name] = _positive_integer(_variable(name), raw)
+                values[name] = positive_integer(_variable(name), raw)
         return cls(**values)
 
     @property
@@ -259,13 +258,6 @@ def _field_names() -> tuple[str, ...]:
 
 def _variable(name: str) -> str:
     return f"CODE_INDEX_{name.upper()}"
-
-
-def _positive_integer(variable: str, raw: str) -> int:
-    text = raw.strip()
-    if not (text.isascii() and text.isdecimal()) or len(text) > _MAX_DIGITS:
-        raise ValueError(f"{variable} must be a positive integer")
-    return int(text)
 
 
 def index_versions(limits: IndexLimits) -> IndexVersions:
