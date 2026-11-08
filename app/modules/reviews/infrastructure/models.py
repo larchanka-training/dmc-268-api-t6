@@ -172,7 +172,14 @@ class CachedFileBlob(Base):
     """A seven-day immutable file blob retained for run inspection."""
 
     __tablename__ = "cached_file_blobs"
-    __table_args__ = (UniqueConstraint("repository_id", "blob_sha"),)
+    __table_args__ = (
+        UniqueConstraint("repository_id", "blob_sha"),
+        Index(
+            "ix_cached_file_blobs_retention_candidates",
+            "expires_at",
+            postgresql_where=text("content <> ''"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     repository_id: Mapped[UUID] = mapped_column(
@@ -234,6 +241,12 @@ class Run(Base):
         Index("ix_runs_created_id", "created_at", "id"),
         Index("ix_runs_state_created_id", "state", "created_at", "id"),
         Index("ix_runs_code_change_created_id", "code_change_id", "created_at", "id"),
+        Index(
+            "ix_runs_data_retention_candidates",
+            "finished_at",
+            "id",
+            postgresql_where=text("data_purged_at IS NULL AND finished_at IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -288,6 +301,8 @@ class Run(Base):
     error_message: Mapped[str | None] = mapped_column(TEXT)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Set by the retention task once it has cleared the run's stale data (#457, SD §10).
+    data_purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = timestamp_column()
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
