@@ -6,11 +6,10 @@ import json
 import re
 from pathlib import Path
 from typing import cast
-from uuid import UUID
 
 import pytest
 
-from app.modules.reviews.application.diff_map import DiffMap, VcsProviderName, build_diff_map
+from app.modules.reviews.application.diff_map import DiffMap
 from app.modules.reviews.application.findings_post_processor import (
     FindingsPostProcessor,
     _format_checked_files,
@@ -18,7 +17,6 @@ from app.modules.reviews.application.findings_post_processor import (
     format_body_only_overflow_footer,
     format_body_only_overflow_footer_without_url,
 )
-from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.publish_run_review import move_inline_to_body
 from app.modules.reviews.application.review_output import (
     PublishedFinding,
@@ -26,9 +24,21 @@ from app.modules.reviews.application.review_output import (
     ReviewOutput,
     ReviewSummary,
 )
-from app.modules.reviews.application.run_coverage import CoverageItem, CoverageStatus, RunCoverage
-from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
-from app.modules.reviews.application.verdict import SeverityThresholdValue
+from app.modules.reviews.application.run_coverage import (
+    CoverageItem,
+    CoverageStatus,
+    RunCoverage,
+)
+from app.modules.reviews.application.vcs_diff import VcsFile
+from app.modules.reviews.application.verdict import (
+    SeverityThresholdValue,
+)
+from tests.findings_post_processor_fakes import (
+    _body_only_accounted_in_review_body,
+    _diff_map_from_vcs,
+    finding,
+    output,
+)
 from tests.test_diff_anchor import _diff_map
 from tests.test_diff_anchor import _file as anchor_file
 
@@ -51,80 +61,12 @@ def _added_file_diff_map(path: str, line_count: int) -> DiffMap:
     )
 
 
-def _diff_map_from_vcs(*files: VcsFile) -> DiffMap:
-    pull_request = VcsPullRequest(
-        locator=PullRequestLocator(
-            installation_external_id=0, repository_full_name="acme/app", number=1
-        ),
-        head_sha="c" * 40,
-        base_sha="b" * 40,
-        meta=PullRequestMeta(
-            title="",
-            description=None,
-            author="",
-            source_branch="",
-            target_branch="",
-            labels=(),
-            files_changed=len(files),
-            lines_added=sum(item.additions for item in files),
-            lines_removed=sum(item.deletions for item in files),
-            is_draft=False,
-            is_fork=False,
-        ),
-    )
-    return build_diff_map(
-        pull_request,
-        files,
-        provider=VcsProviderName.GITHUB,
-        repository_id=UUID(int=1),
-        diff_old_sha="a" * 40,
-    )
-
-
 def _default_diff_map() -> DiffMap:
     return _added_file_diff_map("app/example.py", 14)
 
 
 def _empty_diff_map() -> DiffMap:
     return _diff_map_from_vcs()
-
-
-def finding(**overrides: object) -> dict[str, object]:
-    value: dict[str, object] = {
-        "path": "app/example.py",
-        "line": 12,
-        "start_line": None,
-        "severity": "low",
-        "category": "correctness",
-        "title": "Missing validation",
-        "body": "The request is used without checking its required value.",
-        "suggestion": "validate(value)",
-        "confidence": 0.9,
-        "rule_name": None,
-    }
-    value.update(overrides)
-    return value
-
-
-def output(*findings: dict[str, object]) -> ReviewOutput:
-    rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    ordered = sorted(
-        findings,
-        key=lambda item: (
-            rank[cast(str, item["severity"])],
-            -cast(float, item["confidence"]),
-        ),
-    )
-    return ReviewOutput.model_validate(
-        {
-            "findings": list(ordered),
-            "summary": {
-                "problem": "A required value is not validated.",
-                "done_well": "The endpoint remains small.",
-                "effort": "small",
-            },
-        }
-    )
 
 
 def _trusted_coverage(paths: frozenset[str]) -> RunCoverage:
@@ -167,34 +109,9 @@ def _paths_of(diff_map: DiffMap) -> frozenset[str]:
     )
 
 
-def _count_listed_additional_findings(review_body: str) -> int:
-    """Count whole finding bullets under the Additional findings section (test-side D-3 assert)."""
-    marker = "\n## Additional findings\n"
-    start = review_body.find(marker)
-    if start < 0:
-        return 0
-    tail = review_body[start + len(marker) :]
-    footer_marker = "\n\n**Ещё "
-    footer_at = tail.find(footer_marker)
-    if footer_at >= 0:
-        tail = tail[:footer_at]
-    return sum(1 for line in tail.splitlines() if line.startswith("- **"))
-
-
-def _parse_body_only_overflow_footer_count(review_body: str) -> int:
-    """Read ``N`` from a store-layer overflow footer (with or without a run URL)."""
-    with_url = re.search(r"\n\n\*\*Ещё (\d+) наход(?:ка|ки|ок):\*\*", review_body)
-    if with_url is not None:
-        return int(with_url.group(1))
-    without_url = re.search(r"\n\n\*\*Ещё (\d+) наход(?:ка|ки|ок)\*\*", review_body)
-    return int(without_url.group(1)) if without_url is not None else 0
-
-
-def _body_only_accounted_in_review_body(review_body: str) -> int:
-    """Visible Additional findings bullets plus any overflow footer count (D-3)."""
-    return _count_listed_additional_findings(review_body) + _parse_body_only_overflow_footer_count(
-        review_body
-    )
+def _review_summary_section(review_body: str) -> str:
+    """The body from ``## Review summary``, past the Executive summary block."""
+    return review_body[review_body.index("## Review summary") :]
 
 
 def test_lint_patterns_keep_security_exceptions_and_drop_lint_only_findings() -> None:
@@ -356,12 +273,12 @@ def test_review_body_starts_with_verdict_risk_summary_and_checked_paths() -> Non
         checked_paths=frozenset({"app/example.py", "z/last.py"}),
     )
 
-    assert result.review_body.startswith(
+    assert "**Verdict:** blocking · **Risk Score:** High" in result.review_body
+    assert _review_summary_section(result.review_body).startswith(
         "\n".join(
             (
                 "## Review summary",
                 "",
-                "**Verdict:** blocking",
                 "**Risk summary:** critical: 0, high: 1, medium: 0, low: 0, info: 1",
                 "**Coverage:** partial — Проверка неполная: "
                 "не удалось сопоставить замечание с доступным diff (1).",
@@ -553,9 +470,15 @@ def test_checked_files_are_none_when_the_diff_has_no_paths() -> None:
 
     assert result.review_body == "\n".join(
         (
+            "## Executive summary",
+            "",
+            "**Verdict:** проверка неполная · **Risk Score:** Medium",
+            "",
+            "**What to check:**",
+            "- Не проверено — не удалось сопоставить замечание с доступным diff (1)",
+            "",
             "## Review summary",
             "",
-            "**Verdict:** проверка неполная",
             "**Risk summary:** critical: 0, high: 0, medium: 0, low: 0, info: 0",
             "**Coverage:** partial — Проверка неполная: "
             "не удалось сопоставить замечание с доступным diff (1).",
@@ -649,12 +572,12 @@ def test_character_cap_drops_only_additional_findings() -> None:
         for number in range(1, 7)
     )
     capped = process(finding(title="Blocking defect", severity="high"), *notes)
-    assert capped.review_body.startswith(
+    assert "**Verdict:** blocking · **Risk Score:** High" in capped.review_body
+    assert _review_summary_section(capped.review_body).startswith(
         "\n".join(
             (
                 "## Review summary",
                 "",
-                "**Verdict:** blocking",
                 "**Risk summary:** critical: 0, high: 1, medium: 0, low: 6, info: 0",
                 "**Checked files:**",
                 "- app/example.py",
@@ -885,7 +808,9 @@ def test_critical_threshold_drops_medium_low_and_info_and_turns_attention_into_c
     control = process(*findings)
     result = process(*findings, severity_threshold="critical")
 
-    assert control.review_body.startswith("## Review summary\n\n**Verdict:** attention\n")
+    assert control.review_body.startswith(
+        "## Executive summary\n\n**Verdict:** attention · **Risk Score:** Medium\n"
+    )
     assert "Below severity threshold" not in control.review_body
     assert result.inline == ()
     assert result.body_only == ()
@@ -896,9 +821,12 @@ def test_critical_threshold_drops_medium_low_and_info_and_turns_attention_into_c
     ]
     assert result.review_body == "\n".join(
         (
+            "## Executive summary",
+            "",
+            "**Verdict:** clean · **Risk Score:** Low",
+            "",
             "## Review summary",
             "",
-            "**Verdict:** clean",
             "**Risk summary:** critical: 0, high: 0, medium: 0, low: 0, info: 0",
             "**Below severity threshold (critical):** 3",
             "**Checked files:**",
@@ -962,12 +890,12 @@ def test_risk_summary_counts_only_findings_that_pass_the_threshold() -> None:
         severity_threshold="warning",
     )
 
-    assert result.review_body.startswith(
+    assert "**Verdict:** blocking · **Risk Score:** High" in result.review_body
+    assert _review_summary_section(result.review_body).startswith(
         "\n".join(
             (
                 "## Review summary",
                 "",
-                "**Verdict:** blocking",
                 "**Risk summary:** critical: 0, high: 1, medium: 0, low: 1, info: 0",
                 "**Below severity threshold (warning):** 1",
                 "**Checked files:**",
@@ -1074,12 +1002,12 @@ def test_all_threshold_keeps_the_ten_findings_fixture_result(
     assert [item.finding.line for item in result.inline] == list(range(10, 18))
     assert [item.finding.line for item in result.body_only] == [18, 19]
     assert result.dropped == ()
-    assert result.review_body.startswith(
+    assert "**Verdict:** attention · **Risk Score:** Medium" in result.review_body
+    assert _review_summary_section(result.review_body).startswith(
         "\n".join(
             (
                 "## Review summary",
                 "",
-                "**Verdict:** attention",
                 "**Risk summary:** critical: 0, high: 0, medium: 10, low: 0, info: 0",
                 "**Checked files:**",
                 "- app/modules/billing/application/charge.py",
