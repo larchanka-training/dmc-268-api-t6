@@ -56,7 +56,7 @@ def test_public_agent_instructions_describe_complete_sequence() -> None:
     review_events = re.search(r"`reviewEvent` \(([^)]+)\)", response.text)
     assert review_events is not None
     values = re.findall(r"`([^`]+)`", review_events.group(1))
-    assert values
+    assert values == ["COMMENT", "REQUEST_CHANGES"]
     for value in values:
         assert RepositoryUpdateDto.model_validate({"reviewEvent": value}).review_event == value
 
