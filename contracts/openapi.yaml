@@ -1054,7 +1054,7 @@ paths:
       description: >-
         Public Markdown instructions for the device flow, repository settings,
         Git rules, first review results and revocation. The landing copy points here.
-      x-service: auth-api
+      x-service: portal-api
       security: []
       responses:
         "200":
@@ -1063,6 +1063,8 @@ paths:
             text/markdown:
               schema:
                 type: string
+        "503":
+          description: Agent instructions are unavailable.
   /api/agent/device/start:
     post:
       operationId: startAgentDeviceAuthorization
@@ -1072,7 +1074,7 @@ paths:
         Public bootstrap. The user must approve the GitHub App in GitHub's device flow.
         No GitHub OAuth token or App key is returned to the agent. GitHub App device flow
         must be enabled on the App registration.
-      x-service: auth-api
+      x-service: portal-api
       security: []
       requestBody:
         required: true
@@ -1109,7 +1111,7 @@ paths:
         Poll no more often than the returned interval. On authorization the API uses
         the GitHub user token server-side to link installation grants, then returns
         only a repository-scoped agent token. A device code is one-use.
-      x-service: auth-api
+      x-service: portal-api
       security: []
       requestBody:
         required: true
@@ -1157,7 +1159,7 @@ paths:
       tags: [agent]
       summary: Revoke an agent token owned by the signed-in user
       description: A browser JWT is required; an agent token cannot revoke another token.
-      x-service: auth-api
+      x-service: portal-api
       responses:
         "204":
           description: Token revoked immediately.
