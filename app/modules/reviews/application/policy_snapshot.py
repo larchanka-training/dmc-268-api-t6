@@ -182,7 +182,7 @@ PINNED_PROMPT_CHECKSUMS: dict[str, str] = {
     "review.verifier:v2": "1f676b4fea8477d77b83a106a6c62e78f67d19f71937d4a02093d11a9d276088",
     # The change summary agent is pinned here, not in PromptBindings: it reads this packaged
     # version and checks its bytes against the pin (#316 Part 2).
-    "review.summary:v1": "aea92bf61da79368cc2eb49ba23fd1a842f40cac6bf0b3576dc1d321b58ae0b7",
+    "review.summary:v1": "2286dd3775944dfeac567863295df57221b08952aee00144670f0e84c9215694",
 }
 
 

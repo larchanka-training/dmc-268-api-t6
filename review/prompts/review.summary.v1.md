@@ -62,12 +62,12 @@ Input:
 ```xml
 <pr_title>Clean up old runs</pr_title>
 <changed_files>
-<file path="app/jobs/retention.py" status="added" language="python">
+<file path="app/jobs/retention.py" status="added" language="Python">
 <line n="1" type="added">async def purge_stale_runs(session: AsyncSession, older_than: datetime) -&gt; int:</line>
 <line n="2" type="added">    result = await session.execute(delete(RunDiff).where(RunDiff.created_at &lt; older_than))</line>
 <line n="3" type="added">    return result.rowcount</line>
 </file>
-<file path="app/worker.py" status="modified" language="python">
+<file path="app/worker.py" status="modified" language="Python">
 <line n="40" type="context">    scheduler.add(sweep_no_ci, every=timedelta(minutes=2))</line>
 <line n="41" type="added">    scheduler.add(purge_stale_runs, every=timedelta(days=1))</line>
 </file>
