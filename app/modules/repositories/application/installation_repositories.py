@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
 from app.common.application.languages import classify_languages
@@ -16,6 +17,11 @@ class RepositorySnapshot:
     full_name: str
     default_branch: str
     web_url: str
+    # GitHub's flag; None is unknown, which the public badge reads as not public (#454).
+    private: bool | None = None
+    # The time the flag is known as of, for true and false alike; None when nothing was read,
+    # so a stored flag stays as it is.
+    private_observed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -42,6 +48,7 @@ class InstallationRepositoriesEvent:
     added_repositories: tuple[RepositoryReference, ...]
     removed_repositories: tuple[RepositoryReference, ...]
     delivery_id: str | None = None
+    received_at: datetime | None = None
 
 
 @dataclass(frozen=True)

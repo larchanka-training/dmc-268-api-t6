@@ -93,6 +93,8 @@ class Repository(Base):
             "id",
             postgresql_where=text("installation_available IS true AND workspace_id IS NOT NULL"),
         ),
+        # The anonymous badge finds a repository by name, in any case (#454).
+        Index("ix_repositories_lower_full_name", text("lower(full_name)")),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -108,6 +110,21 @@ class Repository(Base):
     enabled: Mapped[bool] = mapped_column(BOOLEAN, nullable=False, server_default=text("true"))
     installation_available: Mapped[bool] = mapped_column(
         BOOLEAN, nullable=False, server_default=text("true")
+    )
+    # GitHub's own flag (#454). NULL until an event tells it, and NULL reads as not public.
+    private: Mapped[bool | None] = mapped_column(BOOLEAN, nullable=True)
+    # The time ``private`` is known as of: the newest observation wins, so a retried delivery
+    # loses to a later change, and an old one reads as not public.
+    private_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # The same for ``full_name``, a fact of its own: the badge finds a repository by it.
+    full_name_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # The last failed background read of ``private``: such a row is read after the others.
+    private_read_failed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     # The RAG toggle (#145): off by default, and onboarding never turns it on.
     rag_enabled: Mapped[bool] = mapped_column(BOOLEAN, nullable=False, server_default=text("false"))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
@@ -67,6 +68,7 @@ class InstallationDeliveryDispatchStatus(StrEnum):
     FAILED_PUSH_CANDIDATES = "failed_push_candidates"
     FAILED_PUSH_PROVIDER = "failed_push_provider"
     REQUESTED_RULES_REFRESH = "requested_rules_refresh"
+    UPDATED_REPOSITORY_VISIBILITY = "updated_repository_visibility"
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,53 @@ class PushEvent:
 
 
 @dataclass(frozen=True)
+class RepositoryVisibilityEvent:
+    """``repository.privatized`` or ``repository.publicized`` (#454)."""
+
+    installation_external_id: int
+    repository_external_id: int
+    private: bool
+
+
+@dataclass(frozen=True)
+class RepositoryRenamedEvent:
+    """``repository.renamed``: the badge finds a repository by its current name (#454)."""
+
+    installation_external_id: int
+    repository_external_id: int
+    full_name: str
+    web_url: str | None
+
+
+@dataclass(frozen=True)
+class RepositoryTransferredEvent:
+    """``repository.transferred``, sent only to the new owner's installation (#454).
+
+    A row belongs to the installation that connected it, so nothing moves here: the flag is
+    forgotten by the repository id, wherever a row holds it.
+    """
+
+    repository_external_id: int
+
+
+@dataclass(frozen=True)
+class InstallationSuspendedEvent:
+    """``installation.suspend``: no event of its repositories arrives until it ends (#454)."""
+
+    installation_external_id: int
+
+
+# The events the visibility handler records (#454): one name for the annotations and the
+# dispatcher's isinstance, so a new one cannot be left out of either.
+RepositoryVisibilityChange = (
+    RepositoryVisibilityEvent
+    | RepositoryRenamedEvent
+    | RepositoryTransferredEvent
+    | InstallationSuspendedEvent
+)
+
+
+@dataclass(frozen=True)
 class GitHubDispatchEvent:
     """Validated application input from a claimed raw webhook receipt."""
 
@@ -115,8 +164,11 @@ class GitHubDispatchEvent:
         | CiTriggerEvent
         | InstallationRepositoriesEvent
         | PushEvent
+        | RepositoryVisibilityChange
         | UnsupportedGitHubEvent
     )
+    # When the service received it; a retried or revived delivery keeps this time.
+    received_at: datetime | None = None
 
 
 class GitHubInstallationResolver(Protocol):
@@ -172,6 +224,47 @@ class CodeIndexRefreshHandler(Protocol):
     ) -> bool: ...
 
 
+class RepositoryVisibilityHandler(Protocol):
+    """One short transaction, no GitHub call (#454)."""
+
+    async def forget(self, installation_external_id: int, observed_at: datetime) -> bool:
+        """False when the installation has no repository."""
+        ...
+
+    async def overwrite(
+        self,
+        installation_external_id: int,
+        repository_external_id: int,
+        private: bool,
+        observed_at: datetime,
+    ) -> bool:
+        """False when the repository is not connected."""
+        ...
+
+    async def rename(
+        self,
+        installation_external_id: int,
+        repository_external_id: int,
+        full_name: str,
+        web_url: str | None,
+        observed_at: datetime,
+    ) -> bool:
+        """False when the repository is not connected."""
+        ...
+
+    async def forget_repository(self, repository_external_id: int, observed_at: datetime) -> bool:
+        """False when no installation holds the repository."""
+        ...
+
+    async def learn(
+        self,
+        installation_external_id: int,
+        repository_external_id: int,
+        private: bool,
+        observed_at: datetime,
+    ) -> None: ...
+
+
 class GitHubInstallationDeliveryDispatcher:
     """Safely route supported GitHub installation events to onboarding.
 
@@ -190,6 +283,7 @@ class GitHubInstallationDeliveryDispatcher:
         run_trigger: WebhookRunTriggerHandler | None = None,
         rules_refresh: RulesRefreshOnPushHandler | None = None,
         index_refresh: CodeIndexRefreshHandler | None = None,
+        repository_visibility: RepositoryVisibilityHandler | None = None,
     ) -> None:
         self._resolver = resolver
         self._onboarding = onboarding
@@ -198,6 +292,7 @@ class GitHubInstallationDeliveryDispatcher:
         self._run_trigger = run_trigger
         self._rules_refresh = rules_refresh
         self._index_refresh = index_refresh
+        self._repository_visibility = repository_visibility
 
     async def execute(self, delivery: GitHubDispatchEvent) -> InstallationDeliveryDispatchResult:
         event = delivery.value
@@ -206,7 +301,11 @@ class GitHubInstallationDeliveryDispatcher:
                 status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
                 detail=_with_action(event.action, None),
             )
+        observed_at = delivery.received_at or datetime.now(UTC)
+        if isinstance(event, RepositoryVisibilityChange):
+            return await self._visibility_result(event, observed_at)
         if isinstance(event, PullRequestLabelEvent):
+            await self._learn_visibility(event.pull_request, observed_at)
             action = event.pull_request.action
             if event.label_name != "ai-review":
                 return InstallationDeliveryDispatchResult(
@@ -233,6 +332,7 @@ class GitHubInstallationDeliveryDispatcher:
                 return self._trigger_result(outcome, result.status, action)
             return result
         if isinstance(event, PullRequestEvent):
+            await self._learn_visibility(event, observed_at)
             if event.action in {"review_requested", "review_request_removed"}:
                 return InstallationDeliveryDispatchResult(
                     status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
@@ -282,7 +382,9 @@ class GitHubInstallationDeliveryDispatcher:
         try:
             await self._onboarding.execute(
                 provider_installation_id=provider_installation_id,
-                event=replace(event, delivery_id=delivery.delivery_id),
+                event=replace(
+                    event, delivery_id=delivery.delivery_id, received_at=delivery.received_at
+                ),
             )
         except (RepositoryDetailsUnavailableError, InstallationAccessTokenError) as error:
             # A token GitHub could not issue is a read it cannot answer either: same deferral.
@@ -300,6 +402,67 @@ class GitHubInstallationDeliveryDispatcher:
         return InstallationDeliveryDispatchResult(
             status=InstallationDeliveryDispatchStatus.ONBOARDED
         )
+
+    async def _visibility_result(
+        self,
+        event: RepositoryVisibilityChange,
+        observed_at: datetime,
+    ) -> InstallationDeliveryDispatchResult:
+        visibility = self._repository_visibility
+        if visibility is None:
+            return InstallationDeliveryDispatchResult(
+                status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+            )
+        unknown = "unknown_repository"
+        if isinstance(event, RepositoryVisibilityEvent):
+            known = await visibility.overwrite(
+                event.installation_external_id,
+                event.repository_external_id,
+                event.private,
+                observed_at,
+            )
+        elif isinstance(event, RepositoryRenamedEvent):
+            known = await visibility.rename(
+                event.installation_external_id,
+                event.repository_external_id,
+                event.full_name,
+                event.web_url,
+                observed_at,
+            )
+        elif isinstance(event, RepositoryTransferredEvent):
+            known = await visibility.forget_repository(event.repository_external_id, observed_at)
+        else:
+            unknown = "unknown_installation"
+            known = await visibility.forget(event.installation_external_id, observed_at)
+        if not known:
+            # Not deferred: connecting a repository reads its visibility and name anyway.
+            return InstallationDeliveryDispatchResult(
+                status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+                detail=unknown,
+            )
+        return InstallationDeliveryDispatchResult(
+            status=InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
+        )
+
+    async def _learn_visibility(self, event: PullRequestEvent, observed_at: datetime) -> None:
+        """Before any early return: every pull request delivery carries the flag. A failure is
+        logged and never fails the delivery, the next one carries the flag again (#454)."""
+        if self._repository_visibility is None or event.repository_private is None:
+            return
+        # CONTRACT: `Exception` only, so a cancellation still stops the delivery.
+        try:
+            await self._repository_visibility.learn(
+                event.installation_external_id,
+                event.repository_external_id,
+                event.repository_private,
+                observed_at,
+            )
+        except Exception:
+            _LOGGER.exception(
+                "Failed to record the visibility of repository %s of installation %s",
+                event.repository_external_id,
+                event.installation_external_id,
+            )
 
     async def _refresh_index_on_merge(self, event: PullRequestEvent) -> bool:
         """A merge into the default branch named by the payload requests an index update

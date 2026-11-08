@@ -79,6 +79,9 @@ class WebhookReceipt:
     origin_repository_id: UUID | None = None
     origin_binding_generation: int | None = None
     origin_webhook_generation: int | None = None
+    # Set on a claimed receipt, from the row, so that every attempt carries the same time. Not
+    # part of what the delivery is: a claimed receipt equals the one that was stored.
+    received_at: datetime | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if self.provider not in {"github", "gitlab", "bitbucket"}:

@@ -24,11 +24,16 @@ from app.modules.integrations.webhooks.api.pull_request_dtos import (
     parse_pull_request_label_event,
 )
 from app.modules.integrations.webhooks.api.push_event_dtos import parse_push_event
+from app.modules.integrations.webhooks.api.repository_event_dtos import (
+    REPOSITORY_EVENT_PARSERS,
+    parse_installation_suspended_event,
+)
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     GitHubDispatchEvent,
     InstallationDeliveryDispatchResult,
     InstallationDeliveryDispatchStatus,
     PushEvent,
+    RepositoryVisibilityChange,
     UnsupportedGitHubEvent,
     _with_action,
 )
@@ -96,6 +101,7 @@ class GitHubWebhookDispatchAdapter:
             | CiTriggerEvent
             | InstallationRepositoriesEvent
             | PushEvent
+            | RepositoryVisibilityChange
             | UnsupportedGitHubEvent
         )
         if event_name == "pull_request":
@@ -129,6 +135,22 @@ class GitHubWebhookDispatchAdapter:
                     InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT,
                     _invalid_payload(error),
                 )
+        elif event_name == "repository" and (parse := REPOSITORY_EVENT_PARSERS.get(action or "")):
+            try:
+                value = parse(payload)
+            except (ValueError, ValidationError) as error:
+                return InstallationDeliveryDispatchResult(
+                    InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT,
+                    _invalid_payload(error),
+                )
+        elif event_name == "installation" and action == "suspend":
+            try:
+                value = parse_installation_suspended_event(payload)
+            except (ValueError, ValidationError) as error:
+                return InstallationDeliveryDispatchResult(
+                    InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT,
+                    _invalid_payload(error),
+                )
         elif event_name in {"installation", "installation_repositories"}:
             try:
                 value = parse_installation_repositories_event(
@@ -143,7 +165,9 @@ class GitHubWebhookDispatchAdapter:
                 )
         else:
             value = UnsupportedGitHubEvent(event_name, action)
-        return await self._dispatcher.execute(GitHubDispatchEvent(delivery.delivery_id, value))
+        return await self._dispatcher.execute(
+            GitHubDispatchEvent(delivery.delivery_id, value, delivery.received_at)
+        )
 
 
 def _invalid_payload(error: ValueError) -> str:

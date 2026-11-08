@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from functools import partial
 from typing import Protocol
 from uuid import UUID
@@ -47,6 +48,7 @@ class RepositoryDetails:
 
     default_branch: str
     web_url: str
+    private: bool | None = None
 
 
 class RepositoryDetailsUnavailableError(Exception):
@@ -210,7 +212,10 @@ class InstallationEventProjector:
                     return _SKIPPED
                 try:
                     return await self._onboard_repository(
-                        provider_installation_id, event.installation_external_id, reference
+                        provider_installation_id,
+                        event.installation_external_id,
+                        reference,
+                        event.received_at,
                     )
                 except InstallationRetiredError:
                     _LOGGER.info(
@@ -288,9 +293,12 @@ class InstallationEventProjector:
         provider_installation_id: UUID,
         installation_external_id: int,
         reference: RepositoryReference,
+        observed_at: datetime | None,
     ) -> RepositoryOnboardingInput | _Skipped:
         checkpoint = partial(self._checkpoint, provider_installation_id)
-        repository = await self._resolve(installation_external_id, reference, checkpoint=checkpoint)
+        repository = await self._resolve(
+            installation_external_id, reference, observed_at=observed_at, checkpoint=checkpoint
+        )
         if not await self._installation_active(provider_installation_id):
             return _SKIPPED
         tree = await self._tree_provider.fetch_default_branch_tree(
@@ -322,6 +330,7 @@ class InstallationEventProjector:
         installation_external_id: int,
         reference: RepositoryReference,
         *,
+        observed_at: datetime | None,
         checkpoint: InstallationProviderCheckpoint,
     ) -> RepositorySnapshot:
         """Complete a reference; a missing branch or URL is read from GitHub for both."""
@@ -342,4 +351,8 @@ class InstallationEventProjector:
             full_name=reference.full_name,
             default_branch=details.default_branch,
             web_url=details.web_url,
+            private=details.private,
+            # Older than the read, so a change received after the delivery always wins; a
+            # revived delivery ends with an old stamp, which the background re-read replaces.
+            private_observed_at=observed_at,
         )

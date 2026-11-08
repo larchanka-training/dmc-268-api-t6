@@ -358,6 +358,39 @@ included), usually more than the `pull_request` receipts. On staging, with a few
 repositories, that is tens to a few hundred receipts a day. If it grows enough to matter for
 the receipt table, dropping non-default-branch pushes before storing them is a separate change.
 
+Repository visibility. The public README badge shows a repository only when
+`repositories.private` is `false` and was confirmed within 72 hours (#454, `docs/SYSTEM_DESIGN.md`
+§8.2). Every write carries the time the flag was known, in `private_observed_at`, and only a newer
+one applies; a tie goes to the side that closes. An event takes the `received_at` of its receipt,
+which a retry or a revival keeps, so an old delivery loses to a later change.
+
+- `repository.privatized` and `publicized` overwrite the flag; `renamed` writes `full_name` and
+  `web_url` under `full_name_observed_at`; `transferred` arrives only at the new owner's installation,
+  so it moves no row and clears the flag wherever a GitHub installation holds that repository id. One
+  short transaction each, no GitHub call. A repository that is not connected ends as
+  `ignored_irrelevant_event` with `detail=unknown_repository`; the other `repository` actions end as
+  `ignored_irrelevant_event`.
+- `installation.suspend` clears the flag of every repository of the installation, because no event
+  arrives until the suspension ends; `detail=unknown_installation` when it has none.
+  `installation.unsuspend` does nothing.
+- Each supported `pull_request` action passes `repository.private` of its payload before any early
+  return: it fills `NULL` or closes, never opens. A failed write is logged and does not fail the
+  delivery. An absent or invalid value teaches nothing and never rejects the payload.
+- The hourly maintenance pass reads up to 50 connected repositories not confirmed for 24 hours,
+  oldest first, by `GET /repositories/{id}`, outside any transaction, with a time taken before the
+  batch. 200 writes the flag and the name; any other final answer, and a token GitHub refuses with
+  403 or 404, write `NULL`, so the row steps back a day. A network error, a 5xx, a 401, a 429 or a
+  rate limit (`Retry-After`, `X-RateLimit-Remaining: 0`), and an unexpected error in the read, is a
+  failed read: it keeps the flag and writes only `private_read_failed_at`, and three of them end the
+  pass, so an outage holds the scan for a few timeouts only. The queue orders by the later of the
+  last read and the last failure, so a repository that fails for days goes behind the others and
+  cannot hold their reads back; the log line of each failed read names it.
+
+The Repository subscription of the GitHub App is a manual step of the App settings (staging, dev
+and sandbox Apps alike; Permissions & events, Subscribe to events, Repository). It needs no new
+permission, `metadata: read` is enough. Without it nothing fails: a change of visibility or name
+reaches the badge with the next maintenance read, within a day.
+
 Installation events. GitHub sends each repository of `installation.created`,
 `installation_repositories.added` and the removal events as `id`, `node_id`, `name`,
 `full_name` and `private` only. The parser requires `id` and `full_name` and ignores the
@@ -523,7 +556,8 @@ GitHub webhook delivery <delivery_id> event=<event> status=<status> detail=<deta
 ```
 
 `status` is the dispatch status: `projected_pr`, `processed_ci`, `onboarded`,
-`requested_rules_refresh` (a `push` to the default branch, see "Rules status reads"), the final
+`requested_rules_refresh` (a `push` to the default branch, see "Rules status reads"),
+`updated_repository_visibility` (see "Repository visibility"), the final
 `ignored_irrelevant_event` and `ignored_invalid_event`, or a deferral
 (`ignored_unknown_installation`, `ignored_unknown_repository`, `deferred_known_event`,
 `deferred_repository_details`, retried as described in "Deferred deliveries" below;

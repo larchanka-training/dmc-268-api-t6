@@ -1,0 +1,43 @@
+"""Remember whether a repository is private, and find it by name in any case (#454).
+
+Revision ID: 20261106_0059
+Revises: 20261104_0058
+"""
+
+from __future__ import annotations
+
+import sqlalchemy as sa
+
+from alembic import op
+
+revision = "20261106_0059"
+down_revision = "20261104_0058"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    # No backfill: NULL reads as not public until a webhook tells the visibility.
+    op.add_column("repositories", sa.Column("private", sa.Boolean(), nullable=True))
+    op.add_column(
+        "repositories", sa.Column("private_observed_at", sa.DateTime(timezone=True), nullable=True)
+    )
+    op.add_column(
+        "repositories",
+        sa.Column("full_name_observed_at", sa.DateTime(timezone=True), nullable=True),
+    )
+    op.add_column(
+        "repositories",
+        sa.Column("private_read_failed_at", sa.DateTime(timezone=True), nullable=True),
+    )
+    op.create_index(
+        "ix_repositories_lower_full_name", "repositories", [sa.text("lower(full_name)")]
+    )
+
+
+def downgrade() -> None:
+    op.drop_index("ix_repositories_lower_full_name", table_name="repositories")
+    op.drop_column("repositories", "private_read_failed_at")
+    op.drop_column("repositories", "full_name_observed_at")
+    op.drop_column("repositories", "private_observed_at")
+    op.drop_column("repositories", "private")
