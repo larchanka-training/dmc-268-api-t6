@@ -1792,8 +1792,62 @@ tests:
       - expr: sla:downtime_seconds:month{host="ui.example.test"}
         eval_time: 1h30m
         exp_samples: []
+      # The first probe is at 02:01: a name first probed in the middle of an hour has no completed
+      # hour yet, and the current-hour term alone gives its series from the first 5-minute step
+      # (02:05): 5 failed probes of 5 in the step = 300 s. The step from 02:55 to 03:00 (3 300 s to
+      # 3 600 s) shows that the hour boundary counts nothing twice.
+      - expr: round(sla:downtime_seconds:month{host="ui.example.test"})
+        eval_time: 2h05m
+        exp_samples:
+          - labels: '{environment="prod", host="ui.example.test"}'
+            value: 300
+      - expr: round(sla:downtime_seconds:month{host="ui.example.test"})
+        eval_time: 2h30m
+        exp_samples:
+          - labels: '{environment="prod", host="ui.example.test"}'
+            value: 1800
+      - expr: round(sla:downtime_seconds:month{host="ui.example.test"})
+        eval_time: 2h55m
+        exp_samples:
+          - labels: '{environment="prod", host="ui.example.test"}'
+            value: 3300
+      - expr: round(sla:downtime_seconds:month{host="ui.example.test"})
+        eval_time: 3h
+        exp_samples:
+          - labels: '{environment="prod", host="ui.example.test"}'
+            value: 3600
+      # The SLA tiles of the Grafana dashboard on the same first step: 1 - 300 s / 7 500 s elapsed =
+      # 0.96, and 300 s of the allowance of 13 392 s (31 days) = 0.022401.
+      - expr: round(sla:availability_ratio:month{host="ui.example.test"} * 10000)
+        eval_time: 2h05m
+        exp_samples:
+          - labels: '{environment="prod", host="ui.example.test"}'
+            value: 9600
+      - expr: round(sla:downtime_budget_spent:ratio{host="ui.example.test"} * 1000000)
+        eval_time: 2h05m
+        exp_samples:
+          - labels: '{environment="prod", host="ui.example.test"}'
+            value: 22401
       - expr: sla:downtime_seconds:month{host="ui.example.test"}
         eval_time: 6h35m
+        exp_samples: []
+
+  # The gate on the 30 minutes applies to the current-hour term alone too: a name that is probed,
+  # stays up and leaves the probes in its first hour (probes 02:01..02:19, its series ends at 02:20)
+  # has a series while the last probe is within 30 minutes, with 0 s of downtime, and none once it
+  # is not, at 02:55, though the current-hour term would still have a series.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox", environment="prod", host="gate.example.test", instance="https://gate.example.test/"}'
+        values: "_x121 1x18 stale"
+    promql_expr_test:
+      - expr: round(sla:downtime_seconds:month{host="gate.example.test"})
+        eval_time: 2h15m
+        exp_samples:
+          - labels: '{environment="prod", host="gate.example.test"}'
+            value: 0
+      - expr: round(sla:downtime_seconds:month{host="gate.example.test"})
+        eval_time: 2h55m
         exp_samples: []
 
   # Time to review of the fast engine (target: p95 up to 4 minutes, SD §13). A p95 of 300 s over
