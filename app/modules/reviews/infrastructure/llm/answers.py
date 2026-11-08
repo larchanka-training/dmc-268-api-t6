@@ -44,6 +44,12 @@ REVIEW_OUTPUT_V2_SCHEMA_PATH = (
 VERIFIER_OUTPUT_SCHEMA_PATH = (
     Path(__file__).resolve().parents[5] / "review" / "schemas" / "verifier-output.schema.v1.json"
 )
+CHANGE_SUMMARY_OUTPUT_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[5]
+    / "review"
+    / "schemas"
+    / "change-summary-output.schema.v1.json"
+)
 _ANNOTATIONS = frozenset({"$schema", "$id", "$comment"})
 # Python's ``$`` also matches before a final newline, so a schema file ends a ``pattern``
 # with this lookahead; ECMA-262 ``$`` without the ``m`` flag already means the end of input.
@@ -277,6 +283,38 @@ def verifier_answer_without_reasons(content: str) -> str:
     allowed = {"candidate_id", "status", "evidence_refs", "requirement_refs"}
     stored = output.model_dump(mode="json", include={"decisions": {"__all__": allowed}})
     return json.dumps(stored, ensure_ascii=False)
+
+
+@cache
+def change_summary_output_schema() -> dict[str, Any]:
+    """The ChangeSummaryOutput shape of the change summary agent (draft 2020-12, #316)."""
+    loaded: dict[str, Any] = json.loads(
+        CHANGE_SUMMARY_OUTPUT_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    return loaded
+
+
+@cache
+def _change_summary_validator() -> Draft202012Validator:
+    return Draft202012Validator(change_summary_output_schema())
+
+
+def validate_change_summary_answer(content: str) -> dict[str, object]:
+    """Return the accepted change summary JSON object or raise ``InvalidAnswer``.
+
+    The schema is the whole contract: 1 to 3 one-line sentences and no other field. Its
+    errors earn the gateway's one bounded repair, as the verifier's do.
+    """
+    decoded = _decode_object_fail_closed(content)
+    errors = [
+        _schema_error(error)
+        for error in sorted(
+            _change_summary_validator().iter_errors(decoded), key=lambda item: item.json_path
+        )
+    ][:_MAX_ERRORS]
+    if errors:
+        raise InvalidAnswer(errors)
+    return decoded
 
 
 def conventions_answer_validator(

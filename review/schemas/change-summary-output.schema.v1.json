@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/larchanka-training/dmc-268-api-t6/main/review/schemas/change-summary-output.schema.v1.json",
+  "title": "ChangeSummaryOutput",
+  "description": "Structured output of the change summary agent (prompt review.summary, docs/PIPELINE_SPEC.md §4.5): what a pull request changes, in 1 to 3 sentences.",
+  "type": "object",
+  "required": ["sentences"],
+  "additionalProperties": false,
+  "properties": {
+    "sentences": {
+      "type": "array",
+      "description": "1 to 3 sentences, one per item.",
+      "minItems": 1,
+      "maxItems": 3,
+      "items": {
+        "type": "string",
+        "description": "One sentence on one line, with at least one non-blank character.",
+        "minLength": 1,
+        "maxLength": 200,
+        "pattern": "^[^\\r\\n]*\\S[^\\r\\n]*(?![\\s\\S])"
+      }
+    }
+  }
+}

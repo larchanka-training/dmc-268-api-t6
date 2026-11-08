@@ -65,6 +65,7 @@ def test_load_prompt_assets_preserves_full_file_and_checksum() -> None:
     assert [(asset.key, asset.version) for asset in assets] == [
         ("review.conventions", 1),
         ("review.conventions", 2),
+        ("review.summary", 1),
         ("review.system", 1),
         ("review.system", 2),
         ("review.system", 3),
@@ -121,6 +122,20 @@ def test_seeded_verifier_checksums_match_the_builder_reading() -> None:
         assert sha256(builder_reading.encode("utf-8")).hexdigest() == asset.checksum
 
 
+def test_the_change_summary_pin_is_the_seeded_checksum_and_the_packaged_bytes() -> None:
+    # The change summary agent reads its packaged prompt and checks it against this pin.
+    (summary,) = [
+        asset
+        for asset in load_prompt_assets(REPO_ROOT / "review" / "prompts")
+        if asset.key == "review.summary"
+    ]
+
+    assert summary.version == 1
+    assert summary.checksum == PINNED_PROMPT_CHECKSUMS["review.summary:v1"]
+    packaged = files("review.prompts").joinpath("review.summary.v1.md").read_bytes()
+    assert sha256(packaged).hexdigest() == summary.checksum
+
+
 def test_load_prompt_assets_preserves_crlf_bytes_and_checksum(tmp_path: Path) -> None:
     source_bytes = b"---\r\nkey: review.system\r\nversion: 1\r\n---\r\nPrompt\r\n"
     source_path = tmp_path / "review.system.v1.md"
@@ -170,13 +185,14 @@ def test_first_seed_makes_the_newest_version_of_each_prompt_active(
                     .order_by(PromptVersion.key)
                 )
                 active_versions = [(key, version) for key, version in rows.tuples().all()]
-                assert inserted == 9
+                assert inserted == 10
                 return active_versions
         finally:
             await engine.dispose()
 
     assert asyncio.run(seed_and_read_active_versions()) == [
         ("review.conventions", 2),
+        ("review.summary", 1),
         ("review.system", 5),
         ("review.verifier", 2),
     ]
