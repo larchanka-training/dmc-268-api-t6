@@ -11,6 +11,7 @@ from uuid import UUID
 
 import pytest
 
+from app.common.domain.run_enums import Engine, RunStatus
 from app.main import app, get_run_event_hub, get_run_repository, get_run_step_hub
 from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
 from app.modules.reviews.application.list_runs import RunListItem
@@ -32,15 +33,15 @@ UPDATED_AT = datetime(2026, 10, 7, 12, 34, 56, 123457, tzinfo=UTC)
 UPDATED_AT_ID = "1791376496123457"
 
 
-def make_item(status: str = "running") -> RunListItem:
+def make_item(status: RunStatus = RunStatus.RUNNING) -> RunListItem:
     created_at = datetime(2026, 9, 25, tzinfo=UTC)
     return RunListItem(
         provider="github",
         id=RUN_ID,
         status=status,
-        engine="fast",
+        engine=Engine.FAST,
         attempt=0,
-        cancel_requested=status == "running",
+        cancel_requested=status == RunStatus.RUNNING,
         started_at=created_at,
         finished_at=None,
         error_code=None,
@@ -217,7 +218,7 @@ def test_failed_cancellation_transaction_publishes_nothing() -> None:
 
 def test_repeated_or_terminal_cancellation_does_not_publish_an_update() -> None:
     hub = InMemoryRunUpdateHub()
-    repository = CancelRepository(make_item("cancelled"), changed=False)
+    repository = CancelRepository(make_item(RunStatus.CANCELLED), changed=False)
 
     async def cancel_and_assert_empty() -> None:
         async with hub.subscribe() as events:
