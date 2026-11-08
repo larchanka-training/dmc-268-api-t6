@@ -12,7 +12,10 @@ from app.bootstrap.agent_access import get_agent_device_access, get_agent_tokens
 from app.bootstrap.portal_auth import get_auth_scope
 from app.main import app
 from app.modules.auth.application.agent_device_access import DeviceChallenge, DeviceOutcome
-from app.modules.auth.application.agent_tokens import IssuedAgentToken
+from app.modules.auth.application.agent_tokens import (
+    AgentTokenRevocationForbidden,
+    IssuedAgentToken,
+)
 from app.modules.auth.application.scope import AuthScope
 from app.modules.repositories.api.dtos import RepositoryUpdateDto
 
@@ -74,8 +77,10 @@ def test_device_endpoints_return_only_agent_token() -> None:
 
 
 class FakeTokens:
-    async def revoke(self, user_id: int, token_id: object) -> bool:
-        assert user_id == 42
+    async def revoke(self, scope: AuthScope, token_id: object) -> bool:
+        assert scope.user_id == 42
+        if scope.agent_repository_id is not None:
+            raise AgentTokenRevocationForbidden
         return True
 
 

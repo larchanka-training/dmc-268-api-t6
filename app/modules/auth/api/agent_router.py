@@ -21,7 +21,11 @@ from app.modules.auth.application.agent_device_access import (
     AgentDeviceAccess,
     DevicePollTooSoon,
 )
-from app.modules.auth.application.agent_tokens import AgentTokens, RepositoryNotAvailable
+from app.modules.auth.application.agent_tokens import (
+    AgentTokenRevocationForbidden,
+    AgentTokens,
+    RepositoryNotAvailable,
+)
 from app.modules.auth.application.exchange_github_code import GitHubProviderUnavailable
 from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.api.dtos import UtcDatetime
@@ -127,8 +131,12 @@ async def revoke_agent_token(
     scope: Annotated[AuthScope, Depends(get_auth_scope)],
     tokens: Annotated[AgentTokens, Depends(get_agent_tokens)],
 ) -> Response:
-    if scope.agent_repository_id is not None:
-        raise HTTPException(status_code=403, detail="agent token cannot revoke other tokens")
-    if not await tokens.revoke(scope.user_id, token_id):
+    try:
+        revoked = await tokens.revoke(scope, token_id)
+    except AgentTokenRevocationForbidden as exc:
+        raise HTTPException(
+            status_code=403, detail="agent token cannot revoke other tokens"
+        ) from exc
+    if not revoked:
         raise HTTPException(status_code=404, detail="agent token not found")
     return Response(status_code=204)
