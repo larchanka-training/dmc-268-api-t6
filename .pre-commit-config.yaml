@@ -3,11 +3,11 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        # Prompt wire goldens, dataset patches and raw answers retain their exact bytes.
-        exclude: ^(?:tests/fixtures/prompt_builder/[^/]+\.txt|test-prs-dataset/(?:.*\.patch|responses/(?!manifest\.json$)[^/]+\.json))$
+        # Prompt wire goldens, dataset patches, raw answers and the oracle's rendered prompts retain their exact bytes.
+        exclude: ^(?:tests/fixtures/prompt_builder/[^/]+\.txt|test-prs-dataset/(?:.*\.patch|responses/(?!manifest\.json$)[^/]+\.json)|test-prs-dataset/rag/oracle/context/[^/]+\.txt)$
       - id: end-of-file-fixer
-        # Preserve generated SVG, prompt wire goldens, patches and raw answers byte-for-byte.
-        exclude: ^(?:docs/erd/erd\.svg|tests/fixtures/prompt_builder/[^/]+\.txt|test-prs-dataset/(?:.*\.patch|responses/(?!manifest\.json$)[^/]+\.json))$
+        # Preserve generated SVG, prompt wire goldens, patches, raw answers and the oracle's rendered prompts byte-for-byte.
+        exclude: ^(?:docs/erd/erd\.svg|tests/fixtures/prompt_builder/[^/]+\.txt|test-prs-dataset/(?:.*\.patch|responses/(?!manifest\.json$)[^/]+\.json)|test-prs-dataset/rag/oracle/context/[^/]+\.txt)$
       - id: check-yaml
       - id: check-toml
       - id: check-merge-conflict

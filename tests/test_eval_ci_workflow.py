@@ -485,6 +485,10 @@ RAG_COMMANDS = [
     "uv run --locked python review/scripts/build_rag_snapshot.py "
     "--check test-prs-dataset/rag/cases",
 ]
+RAG_REPLAY = (
+    "uv run --locked python review/scripts/eval_replay.py --root test-prs-dataset/rag "
+    '--responses-dir "${capture}" --report-json "${rag_replays}/${name}.json"'
+)
 
 
 def test_required_ci_validates_the_rag_corpus_in_its_own_last_step_after_the_rules_corpus() -> None:
@@ -493,14 +497,16 @@ def test_required_ci_validates_the_rag_corpus_in_its_own_last_step_after_the_rul
 
     # The unit job's last step: its text runs up to the blank line before the next job.
     body = step.split("        run: |\n", 1)[1]
-    assert [line.strip() for line in body.splitlines() if line.strip()] == RAG_COMMANDS
+    assert [line.strip() for line in body.splitlines() if line.strip()][:2] == RAG_COMMANDS
+    assert RAG_REPLAY in body
+    # ``shell: bash`` is what gives the step ``-eo pipefail``.
+    assert "        shell: bash\n        run: |\n" in step
     assert "--profile rag" not in _job_step(job, "Rules sub-corpus")
     assert job.index("      - name: Rules sub-corpus\n") < job.index(
         "      - name: RAG sub-corpus\n"
     )
     assert re.findall(r"(?m)^      - name: (.+)$", job)[-1] == "RAG sub-corpus"
     assert not re.search(r"(?m)^        (?:if|continue-on-error):", step)
-    assert "replay" not in body
 
 
 @pytest.mark.parametrize("failing", [0, 1])
@@ -535,6 +541,84 @@ def test_required_ci_rag_corpus_failure_of_either_command_fails_its_step(
     assert result.returncode == 33
     calls = (tmp_path / "args").read_text(encoding="utf-8").splitlines()
     assert calls == [item.removeprefix("uv ") for item in RAG_COMMANDS][: failing + 1]
+
+
+def _run_rag_step(
+    tmp_path: Path, *, failing_capture: str | None = None
+) -> tuple[subprocess.CompletedProcess[str], str, list[str]]:
+    """The RAG step with a shim ``uv``: replays write a fixture report, one may fail."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "uv"
+    shim.write_text(
+        "#!/bin/bash\n"
+        'case "$4" in\n'
+        "  review/scripts/validate_dataset.py|review/scripts/build_rag_snapshot.py) ;;\n"
+        "  review/scripts/eval_replay.py)\n"
+        '    printf "%s\\n" "$*" >> "$ARGS_LOG"\n'
+        '    if [[ "$*" == *"responses/${FAIL_CAPTURE:-none}/"* ]]; then echo broken; exit 33; fi\n'
+        '    cp "$FIXTURE_REPLAY" "${@: -1}" ;;\n'
+        '  -) exec "$PYTHON_EXE" - ;;\n'
+        "  *) exit 41 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    for name in ("A-run1", "B-run1"):
+        (tmp_path / "test-prs-dataset/rag/responses" / name).mkdir(parents=True)
+    replay = tmp_path / "replay.json"
+    replay.write_text(json.dumps(_report()), encoding="utf-8")
+    summary = tmp_path / "summary.md"
+    command = _job_step(_python_job(), "RAG sub-corpus").split("        run: |\n", 1)[1]
+    result = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", textwrap.dedent(command)],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "ARGS_LOG": str(tmp_path / "args"),
+            "PYTHON_EXE": sys.executable,
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_STEP_SUMMARY": str(summary),
+            "FIXTURE_REPLAY": str(replay),
+            "FAIL_CAPTURE": failing_capture or "none",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    calls = sorted((tmp_path / "args").read_text(encoding="utf-8").splitlines())
+    return result, summary.read_text(encoding="utf-8") if summary.exists() else "", calls
+
+
+def test_required_ci_rag_step_replays_every_capture_and_summarizes_each(tmp_path: Path) -> None:
+    result, summary, calls = _run_rag_step(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert [call.split("--responses-dir ")[1].split()[0] for call in calls] == [
+        "test-prs-dataset/rag/responses/A-run1/",
+        "test-prs-dataset/rag/responses/B-run1/",
+    ]
+    assert summary == (
+        "## RAG captures\n\n| Capture | Recall | Precision | Validity |\n|---|---|---|---|\n"
+        "| A-run1 | 66.7% | 66.7% | 50.0% |\n| B-run1 | 66.7% | 66.7% | 50.0% |\n"
+    )
+    assert "::warning::A-run1: Static input digest mismatch" in result.stdout
+    assert "::warning::B-run1: Static input digest mismatch" in result.stdout
+
+
+@pytest.mark.parametrize(("failing", "passing"), [("A-run1", "B-run1"), ("B-run1", "A-run1")])
+def test_required_ci_rag_step_fails_when_one_capture_replay_fails(
+    tmp_path: Path, failing: str, passing: str
+) -> None:
+    result, summary, calls = _run_rag_step(tmp_path, failing_capture=failing)
+
+    # The first and the last capture in turn: a later success must not overwrite the status.
+    assert result.returncode == 33
+    assert f"::error::RAG replay of {failing} failed (exit 33)" in result.stdout
+    assert len(calls) == 2
+    assert f"| {passing} | 66.7% |" in summary
+    assert f"| {failing} | replay failed, no report | | |" in summary
 
 
 def test_required_ci_rules_corpus_failure_fails_its_step(tmp_path: Path) -> None:

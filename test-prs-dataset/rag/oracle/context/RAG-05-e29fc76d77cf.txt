@@ -1,0 +1,62 @@
+<repository_rules block_id="policy-rules" path=".review/rules.md" status="absent" />
+<project_conventions_document block_id="policy-agents" path="AGENTS.md" status="absent" />
+<repo_conventions>
+<key_patterns>
+
+</key_patterns>
+<recommendations>
+
+</recommendations>
+</repo_conventions>
+<pr_meta>
+<title>Review proposed change</title>
+<description></description>
+<author>gold-corpus</author>
+<source_branch>eval</source_branch>
+<target_branch>main</target_branch>
+<labels></labels>
+<files_changed>1</files_changed>
+<lines_added>1</lines_added>
+<lines_removed>1</lines_removed>
+<draft>false</draft>
+<fork>false</fork>
+<head_sha>e35a6b92a654ba3100891e15207efd9afcf09a73</head_sha>
+</pr_meta>
+<changed_files>
+<file block_id="file-weather-forecast-py-d954d275" path="weather/forecast.py" status="modified" language="Python">
+<line n="4" type="context">from .stations import read_station</line>
+<line n="5" type="context"></line>
+<line n="6" type="context"></line>
+<line n="7" type="removed">def get_forecast(city: str) -&gt; Forecast:</line>
+<line n="7" type="added">def fetch_forecast(city: str) -&gt; Forecast:</line>
+<line n="8" type="context">    high, low = read_station(city)</line>
+<line n="9" type="context">    return Forecast(city, high, low)</line>
+</file>
+</changed_files>
+<context_excerpts>
+<excerpt block_id="L4:e35a6b92a654:8cd7d89cae22d2aa" level="L4" path="weather/models.py" revision="e35a6b92a654ba3100891e15207efd9afcf09a73" side="RIGHT" representation="signature">
+<line n="6">@dataclass(frozen=True)</line>
+<line n="7">class Forecast:</line>
+<line n="8">    """Daily temperatures of one city, in degrees Celsius."""</line>
+</excerpt>
+<excerpt block_id="L4:e35a6b92a654:22c6ba9f398663c2" level="L4" path="weather/stations.py" revision="e35a6b92a654ba3100891e15207efd9afcf09a73" side="RIGHT" representation="signature">
+<line n="6">def read_station(city: str) -&gt; tuple[int, int]:</line>
+</excerpt>
+<excerpt block_id="L3:b8ea2f30bdc97f27ff074e29500f581d:1-9" level="L3" path="weather/forecast.py" revision="e35a6b92a654ba3100891e15207efd9afcf09a73" side="RIGHT" representation="exact_lines">
+<line n="1">"""Forecast lookup."""</line>
+<line n="2"></line>
+<line n="3">from .models import Forecast</line>
+<line n="4">from .stations import read_station</line>
+<line n="5"></line>
+<line n="6"></line>
+<line n="7">def fetch_forecast(city: str) -&gt; Forecast:</line>
+<line n="8">    high, low = read_station(city)</line>
+<line n="9">    return Forecast(city, high, low)</line>
+</excerpt>
+</context_excerpts>
+<retrieved_excerpts>
+
+</retrieved_excerpts>
+<omitted_files>
+
+</omitted_files>

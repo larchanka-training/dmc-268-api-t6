@@ -1,0 +1,63 @@
+<repository_rules block_id="policy-rules" path=".review/rules.md" status="absent" />
+<project_conventions_document block_id="policy-agents" path="AGENTS.md" status="absent" />
+<repo_conventions>
+<key_patterns>
+
+</key_patterns>
+<recommendations>
+
+</recommendations>
+</repo_conventions>
+<pr_meta>
+<title>Review proposed change</title>
+<description></description>
+<author>gold-corpus</author>
+<source_branch>eval</source_branch>
+<target_branch>main</target_branch>
+<labels></labels>
+<files_changed>1</files_changed>
+<lines_added>2</lines_added>
+<lines_removed>2</lines_removed>
+<draft>false</draft>
+<fork>false</fork>
+<head_sha>4c6cc7c093c1900c46c2e1fff111927f6a9112ad</head_sha>
+</pr_meta>
+<changed_files>
+<file block_id="file-src-dates-ts-1eacb927" path="src/dates.ts" status="modified" language="TypeScript">
+<line n="5" type="context">}</line>
+<line n="6" type="context"></line>
+<line n="7" type="context">export function endOfDay(day: Date): Date {</line>
+<line n="8" type="removed">  const end = new Date(day);</line>
+<line n="9" type="removed">  end.setHours(23, 59, 59, 999);</line>
+<line n="8" type="added">  const end = startOfDay(day);</line>
+<line n="9" type="added">  end.setDate(end.getDate() + 1);</line>
+<line n="10" type="context">  return end;</line>
+<line n="11" type="context">}</line>
+</file>
+</changed_files>
+<context_excerpts>
+<excerpt block_id="L3:56523a9207c456324123ae1a7cf027f1:1-11" level="L3" path="src/dates.ts" revision="4c6cc7c093c1900c46c2e1fff111927f6a9112ad" side="RIGHT" representation="exact_lines">
+<line n="1">export function startOfDay(day: Date): Date {</line>
+<line n="2">  const start = new Date(day);</line>
+<line n="3">  start.setHours(0, 0, 0, 0);</line>
+<line n="4">  return start;</line>
+<line n="5">}</line>
+<line n="6"></line>
+<line n="7">export function endOfDay(day: Date): Date {</line>
+<line n="8">  const end = startOfDay(day);</line>
+<line n="9">  end.setDate(end.getDate() + 1);</line>
+<line n="10">  return end;</line>
+<line n="11">}</line>
+</excerpt>
+</context_excerpts>
+<retrieved_excerpts>
+<excerpt block_id="RAG:4c6cc7c093c1:942d58d26a0fdca0" level="RAG" path="src/range.ts" revision="4c6cc7c093c1900c46c2e1fff111927f6a9112ad" side="RIGHT" representation="exact_lines">
+<line n="1">import { endOfDay, startOfDay } from "./dates";</line>
+<line n="7">export function rangeEnd(day: Date): Date {</line>
+<line n="8">  return endOfDay(day);</line>
+<line n="9">}</line>
+</excerpt>
+</retrieved_excerpts>
+<omitted_files>
+
+</omitted_files>

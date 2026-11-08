@@ -1,0 +1,79 @@
+<repository_rules block_id="policy-rules" path=".review/rules.md" status="absent" />
+<project_conventions_document block_id="policy-agents" path="AGENTS.md" status="absent" />
+<repo_conventions>
+<key_patterns>
+
+</key_patterns>
+<recommendations>
+
+</recommendations>
+</repo_conventions>
+<pr_meta>
+<title>Review proposed change</title>
+<description></description>
+<author>gold-corpus</author>
+<source_branch>eval</source_branch>
+<target_branch>main</target_branch>
+<labels></labels>
+<files_changed>1</files_changed>
+<lines_added>4</lines_added>
+<lines_removed>0</lines_removed>
+<draft>false</draft>
+<fork>false</fork>
+<head_sha>0d206fd8c6490c1a9b04ae458dab0d7bf85d35c3</head_sha>
+</pr_meta>
+<changed_files>
+<file block_id="file-uploads-retention-py-65279d55" path="uploads/retention.py" status="modified" language="Python">
+<line n="2" type="context"></line>
+<line n="3" type="context">from .storage import delete, list_older_than</line>
+<line n="4" type="context"></line>
+<line n="5" type="added">MIN_RETENTION_DAYS = 30</line>
+<line n="6" type="added"></line>
+<line n="7" type="context"></line>
+<line n="8" type="context">def purge_older_than(days: int) -&gt; int:</line>
+<line n="9" type="context">    """Delete uploads older than the given number of days and count them."""</line>
+<line n="10" type="added">    if days &lt; MIN_RETENTION_DAYS:</line>
+<line n="11" type="added">        raise ValueError(f"retention below {MIN_RETENTION_DAYS} days is not allowed")</line>
+<line n="12" type="context">    removed = 0</line>
+<line n="13" type="context">    for name in list_older_than(days):</line>
+<line n="14" type="context">        delete(name)</line>
+</file>
+</changed_files>
+<context_excerpts>
+<excerpt block_id="L4:0d206fd8c649:a78567a5786309c3" level="L4" path="uploads/storage.py" revision="0d206fd8c6490c1a9b04ae458dab0d7bf85d35c3" side="RIGHT" representation="signature">
+<line n="10">def delete(name: str) -&gt; None:</line>
+</excerpt>
+<excerpt block_id="L4:0d206fd8c649:bbe7da0b6020977c" level="L4" path="uploads/storage.py" revision="0d206fd8c6490c1a9b04ae458dab0d7bf85d35c3" side="RIGHT" representation="signature">
+<line n="6">def list_older_than(days: int) -&gt; list[str]:</line>
+</excerpt>
+<excerpt block_id="L3:bf669cdfd2339f6e061b4949beca8e75:1-16" level="L3" path="uploads/retention.py" revision="0d206fd8c6490c1a9b04ae458dab0d7bf85d35c3" side="RIGHT" representation="exact_lines">
+<line n="1">"""Retention of stored uploads."""</line>
+<line n="2"></line>
+<line n="3">from .storage import delete, list_older_than</line>
+<line n="4"></line>
+<line n="5">MIN_RETENTION_DAYS = 30</line>
+<line n="6"></line>
+<line n="7"></line>
+<line n="8">def purge_older_than(days: int) -&gt; int:</line>
+<line n="9">    """Delete uploads older than the given number of days and count them."""</line>
+<line n="10">    if days &lt; MIN_RETENTION_DAYS:</line>
+<line n="11">        raise ValueError(f"retention below {MIN_RETENTION_DAYS} days is not allowed")</line>
+<line n="12">    removed = 0</line>
+<line n="13">    for name in list_older_than(days):</line>
+<line n="14">        delete(name)</line>
+<line n="15">        removed += 1</line>
+<line n="16">    return removed</line>
+</excerpt>
+</context_excerpts>
+<retrieved_excerpts>
+<excerpt block_id="RAG:0d206fd8c649:70fd05457a156a7a" level="RAG" path="uploads/jobs.py" revision="0d206fd8c6490c1a9b04ae458dab0d7bf85d35c3" side="RIGHT" representation="exact_lines">
+<line n="3">from .retention import purge_older_than</line>
+<line n="6">def nightly_cleanup() -&gt; str:</line>
+<line n="7">    ttl_days = 7</line>
+<line n="8">    removed = purge_older_than(ttl_days)</line>
+<line n="9">    return f"purged {removed} uploads"</line>
+</excerpt>
+</retrieved_excerpts>
+<omitted_files>
+
+</omitted_files>
