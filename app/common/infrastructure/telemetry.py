@@ -105,21 +105,71 @@ def bind_run_id(run_id: UUID | str) -> Iterator[None]:
 
 # --- logs -----------------------------------------------------------------------------------
 
+_AUTH_HEADER_PATTERN = re.compile(
+    r"""(?i)(["']?Authorization["']?\s*[:=]\s*["']?(?:Bearer\s+|Basic\s+|token\s+)?)[^\s,;"'<>]+(["']?)"""
+)
+_GITHUB_TOKEN_PATTERN = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,})\b"
+)
+_JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\b")
+
+_SECRET_ENV_SUBSTRINGS = ("SECRET", "KEY", "TOKEN", "PASSWORD", "CREDENTIAL", "AI_")
+_SECRET_IGNORE_ENV_KEYS = frozenset(
+    {"KEYMAP", "SSH_AUTH_SOCK", "TERM_PROGRAM", "TERM", "COLORTERM"}
+)
+
+
+def _get_configured_secrets(extra_secrets: Sequence[str] = ()) -> tuple[str, ...]:
+    """Collect secret values configured in the environment and process parameters (#468)."""
+    secrets: set[str] = set(extra_secrets)
+    for key, value in os.environ.items():
+        if not value or key in _SECRET_IGNORE_ENV_KEYS:
+            continue
+        if any(sub in key.upper() for sub in _SECRET_ENV_SUBSTRINGS):
+            trimmed = value.strip()
+            if trimmed.startswith("{") and trimmed.endswith("}"):
+                with suppress(Exception):
+                    data = json.loads(trimmed)
+                    if isinstance(data, dict):
+                        for val in data.values():
+                            if isinstance(val, str) and len(val.strip()) >= 4:
+                                secrets.add(val.strip())
+            for part in value.split(","):
+                cleaned = part.strip("'\" \t\r\n")
+                if len(cleaned) >= 4 and not cleaned.startswith("http"):
+                    secrets.add(cleaned)
+    return tuple(sorted([s for s in secrets if s], key=len, reverse=True))
+
+
+def scrub_secrets(text: str, extra_secrets: Sequence[str] = ()) -> str:
+    """Scrub tokens, JWTs, Authorization headers and configured process secrets (#468)."""
+    if not text:
+        return text
+    text = _AUTH_HEADER_PATTERN.sub(r"\1***\2", text)
+    text = _GITHUB_TOKEN_PATTERN.sub("***", text)
+    text = _JWT_PATTERN.sub("***", text)
+    for secret in _get_configured_secrets(extra_secrets):
+        if secret in text:
+            text = text.replace(secret, "***")
+    return text
+
 
 class JsonFormatter(logging.Formatter):
     """One JSON object per line: time, level, logger, message, ``run_id``, trace ids, error."""
 
-    def __init__(self, service: str) -> None:
+    def __init__(self, service: str, *, secrets: Sequence[str] | None = None) -> None:
         super().__init__()
         self._service = service
+        self._secrets: tuple[str, ...] = tuple(secrets) if secrets is not None else ()
 
     def format(self, record: logging.LogRecord) -> str:
+        message = scrub_secrets(record.getMessage(), self._secrets)
         entry: dict[str, Any] = {
             "ts": datetime.fromtimestamp(record.created, UTC).isoformat(timespec="milliseconds"),
             "level": record.levelname,
             "service": self._service,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": message,
         }
         # A delivery binds run_id; elsewhere a call site passes extra={"run_id": ...}. These two
         # extras are the only ones read: any other extra may hold a body and stays out.
@@ -132,7 +182,7 @@ class JsonFormatter(logging.Formatter):
             entry["span_id"] = format(context.span_id, "016x")
         if record.exc_info and record.exc_info[1] is not None:
             entry["error_type"] = type(record.exc_info[1]).__name__
-            entry["exc_info"] = safe_stack(record.exc_info[1])
+            entry["exc_info"] = scrub_secrets(safe_stack(record.exc_info[1]), self._secrets)
         elif isinstance(record.__dict__.get("error_type"), str):
             entry["error_type"] = record.__dict__["error_type"]
         return json.dumps(entry, ensure_ascii=False, default=str)
@@ -176,7 +226,9 @@ _UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 _QUIET_LOGGERS = ("httpx", "httpcore")
 
 
-def configure_logging(service: str, *, level: int = logging.INFO) -> None:
+def configure_logging(
+    service: str, *, level: int = logging.INFO, secrets: Sequence[str] | None = None
+) -> None:
     """JSON lines on stderr from the root logger; idempotent, keeps foreign handlers (pytest)."""
     root = logging.getLogger()
     root.setLevel(level)
@@ -186,7 +238,7 @@ def configure_logging(service: str, *, level: int = logging.INFO) -> None:
             root.removeHandler(handler)
     handler = logging.StreamHandler(sys.stderr)
     handler.set_name(_HANDLER_NAME)
-    handler.setFormatter(JsonFormatter(service))
+    handler.setFormatter(JsonFormatter(service, secrets=secrets))
     root.addHandler(handler)
     span_errors = SpanErrorHandler()
     span_errors.set_name(_SPAN_HANDLER_NAME)
