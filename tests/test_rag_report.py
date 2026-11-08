@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GATE = ROOT / "test-prs-dataset" / "rag" / "reports" / "gate.json"
 REPORT = ROOT / "docs" / "test-plan" / "RAG_V1_CONTRIBUTION_REPORT.md"
 CAPTURES = ROOT / "test-prs-dataset" / "rag" / "responses"
-CASES = ROOT / "test-prs-dataset" / "rag" / "cases"
+PROMPTS = ROOT / "test-prs-dataset" / "rag" / "oracle" / "context"
 ORACLE = ROOT / "test-prs-dataset" / "rag" / "oracle" / "hallucination.json"
 RUN_IDS = {  # test-prs-dataset/rag/README.md "Captures"
     "A-run1": "41720614606",
@@ -187,12 +187,12 @@ def test_each_injection_row_carries_its_finding_and_anchor() -> None:
         (("conditions", "precision", "exact"), "-2575/459"),
         (("conditions", "tokens", "exact"), "4316/4239"),
         (("conditions", "injections", "exact"), "3"),
-        (("conditions", "hallucination", "exact"), "-125/51"),
+        (("conditions", "hallucination", "exact"), "-2675/459"),
         (("conditions", "hallucination", "status"), "pass"),
         (("oracle", "present"), True),
         (("oracle", "runs_covered"), 6),
-        (("arms", "rag_off", "hallucination_mean", "exact"), "35/108"),
-        (("arms", "rag_on", "hallucination_mean", "exact"), "275/918"),
+        (("arms", "rag_off", "hallucination_mean", "exact"), "13/27"),
+        (("arms", "rag_on", "hallucination_mean", "exact"), "259/612"),
         (("warnings",), STATIC_DRIFT_WARNINGS),
         (("arms", "rag_off", "recall_mean", "exact"), "1/30"),
         (("arms", "rag_on", "recall_mean", "exact"), "7/30"),
@@ -243,21 +243,14 @@ def test_the_report_provenance_is_that_of_the_capture_manifests() -> None:
         _assert_row("| Индекс RAG", [manifest["run_metadata"]["rag_index_digest"]])
 
 
-def _confirmed_hallucinations() -> list[tuple[str, str, int, str, str]]:
-    """``(run, case, finding index, "path:line", title)`` of every entry of the committed oracle."""
+def _confirmed_hallucinations() -> set[tuple[str, str, int]]:
+    """``(run, case, finding index)`` of every entry of the committed oracle."""
     oracle = json.loads(ORACLE.read_text(encoding="utf-8"))
-    confirmed = []
-    for run_id, entry in oracle["runs"].items():
-        for item in entry["hallucinations"]:
-            answer = json.loads(
-                (CAPTURES / run_id / f"{item['case_id']}.json").read_text(encoding="utf-8")
-            )
-            finding = answer["findings"][item["finding_index"]]
-            anchor = f"{finding['path']}:{finding['line']}"
-            confirmed.append(
-                (run_id, item["case_id"], item["finding_index"], anchor, finding["title"])
-            )
-    return confirmed
+    return {
+        (run_id, item["case_id"], item["finding_index"])
+        for run_id, entry in oracle["runs"].items()
+        for item in entry["hallucinations"]
+    }
 
 
 def test_each_oracle_entry_is_a_finding_of_a_valid_answer() -> None:
@@ -283,24 +276,41 @@ def test_the_gate_numerators_are_the_oracle_entry_counts_per_run() -> None:
     }
 
 
-def test_the_report_lists_each_confirmed_hallucination_with_its_anchor_and_no_other() -> None:
+def _reviewed_findings() -> set[tuple[str, str, int]]:
+    """``(run, case, finding index)`` of every finding of every valid answer: the gate's 76."""
+    return {
+        (run["run_id"], name.removesuffix(".json"), index)
+        for run in _gated_runs()
+        for name in _valid_answers(CAPTURES / run["run_id"])
+        for index in range(
+            len(
+                json.loads((CAPTURES / run["run_id"] / name).read_text(encoding="utf-8"))[
+                    "findings"
+                ]
+            )
+        )
+    }
+
+
+def test_the_report_lists_each_reviewed_finding_once_with_its_title_and_prompt() -> None:
     confirmed = _confirmed_hallucinations()
 
-    rows = {(row[0], row[1]): row for row in _table("| Прогон | Кейс #индекс |")}
-    for run_id, case_id, index, anchor, title in confirmed:
-        assert (CASES / case_id).is_dir(), case_id
-        _, _, listed_anchor, _, listed_title, context = rows[(run_id, f"{case_id} #{index}")]
-
-        assert listed_anchor == f"`{anchor}`", (run_id, case_id, index)
-        assert listed_title == title.replace("|", "\\|"), (run_id, case_id, index)
-        assert context == f"[{case_id}](../../test-prs-dataset/rag/cases/{case_id}/)"
-    listed = [
-        row
-        for row in REPORT.read_text(encoding="utf-8").splitlines()
-        if re.match(r"\| [AB]-run\d \| RAG-\d+ #\d+ \|", row)
-    ]
-    assert (
-        len(listed)
-        == len(confirmed)
-        == sum(run["hallucination"]["numerator"] for run in _gated_runs())
+    rows = _table("| Прогон | Кейс #индекс |")
+    listed = [(row[0], *row[1].split(" #")) for row in rows]
+    assert len(listed) == len(set(listed)) == 76
+    assert {(run_id, case_id, int(index)) for run_id, case_id, index in listed} == (
+        _reviewed_findings()
     )
+    for run_id, key, anchor, _, title, _, hallucination, *_, link in rows:
+        case_id, index = key.split(" #")
+        manifest = json.loads((CAPTURES / run_id / "manifest.json").read_text(encoding="utf-8"))
+        digest = manifest["run_metadata"]["rag_evidence"][case_id]["prompt_digest"]
+        file_name = f"{case_id}-{digest.removeprefix('sha256-v1:')[:12]}.txt"
+        answer = json.loads((CAPTURES / run_id / f"{case_id}.json").read_text(encoding="utf-8"))
+        finding = answer["findings"][int(index)]
+
+        assert anchor == f"`{finding['path']}:{finding['line']}`", (run_id, key)
+        assert title == finding["title"].replace("|", "\\|"), (run_id, key)
+        assert (hallucination == "д") == ((run_id, case_id, int(index)) in confirmed), (run_id, key)
+        assert link == f"[{file_name}](../../test-prs-dataset/rag/oracle/context/{file_name})"
+        assert (PROMPTS / file_name).is_file(), (run_id, key)

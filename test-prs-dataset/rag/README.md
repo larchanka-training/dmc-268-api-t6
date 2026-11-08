@@ -83,6 +83,6 @@ done
 
 The recorded result and the computed gate verdict are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md); `reports/gate.json` is the gate script's output it quotes.
 
-`oracle/hallucination.json` is the hallucination oracle the gate takes with `--oracle`: the 24 findings the tech lead confirmed by hand on 2026-11-04 among all 76 findings of the valid answers; the decisions are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md#оракул-галлюцинаций).
+`oracle/hallucination.json` is the hallucination oracle the gate takes with `--oracle`: the 34 of 76 findings of the valid answers the tech lead confirmed in the second pass over all 76 findings on 2026-11-08 (part 1 partly pre-labelled by an LLM, every mark checked by hand); the decisions are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md#оракул-галлюцинаций).
 
 A replay needs no network and no key; it rebuilds every case from its frozen `index.json` and takes about 40 seconds. The CI step "RAG sub-corpus" runs it for all six and fails on a non-zero exit; `tests/test_rag_captures.py` fails when a capture is missing, mislabelled or from a different model, prompt or corpus.

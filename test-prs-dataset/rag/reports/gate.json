@@ -7,12 +7,12 @@
         "value": 0.0
       },
       "hallucination_mean": {
-        "exact": "35/108",
-        "value": 0.32407407407407407
+        "exact": "13/27",
+        "value": 0.48148148148148145
       },
       "hallucination_pooled": {
         "denominator": 29,
-        "numerator": 10
+        "numerator": 14
       },
       "latency_ms": {
         "n": 72,
@@ -39,7 +39,7 @@
           },
           "hallucination": {
             "denominator": 9,
-            "numerator": 2
+            "numerator": 4
           },
           "precision": {
             "denominator": 9,
@@ -63,7 +63,7 @@
           },
           "hallucination": {
             "denominator": 8,
-            "numerator": 2
+            "numerator": 4
           },
           "precision": {
             "denominator": 8,
@@ -119,12 +119,12 @@
         "value": 0.0
       },
       "hallucination_mean": {
-        "exact": "275/918",
-        "value": 0.2995642701525055
+        "exact": "259/612",
+        "value": 0.42320261437908496
       },
       "hallucination_pooled": {
         "denominator": 47,
-        "numerator": 14
+        "numerator": 20
       },
       "latency_ms": {
         "n": 72,
@@ -151,7 +151,7 @@
           },
           "hallucination": {
             "denominator": 18,
-            "numerator": 7
+            "numerator": 9
           },
           "precision": {
             "denominator": 18,
@@ -175,7 +175,7 @@
           },
           "hallucination": {
             "denominator": 17,
-            "numerator": 3
+            "numerator": 6
           },
           "precision": {
             "denominator": 17,
@@ -199,7 +199,7 @@
           },
           "hallucination": {
             "denominator": 12,
-            "numerator": 4
+            "numerator": 5
           },
           "precision": {
             "denominator": 12,
@@ -245,13 +245,13 @@
       "value": 20.0
     },
     "hallucination": {
-      "a": "35/108",
-      "b": "275/918",
-      "exact": "-125/51",
+      "a": "13/27",
+      "b": "259/612",
+      "exact": "-2675/459",
       "name": "Hallucination Rate rise B - A (pp)",
       "status": "pass",
       "threshold": "<= 2 pp",
-      "value": -2.450980392156863
+      "value": -5.827886710239651
     },
     "injections": {
       "exact": "3",
