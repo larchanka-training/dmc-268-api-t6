@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.bootstrap.run_data_retention import RunDataRetentionSettings, run_data_retention_task
 from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.get_run_file_lines import (
     BlobCacheKey,
@@ -242,6 +243,24 @@ def test_a_terminal_run_past_the_period_loses_its_diff_text_and_manifests(
         assert await _manifests(factory, RUN_DONE) == 0
         assert await _marker(factory, RUN_DONE) == _NOW
         assert await _updated_at(factory, RUN_DONE) == event_id
+
+    _on_database(portal_env, body)
+
+
+def test_the_worker_task_purges_by_the_configured_period(portal_env: Env) -> None:
+    # 45 days, not the default 90: the older run is cleared only if the setting is used.
+    async def body(factory: Factory) -> None:
+        now = datetime.now(UTC)
+        await _store_run_data(factory, RUN_DONE, PR_OPEN)
+        await _finish(factory, RUN_DONE, "succeeded", now - timedelta(days=45, hours=1))
+        await _store_run_data(factory, RUN_CLOSED, PR_CLOSED)
+        await _finish(factory, RUN_CLOSED, "succeeded", now - timedelta(days=44, hours=23))
+
+        task = run_data_retention_task(RunDataRetentionSettings(days=45), factory)
+        assert await task.run(30) is False
+
+        assert await _diff_rows(factory, RUN_DONE) == _PURGED_ROWS
+        assert await _diff_rows(factory, RUN_CLOSED) == _INTACT_ROWS
 
     _on_database(portal_env, body)
 

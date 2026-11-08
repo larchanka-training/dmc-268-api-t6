@@ -59,10 +59,6 @@ class PurgeExpiredRunData:
         self._clock = clock
         self._due = -math.inf
 
-    @property
-    def retention(self) -> timedelta:
-        return self._retention
-
     async def tick(self) -> None:
         """Run a pass of the worker leader once the interval has passed.
 
