@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hmac
+import json
 import logging
+import re
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -90,6 +94,68 @@ class BindingPosition:
     installation_id: UUID
     full_name: str
     repository_id: UUID
+
+
+@dataclass(frozen=True)
+class ConnectionPage:
+    connections: tuple[RepositoryBinding, ...]
+    next_cursor: str | None
+
+
+_CONNECTION_PAGE_SIZE = 100
+_CURSOR_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,1024}\Z")
+_CURSOR_FIELDS = {"v", "workspace", "installation", "name", "repository"}
+
+
+def _encode_connection_cursor(position: BindingPosition) -> str:
+    payload = {
+        "v": 1,
+        "workspace": str(position.workspace_id),
+        "installation": str(position.installation_id),
+        "name": position.full_name,
+        "repository": str(position.repository_id),
+    }
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_connection_cursor(cursor: str, workspace_id: UUID) -> BindingPosition:
+    if _CURSOR_PATTERN.fullmatch(cursor) is None:
+        raise BitbucketManagementError("invalid_cursor")
+    try:
+        raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
+        payload = json.loads(raw)
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise BitbucketManagementError("invalid_cursor") from None
+    if not isinstance(payload, dict) or type(payload.get("v")) is not int:
+        raise BitbucketManagementError("invalid_cursor")
+    if payload["v"] != 1:
+        raise BitbucketManagementError("cursor_expired")
+    if payload.keys() != _CURSOR_FIELDS:
+        raise BitbucketManagementError("invalid_cursor")
+    workspace = payload["workspace"]
+    installation = payload["installation"]
+    repository = payload["repository"]
+    name = payload["name"]
+    if (
+        not all(isinstance(value, str) for value in (workspace, installation, repository, name))
+        or not 1 <= len(name) <= 257
+        or "\x00" in name
+    ):
+        raise BitbucketManagementError("invalid_cursor")
+    try:
+        name.encode("utf-8")
+        position = BindingPosition(UUID(workspace), UUID(installation), name, UUID(repository))
+    except (UnicodeEncodeError, ValueError):
+        raise BitbucketManagementError("invalid_cursor") from None
+    if (
+        position.workspace_id != workspace_id
+        or str(position.workspace_id) != workspace
+        or str(position.installation_id) != installation
+        or str(position.repository_id) != repository
+    ):
+        raise BitbucketManagementError("invalid_cursor")
+    return position
 
 
 @dataclass(frozen=True)
@@ -253,6 +319,15 @@ class BitbucketManagementStore(RepositoryRuleVersionStore, Protocol):
 
     async def list_bindings(
         self, *, workspace_id: UUID, installation_id: UUID | None = None
+    ) -> tuple[RepositoryBinding, ...]: ...
+
+    async def list_bindings_page(
+        self,
+        *,
+        workspace_id: UUID,
+        installation_id: UUID | None,
+        after: BindingPosition | None,
+        limit: int,
     ) -> tuple[RepositoryBinding, ...]: ...
 
     async def is_webhook_confirmed(
@@ -435,12 +510,31 @@ class ManageBitbucketConnection:
             workspace_slug=workspace_slug, token=token, cursor=cursor
         )
 
-    async def list_connections(
-        self, *, scope: AuthScope, workspace_id: UUID
-    ) -> tuple[RepositoryBinding, ...]:
+    async def list_connections_page(
+        self, *, scope: AuthScope, workspace_id: UUID, cursor: str | None
+    ) -> ConnectionPage:
         async with self._uow_factory() as uow:
             await self._require_member(uow.connections, scope, workspace_id, lock=False)
-            return await uow.connections.list_bindings(workspace_id=workspace_id)
+            after = _decode_connection_cursor(cursor, workspace_id) if cursor is not None else None
+            bindings = await uow.connections.list_bindings_page(
+                workspace_id=workspace_id,
+                installation_id=None,
+                after=after,
+                limit=_CONNECTION_PAGE_SIZE,
+            )
+        connections = bindings[:_CONNECTION_PAGE_SIZE]
+        if len(bindings) <= _CONNECTION_PAGE_SIZE:
+            return ConnectionPage(connections, None)
+        last = connections[-1]
+        next_cursor = _encode_connection_cursor(
+            BindingPosition(
+                workspace_id,
+                last.installation_id,
+                last.position_full_name or last.full_name,
+                last.repository_id,
+            )
+        )
+        return ConnectionPage(connections, next_cursor)
 
     async def disconnect(
         self,

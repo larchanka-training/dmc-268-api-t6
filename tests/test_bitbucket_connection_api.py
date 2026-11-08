@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from types import SimpleNamespace, TracebackType
 from typing import Self, cast
 from uuid import UUID
@@ -31,7 +32,9 @@ from app.modules.integrations.bitbucket.application.manage_connection import (
     BitbucketManagementUnitOfWork,
     BitbucketRepositoryProvider,
     BitbucketRotationProbeError,
+    ConnectionPage,
     ManageBitbucketConnection,
+    RepositoryBinding,
 )
 from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
     BitbucketCredentialCipher,
@@ -95,7 +98,10 @@ def test_connected_slug_bounds_are_in_http_schema_without_bounding_discovery() -
         "pullrequest:fulfilled",
         "pullrequest:rejected",
     ]
-    assert schemas["ConnectionList"]["properties"]["nextCursor"]["type"] == "null"
+    assert schemas["ConnectionList"]["properties"]["nextCursor"]["anyOf"] == [
+        {"type": "string"},
+        {"type": "null"},
+    ]
     for field in ("bitbucketWorkspace", "repositorySlug"):
         assert schemas["ConnectRequest"]["properties"][field]["maxLength"] == 128
 
@@ -756,33 +762,34 @@ def test_rotation_failure_reports_only_safe_code_and_optional_repository_uuid(
 def test_bitbucket_connection_list_shows_per_repository_webhook_confirmation() -> None:
     from datetime import UTC, datetime
 
-    from app.modules.integrations.bitbucket.application.manage_connection import RepositoryBinding
-
     installation, first, second = UUID(int=333), UUID(int=334), UUID(int=335)
 
     class ListedManager:
-        async def list_connections(self, **_kwargs: object) -> tuple[RepositoryBinding, ...]:
-            return (
-                RepositoryBinding(
-                    installation,
-                    first,
-                    UUID(int=336),
-                    "team/first",
-                    "https://bitbucket.org/team/first",
-                    1,
-                    1,
-                    datetime.now(UTC),
+        async def list_connections_page(self, **_kwargs: object) -> ConnectionPage:
+            return ConnectionPage(
+                (
+                    RepositoryBinding(
+                        installation,
+                        first,
+                        UUID(int=336),
+                        "team/first",
+                        "https://bitbucket.org/team/first",
+                        1,
+                        1,
+                        datetime.now(UTC),
+                    ),
+                    RepositoryBinding(
+                        installation,
+                        second,
+                        UUID(int=337),
+                        "team/second",
+                        "https://bitbucket.org/team/second",
+                        1,
+                        1,
+                        None,
+                    ),
                 ),
-                RepositoryBinding(
-                    installation,
-                    second,
-                    UUID(int=337),
-                    "team/second",
-                    "https://bitbucket.org/team/second",
-                    1,
-                    1,
-                    None,
-                ),
+                None,
             )
 
         def webhook_url(self, installation_id: UUID, repository_id: UUID) -> str:
@@ -800,3 +807,110 @@ def test_bitbucket_connection_list_shows_per_repository_webhook_confirmation() -
         str(first): "active",
         str(second): "awaiting_webhook",
     }
+
+
+class _PagingManager:
+    def __init__(self) -> None:
+        self.calls: list[str | None] = []
+
+    async def list_connections_page(
+        self, *, scope: AuthScope, workspace_id: UUID, cursor: str | None
+    ) -> ConnectionPage:
+        assert scope.user_id == 42
+        assert workspace_id == WORKSPACE
+        self.calls.append(cursor)
+        if cursor is None:
+            return ConnectionPage(
+                (
+                    RepositoryBinding(
+                        UUID(int=360),
+                        UUID(int=361),
+                        UUID(int=362),
+                        "team/repo",
+                        "https://bitbucket.org/team/repo",
+                        1,
+                        1,
+                        None,
+                    ),
+                ),
+                "next-page",
+            )
+        if cursor == "next-page":
+            return ConnectionPage((), None)
+        raise BitbucketManagementError("cursor_expired" if cursor == "old" else "invalid_cursor")
+
+    def webhook_url(self, installation_id: UUID, repository_id: UUID) -> str:
+        assert (installation_id, repository_id) == (UUID(int=360), UUID(int=361))
+        return "https://portal.test/webhooks/bitbucket"
+
+
+@pytest.fixture
+def connection_paging_client() -> Iterator[tuple[TestClient, _PagingManager]]:
+    manager = _PagingManager()
+    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (WORKSPACE,))
+    app.dependency_overrides[get_bitbucket_management] = lambda: manager
+    try:
+        yield TestClient(app), manager
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_connection_list_follows_cursor(
+    connection_paging_client: tuple[TestClient, _PagingManager],
+) -> None:
+    client, manager = connection_paging_client
+    url = f"/api/workspaces/{WORKSPACE}/bitbucket/connections"
+    first = client.get(url)
+    second = client.get(url, params={"cursor": "next-page"})
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["nextCursor"] == "next-page"
+    assert first.json()["connections"][0]["repositoryId"] == str(UUID(int=361))
+    assert second.json() == {"connections": [], "nextCursor": None}
+    assert manager.calls == [None, "next-page"]
+
+
+@pytest.mark.parametrize(
+    ("cursor", "status", "code"),
+    [
+        ("bad", 400, "invalid_cursor"),
+        ("foreign", 400, "invalid_cursor"),
+        ("old", 409, "cursor_expired"),
+    ],
+)
+def test_connection_list_maps_cursor_errors(
+    connection_paging_client: tuple[TestClient, _PagingManager],
+    cursor: str,
+    status: int,
+    code: str,
+) -> None:
+    client, manager = connection_paging_client
+    response = client.get(
+        f"/api/workspaces/{WORKSPACE}/bitbucket/connections", params={"cursor": cursor}
+    )
+
+    assert (response.status_code, response.json()) == (status, {"detail": code})
+    assert manager.calls == [cursor]
+
+
+@pytest.mark.parametrize("cursor", ["", "x" * 1025])
+def test_connection_list_rejects_invalid_query_cursor_before_management(
+    connection_paging_client: tuple[TestClient, _PagingManager], cursor: str
+) -> None:
+    client, manager = connection_paging_client
+    response = client.get(
+        f"/api/workspaces/{WORKSPACE}/bitbucket/connections", params={"cursor": cursor}
+    )
+
+    assert response.status_code == 422
+    assert manager.calls == []
+
+
+def test_connection_list_rejects_nonmember_workspace_before_management(
+    connection_paging_client: tuple[TestClient, _PagingManager],
+) -> None:
+    client, manager = connection_paging_client
+    response = client.get(f"/api/workspaces/{UUID(int=999)}/bitbucket/connections")
+
+    assert response.status_code == 404
+    assert manager.calls == []

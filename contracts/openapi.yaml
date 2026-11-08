@@ -513,17 +513,26 @@ paths:
       tags: [bitbucket]
       summary: List active Bitbucket repository bindings in one portal workspace
       description: >-
-        Returns all active bindings for this workspace. The response's `nextCursor` is always
-        null; internal binding scans use bounded pages without exposing a public cursor.
+        Returns up to 100 active bindings in deterministic order. Pass the opaque, workspace-bound
+        `nextCursor` as `cursor` for the next page. A null `nextCursor` means there are no more
+        bindings. A malformed or foreign-workspace cursor returns 400; an unsupported cursor
+        version returns 409.
       x-service: portal-api
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string, minLength: 1, maxLength: 1024 }
       responses:
         "200":
-          description: Active bindings; secrets are omitted.
+          description: One page of active bindings; secrets are omitted.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BitbucketConnectionList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/BitbucketConflict" }
         "422": { $ref: "#/components/responses/BitbucketValidationFailed" }
         "503": { $ref: "#/components/responses/BitbucketUnavailable" }
     post:
@@ -2088,7 +2097,7 @@ components:
         connections:
           type: array
           items: { $ref: "#/components/schemas/BitbucketConnectionItem" }
-        nextCursor: { type: "null" }
+        nextCursor: { type: [string, "null"] }
       additionalProperties: false
     BitbucketCredentialRotateRequest:
       type: object

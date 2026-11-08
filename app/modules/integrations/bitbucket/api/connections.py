@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Literal, NoReturn
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import ConfigDict, Field, field_validator
 
 from app.bootstrap.bitbucket import get_bitbucket_management, get_bitbucket_workspace_scope
@@ -144,7 +144,7 @@ class ConnectionItem(ApiDto):
 
 class ConnectionList(ApiDto):
     connections: list[ConnectionItem]
-    next_cursor: None
+    next_cursor: str | None
 
 
 def _raise_management(error: BitbucketManagementError) -> NoReturn:
@@ -159,6 +159,8 @@ def _raise_management(error: BitbucketManagementError) -> NoReturn:
         "bitbucket_connection_not_revoked": 409,
         "credential_rotation_required": 409,
         "invalid_credential": 400,
+        "invalid_cursor": 400,
+        "cursor_expired": 409,
         "credential_unavailable": 503,
         "repository_not_found": 404,
         "connection_not_found": 404,
@@ -227,9 +229,12 @@ async def list_bitbucket_connections(
     workspace_id: UUID,
     scope: Annotated[AuthScope, Depends(get_bitbucket_workspace_scope)],
     manager: Annotated[ManageBitbucketConnection, Depends(get_bitbucket_management)],
+    cursor: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
 ) -> ConnectionList:
     try:
-        bindings = await manager.list_connections(scope=scope, workspace_id=workspace_id)
+        page = await manager.list_connections_page(
+            scope=scope, workspace_id=workspace_id, cursor=cursor
+        )
     except BitbucketManagementError as error:
         _raise_management(error)
     return ConnectionList(
@@ -244,9 +249,9 @@ async def list_bitbucket_connections(
                 credential_generation=item.credential_generation,
                 webhook_url=manager.webhook_url(item.installation_id, item.repository_id),
             )
-            for item in bindings
+            for item in page.connections
         ],
-        next_cursor=None,
+        next_cursor=page.next_cursor,
     )
 
 
