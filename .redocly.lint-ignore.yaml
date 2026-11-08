@@ -8,6 +8,8 @@ contracts/openapi.yaml:
     # The badge has no 4xx on purpose: any name gets the same 200 "no data", so that the answer
     # cannot tell whether a repository exists (app/modules/reviews/api/badge.py, #454).
     - '#/paths/~1api~1badges~1github~1{owner}~1{repo}.svg/get/responses'
+    # The public static agent guide has no request input and no application 4xx response.
+    - '#/paths/~1api~1agent~1instructions/get/responses'
   no-unused-components:
     # Referenced from x-events.run.updated of GET /api/stream, which Redocly does not follow;
     # tests/test_openapi_contract.py validates SSE events against it. Do not delete.
