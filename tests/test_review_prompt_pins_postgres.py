@@ -120,7 +120,7 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
                     text("UPDATE repositories SET severity_threshold='critical' WHERE id=:repo_id"),
                     {"repo_id": REPO_A},
                 )
-                assert await seed_prompt_versions(session, legacy_assets) == 5
+                assert await seed_prompt_versions(session, legacy_assets) == 6
             async with factory() as session:
                 conventions_id = (
                     await session.scalars(

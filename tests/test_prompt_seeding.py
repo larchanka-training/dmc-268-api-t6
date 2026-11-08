@@ -263,7 +263,7 @@ def test_full_seed_upgrades_v2_to_v3_once_and_preserves_old_content(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, legacy_assets) == 6
+                assert await seed_prompt_versions(session, legacy_assets) == 7
             async with factory() as session:
                 old = (
                     await session.scalars(
@@ -281,7 +281,7 @@ def test_full_seed_upgrades_v2_to_v3_once_and_preserves_old_content(
             # Read persisted rows through a fresh session, after both commits.
             async with factory() as session:
                 rows = list((await session.scalars(select(PromptVersion))).all())
-                assert len(rows) == 7
+                assert len(rows) == 8
                 active = [row for row in rows if row.key == "review.system" and row.is_active]
                 assert len(active) == 1
                 assert (active[0].version, active[0].content, active[0].checksum) == (
@@ -321,7 +321,7 @@ def test_seed_rejects_changed_v2_without_overwriting_its_persisted_content(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, assets) == 9
+                assert await seed_prompt_versions(session, assets) == 10
             with pytest.raises(ValueError, match=r"immutable prompt changed: review\.system\.v2"):
                 async with factory.begin() as session:
                     await seed_prompt_versions(session, (tampered,))
@@ -369,7 +369,7 @@ def test_full_seed_upgrades_v3_to_v4_once_and_preserves_v3(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, _up_to(assets, 3)) == 7
+                assert await seed_prompt_versions(session, _up_to(assets, 3)) == 8
             async with factory.begin() as session:
                 assert await seed_prompt_versions(session, _up_to(assets, 4)) == 1
             async with factory.begin() as session:
@@ -411,7 +411,7 @@ def test_full_seed_upgrades_v4_to_v5_once_and_preserves_v4(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, _up_to(assets, 4)) == 8
+                assert await seed_prompt_versions(session, _up_to(assets, 4)) == 9
             async with factory.begin() as session:
                 assert await seed_prompt_versions(session, assets) == 1
             async with factory.begin() as session:
@@ -453,7 +453,7 @@ def test_an_older_seed_after_v5_inserts_nothing_and_keeps_v5_active(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, assets) == 9
+                assert await seed_prompt_versions(session, assets) == 10
             async with factory.begin() as session:
                 assert await seed_prompt_versions(session, _up_to(assets, 4)) == 0
             async with factory.begin() as session:
