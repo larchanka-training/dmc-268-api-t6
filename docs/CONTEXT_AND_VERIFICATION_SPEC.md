@@ -96,7 +96,7 @@ claim run
   → изолировать unsupported_path/identity_unresolved
   → review-ignore/generated → доказанное binary/empty_file → остальные пропуски (§9.2)
   → сохранить VCS-only DiffMap и отдельно immutable классификацию файлов run (§9.2), включая будущий skipped
-  → проверить оба триггера §2.3: неполный inventory/неизвестные relevant counters ИЛИ >3 000 counted allowed строк → backend summary-only/partial → сохранить результат/план → publishing
+  → для полного Run проверить оба триггера §2.3: неполный inventory/неизвестные relevant counters ИЛИ >3 000 counted allowed строк → backend summary-only/partial → сохранить результат/план → publishing
   → полный достоверный пустой inventory: skipped/no_changes; только E без T/incomplete: skipped/all_changes_ignored; LLM calls = 0
   → полный достоверный inventory, хотя бы один T, остальные только E/T, incomplete нет: backend none → сохранить результат/план → publishing
   → нет анализируемого текста, есть incomplete (E/T могут быть), inventory/counters полны, counted allowed ≤3 000: backend partial, summaryOnly=false → сохранить результат/план → publishing
@@ -149,7 +149,9 @@ GitLab считает строки файла по его hunks: такой фа
 становится неполным (§2.3). Пока сборка L1 не берёт hunks truncated, truncated-only
 с сохранившимися строками публикуется как summary-only `no_reviewable_files`.
 
-| Состав согласованного inventory | Исход целевого профиля #107 |
+Для инкрементального Run #306 неполный или слишком большой compare на T1 даёт fallback к полному Run, затем действует указанный выше порядок. Полный сохранённый DiffMap задаёт digest и идентичность coverage, а закреплённый scope допустимой compare-дельты задаёт файлы для модели и решения `no_changes` / `all_changes_ignored` / `no_reviewable_files`. Один и тот же scope восстанавливают `context.build`, `save_summary_only_stop` и `get_post_processing_input` (INC §6.4.3). Вердикт `null` ниже относится к полному Run либо к инкрементальному с чистой базой и неполным покрытием; активные дефекты базы удерживают `blocking` / `attention` даже без вызова модели.
+
+| Состав согласованного inventory | Исход целевого профиля #107; для инкремента — с уточнением #306 выше |
 | --- | --- |
 | Inventory неполный/недостоверный либо неизвестны relevant counters допущенных изменений | Backend summary-only/partial, summaryOnly=true, 0 LLM, причина diff_inventory_incomplete; none/skipped не выводятся из неизвестности |
 | Полный inventory, известные counted allowed >3 000 (в том числе missing-patch-only 4 000 строк) | Backend summary-only/partial, summaryOnly=true, 0 LLM, причина diff_too_large, даже если нет анализируемого текста (для инкрементального ревью `is_incremental = true` лимит 3 000 строк и полнота инвентаря проверяются по коммит-дельте на T1, поэтому инкрементальный Run не останавливается по строкам полного PR, а проверяет по дельте только `no_reviewable_files`, см. [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6.7.1) |

@@ -139,6 +139,8 @@ snapshot-путь (v4 и v5, `SNAPSHOT_REVIEW_PROMPT_VERSIONS`) описываю
 - `attempt` в NOTIFY/SSE — `runs.attempt` в момент вставки строки (#170 ч.2). У `llm.call`, записанного в той же попытке, это совпадает с `request.attempt`: claim (T4) делает `attempt = attempt + 1 … RETURNING`, значение идёт через `ClaimedAttempt` и `RunCallContext(attempt=…)` в запись вызова. Поздняя запись действия предыдущей попытки после следующего claim берёт уже увеличенный `runs.attempt`. Каждую попытку открывает `policy.load`.
 - `try` у `github.publish_review` / `gitlab.publish_review` / `bitbucket.publish_review` — счётчик цикла публикации, а не попытка Run.
 
+**Цель #306 для инкрементального Run:** T1 проверяет полноту и лимит 3 000 строк по compare-дельте. `context.build` решает D-13 (`no_reviewable_files`) и D-14 (`no_changes` / `all_changes_ignored`) по закреплённому scope дельты; при активных дефектах базы D-14 идёт через `NoModelAnswer` к `succeeded` с удержанным вердиктом, при чистой базе — T19/`skipped`. Технический исход `NoReviewableText` тоже наследует активные находки. Полный PR-снимок и coverage имеют одинаковые digest и scope во всех последующих стадиях (INC §6.4.3).
+
 
 Текущий ограниченный контракт #213, отдельно от будущих фаз:
 
@@ -236,7 +238,7 @@ inventory по-прежнему вызывает модель. Zero-LLM no-text 
 с #497 ч.3; legacy (≤ v3) публикует тот же набор как summary-only `no_reviewable_files`.
 Summary-only с нулём вызовов модели — текущий жизненный цикл, не будущий:
 стадия останавливается до RAG, conventions, ревью и verifier и публикует
-`NoModelAnswer`; coverage partial, verdict null.
+`NoModelAnswer`; coverage partial, verdict null. Для целевого инкрементального Run #306 это последнее правило уточняется: D-13 с чистой базой сохраняет `null`, а активные подтверждённые дефекты базы удерживают `blocking` или `attention` даже при summary-only / technical-only; пустая или исключённая дельта с чистой базой остаётся T19/`skipped`.
 
 **Канон после #168 ч.6** (один `context.build`, до conventions): `policy.load → vcs.fetch_diff → context.build → [context.rag] → [llm.call… conventions] → llm.repo_conventions → llm.call… → llm.review_output, review.postprocess → github|gitlab.publish_review`.
 
@@ -251,7 +253,7 @@ Summary-only определяется после ignore: **более 3 000 до
 verifier. Trace: `policy.load` → `vcs.fetch_diff` → `context.build` →
 `review.postprocess` → `github.publish_review…` или `gitlab.publish_review…`.
 Записей `llm.call` нет. Итог succeeded,
-summaryOnly=true, coverage partial, verdict=null, check-run neutral. Исходный
+summaryOnly=true, coverage partial, verdict=null, check-run neutral для полного Run; инкрементальный Run #306 удерживает вердикт активных находок базы по INC §6.8 и оценивает пороги по дельте. Исходный
 patch для UI сохраняется, review_patch=null. Это отличается от T19 с достоверно
 пустым/исключённым scope (CVS §2.3).
 
@@ -617,7 +619,7 @@ fallback и расхождение при `export-subst`. Канонически
 
 **План доставки #107.** Канонические формулы и marker заданы в CONTEXT_AND_VERIFICATION_SPEC §10: `publication_key` включает provider/repository/PR, `run_id`, `head_sha`, `diff_snapshot_id`, `final_result_digest`; `operation_key` — ключ публикации, ordinal и точный `payload_digest`. Публикационный план с основным и body-only вариантом фиксируется до T8. При retry запрещены новый LLM-вызов, пересборка summary текущим шаблоном, изменение event/координат или повторное хеширование старого `findings_hash` как идентичности. Rerun одного head, включая пустые findings, получает собственный ключ.
 
-Перед каждым новым POST publisher сверяет отмену (`cancel_requested`), открытость PR и ищет собственную операцию. Принадлежность закреплённого `commit_id` PR определяет ответ GitHub POST: только 422 с диагностикой отсутствия коммита в PR даёт `commit_not_found`; 422 с диагностикой координат остаётся ошибкой координат; прочие 422 классифицируются отдельно. Совпадение требует ожидаемого bot/app, PR, head, marker и точного payload; чтение всех страниц обязательно. `lookup_incomplete` и отсутствие marker после неоднозначной отправки не доказывают неуспеха. После POST сохраняются remote IDs и явный mapping по marker/координатам/body, затем повторно сверяется актуальность. Push между GET и POST оставляет публикацию на исходном commit_id ветки, Run переходит в `succeeded` (T14) и формирует подтверждённую базу для последующего инкрементального ревью коммит-дельты (SD §6.3, [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6.4, Ч.2 #306); в `cancelled` (T15) публикация переходит при специфичном GitHub POST 422 о `commit_id` вне PR либо при закрытии PR или явной отмене. Lease не заменяет серверную идемпотентность и не обещает exactly-once. Для `publication_outcome_unknown` допустима последующая сверка чтением без автоматического повторного POST.
+Перед каждым новым POST publisher сверяет отмену (`cancel_requested`), открытость PR и ищет собственную операцию. Принадлежность закреплённого `commit_id` PR определяет ответ GitHub POST: только 422 с диагностикой отсутствия коммита в PR даёт `commit_not_found`; 422 с диагностикой координат остаётся ошибкой координат; прочие 422 классифицируются отдельно. Совпадение требует ожидаемого bot/app, PR, head, marker и точного payload; чтение всех страниц обязательно. `lookup_incomplete` и отсутствие marker после неоднозначной отправки не доказывают неуспеха. После POST сохраняются remote IDs и явный mapping по marker/координатам/body; новый GitHub head не проверяется повторно как условие отмены. Push между GET и POST оставляет публикацию на исходном commit_id ветки, Run переходит в `succeeded` (T14) и формирует подтверждённую базу для последующего инкрементального ревью коммит-дельты (SD §6.3, [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6.4, Ч.2 #306); в `cancelled` (T15) публикация переходит при специфичном GitHub POST 422 о `commit_id` вне PR либо при закрытии PR или явной отмене. Lease не заменяет серверную идемпотентность и не обещает exactly-once. Для `publication_outcome_unknown` допустима последующая сверка чтением без автоматического повторного POST.
 
 Legacy marker `<!-- ai-review findings_hash=… -->` не используется для новых runs. Старый незавершённый publishing восстанавливается по сохранённому payload и remote IDs; legacy marker принимается только вместе с bot/head/body/event/полным набором координат и однозначной принадлежностью run. Иначе `legacy_publication_unresolved`, без присвоения чужого review или новой публикации. Реализованный адаптер GitLab (#97, SD §8.4) публикует discussions и узнаёт повтор по маркерам `findings_hash`; несколько операций и частичные receipts из CONTEXT_AND_VERIFICATION_SPEC §9.5 и §10 этот код не реализует.
 
