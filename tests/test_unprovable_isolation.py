@@ -3,7 +3,7 @@
 An omitted file is isolated by its stored provider names. A name the run cannot store
 unchanged — a NUL, a lone surrogate, more than the column width — leaves its source with
 no identity to withhold, so the snapshot path fails the run instead. The run itself is in
-``tests/test_unprovable_isolation_postgres.py``.
+``tests/test_snapshot_path_e2e_postgres.py``.
 """
 
 from __future__ import annotations
