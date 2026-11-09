@@ -658,6 +658,43 @@ jobs:
           retention-days: 7
           overwrite: true
 
+  skylos-quality:
+    # Fails on new Skylos findings in the change only: the lines and functions a PR changes, or a
+    # push to main changes (#263). Not a required check yet; the tech lead adds it to ruleset main.
+    name: Skylos quality
+    # A manual run has no diff range to check.
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The diff base and the policy Skylos reads from it must be in the clone.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.11"
+          python-version: "3.13"
+
+      - name: Skylos gate
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: scripts/skylos_quality.sh "${BASE_SHA}" "${RUNNER_TEMP}/skylos"
+
+      - name: Upload Skylos report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: skylos-report
+          path: ${{ runner.temp }}/skylos/
+          if-no-files-found: warn
+
   openapi-lint:
     # The name is a required status check on main; keep it verbatim.
     name: OpenAPI lint
