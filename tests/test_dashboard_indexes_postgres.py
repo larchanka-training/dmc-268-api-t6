@@ -6,17 +6,15 @@ WHERE implies it, so a predicate that drifts from the SQL the reads send is neve
 
 from __future__ import annotations
 
-import os
-from collections.abc import Iterator
-
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, create_engine, text
 
 from alembic import command
-from tests.portal_postgres import Env, portal_schema
+from tests.portal_postgres import Env
 
+pytest_plugins = ("tests.portal_postgres",)
 pytestmark = pytest.mark.integration
 
 _REVISION = "20261109_0061"
@@ -43,22 +41,13 @@ _INDEXES = {
 }
 
 
-@pytest.fixture
-def indexes_env() -> Iterator[Env]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    with portal_schema(database_url, None) as env:
-        yield env
-
-
 def test_the_migration_adds_the_dashboard_indexes_and_its_downgrade_drops_them(
-    indexes_env: Env,
+    portal_env: Env,
 ) -> None:
-    engine = create_engine(indexes_env.database_url)
+    engine = create_engine(portal_env.database_url)
     try:
         with engine.connect() as connection:
-            connection.execute(text(f'SET search_path TO "{indexes_env.schema}"'))
+            connection.execute(text(f'SET search_path TO "{portal_env.schema}"'))
             connection.commit()
             assert _definitions(connection) == {
                 name: f"ON {table} USING btree {columns}"
