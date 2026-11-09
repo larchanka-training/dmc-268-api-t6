@@ -379,7 +379,14 @@ def test_syntax_error_marks_only_the_overlapping_symbol_incomplete() -> None:
             b'const s = "//x"; // t\n/* a\n b */ f(`//${s}`);\n',
             [(1, 17, 1, 21), (2, 0, 3, 5)],
         ),
+        # The HTML-like comments of old scripts: `<!--` anywhere, `-->` at a line start.
+        (
+            AstLanguage.JAVASCRIPT,
+            b"<!-- a\nf(); <!-- b\n--> c\n",
+            [(1, 0, 1, 6), (2, 5, 2, 11), (3, 0, 3, 5)],
+        ),
         (AstLanguage.TYPESCRIPT, b"let n: number = 1; // t\n", [(1, 19, 1, 23)]),
+        (AstLanguage.TYPESCRIPT, b"<!-- a\nlet n = 1;\n", [(1, 0, 1, 6)]),
         (AstLanguage.TSX, b"const e = <div>{/* c */}</div>;\n", [(1, 16, 1, 23)]),
         (
             AstLanguage.GO,
