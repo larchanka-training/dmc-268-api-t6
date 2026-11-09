@@ -614,18 +614,18 @@ intake (401 вместо 202), отсутствие новых Runs/публик
 проектов удаляются (проект можно привязать заново), репозитории получают
 `installation_available=false`, активные Runs отменяются с `installation_revoked`.
 Ответ — `{"connections": [...]}`, по записи на установку; без GitLab-подключений список
-пуст, неизвестный workspace даёт `workspace_not_found`. Повтор безопасен; как и
-`revoke-installation`, команде нужен только `DATABASE_URL`. GitHub- и Bitbucket-установки
-того же workspace, подключения других workspace, общий API flag и project hooks в GitLab
-команда не трогает: hooks удаляют вручную, как описано выше.
+пуст, неизвестный workspace даёт `workspace_not_found`. Повтор безопасен. GitHub- и
+Bitbucket-установки того же workspace, подключения других workspace, общий API flag и
+project hooks в GitLab команда не трогает: hooks удаляют вручную, как описано выше.
 
 Отличие от `revoke-installation` — радиус: одна установка по UUID против всех
 GitLab-установок workspace. Для тестовой установки и при живых соседних подключениях
 того же workspace нужен `revoke-installation`; `revoke-workspace` — когда отзывают все
 GitLab-подключения workspace сразу.
 
-При утрате keyring inspect/revoke требуют только `DATABASE_URL`, без PAT, GitLab HTTP,
-decryption или CA. Compose всё равно требует присутствия env-файлов до запуска CLI.
+При утрате keyring inspect, `revoke-installation` и `revoke-workspace` требуют только
+`DATABASE_URL`, без PAT, GitLab HTTP, decryption или CA. Compose всё равно требует
+присутствия env-файлов до запуска CLI.
 Если файл отсутствует, `ensure_app_env_files "$PWD"` из уже загруженного helper создаёт
 только отсутствующие пустые файлы с 0600 и сохраняет существующие значения; это позволяет
 DB-only inspect/revoke с `--no-deps`, но **не** восстанавливает ключи и не делает workers
