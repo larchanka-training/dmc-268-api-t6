@@ -48,8 +48,9 @@ functions=0
 output="$(skylos_gate changed-functions --force --quality --diff-base "${base}" \
   --select "${FUNCTION_RULES}" 2>&1)" || functions=$?
 if ((functions == 0)); then
-  python3 scripts/skylos_changed_functions.py "${reports}/changed-functions.json" \
-    "${FUNCTION_RULES}" || functions=$?
+  # The project's Python through uv, as every tool here: not whatever python3 is on PATH.
+  uv run --no-project --python 3.13 scripts/skylos_changed_functions.py \
+    "${reports}/changed-functions.json" "${FUNCTION_RULES}" || functions=$?
 else
   printf '%s\n' "${output}" >&2
 fi

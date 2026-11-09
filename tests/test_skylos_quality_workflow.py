@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -50,6 +51,11 @@ while (($#)); do
 done
 exit "${codes[$((call - 1))]}"
 """
+# Logs the command line, then runs the real uv: the checker's verdict stays end to end.
+FAKE_UV = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "${FAKE_UV_LOG}"
+exec "${REAL_UV}" "$@"
+"""
 CHECKER = REPO_ROOT / "scripts/skylos_changed_functions.py"
 
 
@@ -65,12 +71,17 @@ def _pinned_version() -> str:
 def _run_script(
     tmp_path: Path, *args: str, exits: str = "0 0", report: str = ""
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-    """Run the script with a fake ``uvx``; returns the result and the logged command lines."""
+    """Run the script with a fake ``uvx``; returns the result and the logged command lines.
+
+    ``uv`` is logged to ``uv.log`` in ``tmp_path`` and runs for real.
+    """
+    real_uv = shutil.which("uv")
+    assert real_uv, "uv must be on PATH"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    uvx = bin_dir / "uvx"
-    uvx.write_text(FAKE_UVX, encoding="utf-8")
-    uvx.chmod(0o755)
+    for name, fake in (("uvx", FAKE_UVX), ("uv", FAKE_UV)):
+        (bin_dir / name).write_text(fake, encoding="utf-8")
+        (bin_dir / name).chmod(0o755)
     log = tmp_path / "uvx.log"
     log.touch()
     result = subprocess.run(
@@ -82,6 +93,8 @@ def _run_script(
             "FAKE_UVX_LOG": str(log),
             "FAKE_UVX_EXIT": exits,
             "FAKE_UVX_REPORT": report,
+            "FAKE_UV_LOG": str(tmp_path / "uv.log"),
+            "REAL_UV": real_uv,
         },
         capture_output=True,
         encoding="utf-8",
@@ -113,6 +126,19 @@ def test_two_gated_passes_with_the_pinned_skylos(tmp_path: Path) -> None:
     assert {"--quality", "--gate", "--force"} <= set(functions)
     assert not {"--danger", "--secrets", "--summary"} & set(functions)
     assert f"--format json-ci -o {reports}/changed-functions.json" in calls[1]
+
+
+def test_the_checker_runs_on_the_project_python_through_uv(tmp_path: Path) -> None:
+    reports = tmp_path / "reports"
+    python = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["tool"]["mypy"]["python_version"]
+
+    result, _ = _run_script(tmp_path, "origin/main", str(reports))
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "uv.log").read_text(encoding="utf-8").splitlines() == [
+        f"run --no-project --python {python} scripts/skylos_changed_functions.py "
+        f"{reports}/changed-functions.json {','.join(FUNCTION_RULES)}"
+    ]
 
 
 @pytest.mark.parametrize(
