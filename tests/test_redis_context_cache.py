@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from dataclasses import dataclass, field
+from hashlib import sha256
 from uuid import UUID
 
+import pytest
+
 from app.modules.reviews.application.ast_resolution import RevisionTree
-from app.modules.reviews.application.ast_symbols import AstLanguage
+from app.modules.reviews.application.ast_symbols import AstLanguage, facts_to_json
 from app.modules.reviews.infrastructure.redis_context_cache import (
     RedisAstFactsCache,
     RedisTreeCache,
 )
-from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
+from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts, profile_version
 
 _REPOSITORY = UUID(int=1)
 _BLOB = "d" * 40
@@ -56,6 +61,23 @@ def test_facts_round_trip_under_a_key_of_repository_blob_language_and_versions()
     (key,) = redis.values
     assert key.startswith(f"ast:{_REPOSITORY}:{_BLOB}:python:")
     assert redis.lifetimes[key] == 7 * 24 * 3600
+
+
+def test_facts_cached_without_comment_spans_are_never_read(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Before #498 the key ended at the profile digest and the facts had no "comments".
+    redis = FakeRedis()
+    profile = sha256(profile_version(AstLanguage.PYTHON).encode("utf-8")).hexdigest()[:16]
+    stale = facts_to_json(extract_facts(AstLanguage.PYTHON, b"x = 1\n"))
+    del stale["comments"]
+    redis.values[f"ast:{_REPOSITORY}:{_BLOB}:python:{profile}"] = json.dumps(stale)
+    cache = RedisAstFactsCache(redis, repository_id=_REPOSITORY)
+
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(cache.get(_BLOB, AstLanguage.PYTHON)) is None
+
+    assert caplog.records == []
 
 
 def test_tree_is_cached_for_one_hour_by_repository_and_revision() -> None:
