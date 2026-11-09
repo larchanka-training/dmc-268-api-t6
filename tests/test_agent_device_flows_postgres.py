@@ -34,7 +34,8 @@ def test_device_flow_reservation_and_completion_are_durable(agent_schema: Env) -
                     now + timedelta(minutes=15),
                     5,
                     now + timedelta(seconds=5),
-                )
+                ),
+                now,
             )
             await uow.commit()
         async with SqlAlchemyDeviceFlowUnitOfWork(factory) as uow:
@@ -59,7 +60,8 @@ def test_device_flow_reservation_and_completion_are_durable(agent_schema: Env) -
                     now - timedelta(seconds=1),
                     5,
                     now - timedelta(seconds=6),
-                )
+                ),
+                now,
             )
             await uow.commit()
         async with SqlAlchemyDeviceFlowUnitOfWork(factory) as uow:
@@ -70,7 +72,8 @@ def test_device_flow_reservation_and_completion_are_durable(agent_schema: Env) -
                     now + timedelta(minutes=15),
                     5,
                     now + timedelta(seconds=5),
-                )
+                ),
+                now,
             )
             await uow.commit()
         async with factory() as session:

@@ -51,7 +51,7 @@ class FakeDeviceStore:
     async def rollback(self) -> None:
         pass
 
-    async def create(self, flow: DeviceFlow) -> None:
+    async def create(self, flow: DeviceFlow, at: datetime) -> None:
         self.flows[flow.code_hash] = flow
 
     async def reserve(self, code_hash: str, at: datetime) -> DeviceFlow | None:

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from uuid import UUID
 
 import pytest
+from fastapi import HTTPException, Request
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from app.bootstrap import portal_auth
@@ -42,6 +45,7 @@ def test_agent_token_can_read_runs_but_cannot_use_unrelated_routes(
         assert client.get("/api/runs", headers=headers).status_code == 200
         assert client.get("/api/metrics/summary", headers=headers).status_code == 403
         assert client.get("/api/auth/me", headers=headers).status_code == 403
+        assert client.get("/api/agent/tokens", headers=headers).status_code == 403
         assert (
             client.post(
                 "/api/runs/00000000-0000-0000-0000-000000000003/cancel", headers=headers
@@ -75,7 +79,48 @@ def test_agent_route_allowlist_contains_only_repository_settings_and_review_read
         ("GET", "/api/runs/{run_id}"),
         ("GET", "/api/runs/{run_id}/comments"),
         ("GET", "/api/runs/{run_id}/actions"),
-        ("GET", "/api/runs/{run_id}/actions/{index}/response"),
-        ("GET", "/api/runs/{run_id}/diff"),
-        ("GET", "/api/runs/{run_id}/files"),
     } == portal_auth._AGENT_OPERATIONS
+
+
+def test_agent_allowlist_matches_live_routes_and_rejects_other_protected_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(portal_auth, "_agent_tokens_for_request", lambda request: FakeAgentTokens())
+    routes = [
+        nested
+        for entry in app.routes
+        for nested in getattr(getattr(entry, "original_router", None), "routes", [entry])
+        if isinstance(nested, APIRoute)
+    ]
+    existing = {(method, route.path) for route in routes for method in route.methods or ()}
+    assert existing >= portal_auth._AGENT_OPERATIONS
+
+    def requires_auth(dependency: object) -> bool:
+        if getattr(dependency, "call", None) is portal_auth.get_auth_scope:
+            return True
+        return any(requires_auth(item) for item in getattr(dependency, "dependencies", ()))
+
+    async def exercise() -> None:
+        for route in routes:
+            if not requires_auth(route.dependant):
+                continue
+            for method in route.methods or ():
+                request = Request(
+                    {
+                        "type": "http",
+                        "method": method,
+                        "path": route.path,
+                        "headers": [(b"authorization", b"Bearer acr_test")],
+                        "route": route,
+                        "app": app,
+                    }
+                )
+                if (method, route.path) in portal_auth._AGENT_OPERATIONS:
+                    scope = await portal_auth.get_auth_scope(request)
+                    assert scope.agent_repository_id is not None
+                else:
+                    with pytest.raises(HTTPException) as error:
+                        await portal_auth.get_auth_scope(request)
+                    assert error.value.status_code == 403
+
+    asyncio.run(exercise())

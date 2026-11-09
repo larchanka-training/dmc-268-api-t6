@@ -6,23 +6,15 @@ import os
 
 from fastapi import HTTPException, Request
 
-from app.bootstrap.auth_api import _CallbackInstallationLinker
+from app.bootstrap.auth_api import CallbackInstallationLinker
+from app.bootstrap.portal_auth import get_agent_tokens
 from app.bootstrap.reviews_api import GitHubAuthHttpClients, ReviewsApiResources
 from app.modules.auth.application.agent_device_access import AgentDeviceAccess
-from app.modules.auth.application.agent_tokens import AgentTokens
 from app.modules.auth.infrastructure.agent_device_flows import SqlAlchemyDeviceFlowUnitOfWork
-from app.modules.auth.infrastructure.agent_tokens import SqlAlchemyAgentTokenUnitOfWork
 from app.modules.auth.infrastructure.github_oauth import (
     HttpGitHubDeviceOAuthClient,
     HttpGitHubUserProfile,
 )
-
-
-def get_agent_tokens(request: Request) -> AgentTokens:
-    resources = getattr(request.app.state, "reviews_api_resources", None)
-    if not isinstance(resources, ReviewsApiResources):
-        raise HTTPException(status_code=503, detail="agent authentication is not configured")
-    return AgentTokens(lambda: SqlAlchemyAgentTokenUnitOfWork(resources.session_factory))
 
 
 def get_agent_device_access(request: Request) -> AgentDeviceAccess:
@@ -38,9 +30,7 @@ def get_agent_device_access(request: Request) -> AgentDeviceAccess:
     return AgentDeviceAccess(
         github=HttpGitHubDeviceOAuthClient(clients.oauth, client_id=client_id),
         profile=HttpGitHubUserProfile(clients.api),
-        linker=_CallbackInstallationLinker(
-            resources.github_installation_linker(client=clients.api)
-        ),
+        linker=CallbackInstallationLinker(resources.github_installation_linker(client=clients.api)),
         tokens=get_agent_tokens(request),
         uow_factory=lambda: SqlAlchemyDeviceFlowUnitOfWork(resources.session_factory),
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID
@@ -10,8 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
-from app.bootstrap.agent_access import get_agent_device_access, get_agent_tokens
-from app.bootstrap.portal_auth import get_auth_scope
+from app.bootstrap.agent_access import get_agent_device_access
+from app.bootstrap.portal_auth import get_agent_tokens, get_auth_scope
 from app.common.application.github_repository_name import (
     REPOSITORY_FULL_NAME_MAX_LENGTH,
     REPOSITORY_FULL_NAME_PATTERN,
@@ -33,6 +34,7 @@ from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.api.dtos import UtcDatetime
 
 agent_router = APIRouter(prefix="/api/agent", tags=["agent"], route_class=StrictJsonRoute)
+_LOGGER = logging.getLogger(__name__)
 
 
 @agent_router.get("/instructions", response_class=Response)
@@ -94,6 +96,7 @@ async def start_device_authorization(
     try:
         challenge = await use_case.start(body.repository)
     except GitHubProviderUnavailable as exc:
+        _LOGGER.exception("GitHub device authorization start failed")
         raise HTTPException(
             status_code=502, detail="GitHub device authorization is unavailable"
         ) from exc
@@ -124,6 +127,7 @@ async def poll_device_authorization(
             status_code=404, detail="repository is not available to this user"
         ) from exc
     except GitHubProviderUnavailable as exc:
+        _LOGGER.exception("GitHub device authorization poll failed")
         raise HTTPException(
             status_code=502, detail="GitHub device authorization is unavailable"
         ) from exc

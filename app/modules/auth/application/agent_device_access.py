@@ -67,7 +67,7 @@ class AgentTokenIssuer(Protocol):
 
 
 class DeviceFlowStore(Protocol):
-    async def create(self, flow: DeviceFlow) -> None: ...
+    async def create(self, flow: DeviceFlow, at: datetime) -> None: ...
 
     async def reserve(self, code_hash: str, at: datetime) -> DeviceFlow | None: ...
 
@@ -105,12 +105,13 @@ class AgentDeviceAccess:
         async with self._uow_factory() as uow:
             await uow.flows_store.create(
                 DeviceFlow(
-                    hashlib.sha256(challenge.device_code.encode()).hexdigest(),
-                    repository,
-                    now + timedelta(seconds=challenge.expires_in),
-                    challenge.interval,
-                    now + timedelta(seconds=challenge.interval),
-                )
+                    code_hash=hashlib.sha256(challenge.device_code.encode()).hexdigest(),
+                    repository=repository,
+                    expires_at=now + timedelta(seconds=challenge.expires_in),
+                    interval=challenge.interval,
+                    next_poll_at=now + timedelta(seconds=challenge.interval),
+                ),
+                now,
             )
             await uow.commit()
         return challenge

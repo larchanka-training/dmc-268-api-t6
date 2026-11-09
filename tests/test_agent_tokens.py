@@ -15,6 +15,7 @@ from app.modules.auth.application.agent_tokens import (
     AgentTokenRecord,
     AgentTokenRevocationForbidden,
     AgentTokens,
+    AuthorizedRepo,
     OwnedAgentToken,
     RepositoryNotAvailable,
 )
@@ -52,9 +53,9 @@ class FakeTokenStore:
     async def rollback(self) -> None:
         pass
 
-    async def authorized_repo(self, user_id: int, full_name: str) -> tuple[UUID, UUID] | None:
+    async def authorized_repo(self, user_id: int, full_name: str) -> AuthorizedRepo | None:
         if user_id == 42 and full_name == "octo/repo":
-            return self.repo_id, self.workspace_id
+            return AuthorizedRepo(self.repo_id, self.workspace_id)
         return None
 
     async def create(self, record: AgentTokenRecord) -> None:
@@ -122,6 +123,7 @@ def test_agent_token_requires_live_repository_grant_and_expires() -> None:
     issued = asyncio.run(tokens.issue(42, "octo/repo"))
     expired = AgentTokens(store.uow, now=lambda: now + timedelta(days=31))
     assert asyncio.run(expired.resolve(issued.secret)) is None
+    assert asyncio.run(tokens.resolve("browser-token")) is None
 
 
 def test_agent_credential_cannot_revoke_a_token() -> None:

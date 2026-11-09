@@ -23,14 +23,15 @@ _AGENT_OPERATIONS = frozenset(
         ("GET", "/api/runs/{run_id}"),
         ("GET", "/api/runs/{run_id}/comments"),
         ("GET", "/api/runs/{run_id}/actions"),
-        ("GET", "/api/runs/{run_id}/actions/{index}/response"),
-        ("GET", "/api/runs/{run_id}/diff"),
-        ("GET", "/api/runs/{run_id}/files"),
     }
 )
 
 
 def _agent_tokens_for_request(request: Request) -> AgentTokens:
+    return get_agent_tokens(request)
+
+
+def get_agent_tokens(request: Request) -> AgentTokens:
     resources = getattr(request.app.state, "reviews_api_resources", None)
     if resources is None:
         raise HTTPException(status_code=503, detail="agent authentication is not configured")
