@@ -62,7 +62,10 @@ _APP = "4" * 40
 _MODELS_SHA = "5" * 40
 _USER_SHA = "6" * 40
 # `pkg/app.py` calls the `greet` the PR changes; the default-branch graph knows it.
-_USER = "from .service import greet\n\n\ndef welcome(user_id):\n    return greet(user_id)  # note\n"
+_USER = "from .service import greet\n\n\ndef welcome(user_id):\n    return greet(user_id)\n"
+# The same caller with a trailing comment, for the comment gate (#498); `_USER` itself is
+# shared with test_snapshot_path_e2e_postgres.py.
+_USER_NOTED = _USER.replace("greet(user_id)\n", "greet(user_id)  # note\n")
 # The review prompt the portal seed pins: version 1.
 _PINNED = ("review.system", "v1")
 
@@ -147,7 +150,7 @@ def test_the_composed_stage_reads_graph_candidates_and_records_their_use(
                     _AGENTS: b"agents",
                     _APP: _SERVICE.encode(),
                     _MODELS_SHA: _MODELS.encode(),
-                    _USER_SHA: _USER.encode(),
+                    _USER_SHA: _USER_NOTED.encode(),
                 }[sha]
                 if request.headers["Accept"] == "application/vnd.github.raw+json":
                     return httpx.Response(200, content=raw)
@@ -268,7 +271,7 @@ def test_the_composed_stage_reads_graph_candidates_and_records_their_use(
                     ),
                     {"repository": REPO_A, "blob": _USER_SHA},
                 )
-            assert cached == _USER
+            assert cached == _USER_NOTED
             assert [step[0] for step in steps] == ["context.build", "context.rag"]
             build, rag = steps
             assert rag[1:] == (
