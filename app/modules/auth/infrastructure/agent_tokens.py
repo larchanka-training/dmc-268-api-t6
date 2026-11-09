@@ -9,7 +9,11 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
-from app.modules.auth.application.agent_tokens import AgentTokenRecord, OwnedAgentToken
+from app.modules.auth.application.agent_tokens import (
+    AgentTokenRecord,
+    AuthorizedRepo,
+    OwnedAgentToken,
+)
 from app.modules.auth.infrastructure.models import AuthAgentToken
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.workspaces.infrastructure.models import (
@@ -22,7 +26,7 @@ class SqlAlchemyAgentTokenStore:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def authorized_repo(self, user_id: int, full_name: str) -> tuple[UUID, UUID] | None:
+    async def authorized_repo(self, user_id: int, full_name: str) -> AuthorizedRepo | None:
         row = (
             await self._session.execute(
                 select(Repository.id, ProviderInstallation.workspace_id)
@@ -54,7 +58,7 @@ class SqlAlchemyAgentTokenStore:
                 )
             )
         ).first()
-        return (row[0], row[1]) if row is not None else None
+        return AuthorizedRepo(row[0], row[1]) if row is not None else None
 
     async def create(self, record: AgentTokenRecord) -> None:
         self._session.add(
@@ -76,13 +80,13 @@ class SqlAlchemyAgentTokenStore:
         if row is None:
             return None
         return AgentTokenRecord(
-            row.id,
-            row.token_hash,
-            row.github_user_id,
-            row.repository_id,
-            row.workspace_id,
-            row.expires_at,
-            row.revoked_at,
+            id=row.id,
+            token_hash=row.token_hash,
+            user_id=row.github_user_id,
+            repository_id=row.repository_id,
+            workspace_id=row.workspace_id,
+            expires_at=row.expires_at,
+            revoked_at=row.revoked_at,
         )
 
     async def list_active(self, user_id: int, at: datetime) -> list[OwnedAgentToken]:

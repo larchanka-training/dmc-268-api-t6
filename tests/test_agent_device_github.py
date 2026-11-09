@@ -80,6 +80,7 @@ def test_github_device_poll_terminal_and_backoff_states(
     ("status", "payload"),
     [
         (403, {"error": "incorrect_client_credentials"}),
+        (502, {"error": "upstream_failure"}),
         (200, {"error": "unknown_error"}),
         (200, {"access_token": ""}),
         (200, ["not-an-object"]),
@@ -89,6 +90,20 @@ def test_github_device_poll_rejects_provider_failures(status: int, payload: obje
     async def exercise() -> None:
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(lambda request: httpx.Response(status, json=payload)),
+            base_url="https://github.com",
+        ) as client:
+            with pytest.raises(GitHubProviderUnavailable):
+                await HttpGitHubDeviceOAuthClient(client, client_id="test-client").poll_device(
+                    "device-secret"
+                )
+
+    asyncio.run(exercise())
+
+
+def test_github_device_poll_rejects_invalid_json() -> None:
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, text="not json")),
             base_url="https://github.com",
         ) as client:
             with pytest.raises(GitHubProviderUnavailable):

@@ -9,8 +9,8 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from app.bootstrap.agent_access import get_agent_device_access, get_agent_tokens
-from app.bootstrap.portal_auth import get_auth_scope
+from app.bootstrap.agent_access import get_agent_device_access
+from app.bootstrap.portal_auth import get_agent_tokens, get_auth_scope
 from app.main import app
 from app.modules.auth.application.agent_device_access import (
     DeviceChallenge,
@@ -173,6 +173,17 @@ def test_owner_can_list_token_ids_without_credentials() -> None:
         assert "id" in response.json()[0]
         assert "secret" not in response.text
         assert "tokenHash" not in response.text
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_token_listing_requires_configured_agent_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app.state, "reviews_api_resources", None, raising=False)
+    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, ())
+    try:
+        assert TestClient(app).get("/api/agent/tokens").status_code == 503
     finally:
         app.dependency_overrides.clear()
 

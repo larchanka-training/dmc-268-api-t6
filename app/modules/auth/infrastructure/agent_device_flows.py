@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -17,9 +17,9 @@ class SqlAlchemyDeviceFlowStore:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def create(self, flow: DeviceFlow) -> None:
+    async def create(self, flow: DeviceFlow, at: datetime) -> None:
         await self._session.execute(
-            delete(AuthAgentDeviceFlow).where(AuthAgentDeviceFlow.expires_at < func.now())
+            delete(AuthAgentDeviceFlow).where(AuthAgentDeviceFlow.expires_at < at)
         )
         self._session.add(
             AuthAgentDeviceFlow(

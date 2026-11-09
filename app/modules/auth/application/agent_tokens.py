@@ -37,6 +37,12 @@ class OwnedAgentToken:
 
 
 @dataclass(frozen=True)
+class AuthorizedRepo:
+    repository_id: UUID
+    workspace_id: UUID
+
+
+@dataclass(frozen=True)
 class AgentTokenRecord:
     id: UUID
     token_hash: str
@@ -55,7 +61,7 @@ class IssuedAgentToken:
 
 
 class AgentTokenStore(Protocol):
-    async def authorized_repo(self, user_id: int, full_name: str) -> tuple[UUID, UUID] | None: ...
+    async def authorized_repo(self, user_id: int, full_name: str) -> AuthorizedRepo | None: ...
 
     async def create(self, record: AgentTokenRecord) -> None: ...
 
@@ -93,15 +99,14 @@ class AgentTokens:
             owner = await uow.tokens.authorized_repo(user_id, repository)
             if owner is None:
                 raise RepositoryNotAvailable
-            repository_id, workspace_id = owner
             await uow.tokens.create(
                 AgentTokenRecord(
-                    token_id,
-                    hashlib.sha256(secret.encode()).hexdigest(),
-                    user_id,
-                    repository_id,
-                    workspace_id,
-                    issued_at + AGENT_TOKEN_LIFETIME,
+                    id=token_id,
+                    token_hash=hashlib.sha256(secret.encode()).hexdigest(),
+                    user_id=user_id,
+                    repository_id=owner.repository_id,
+                    workspace_id=owner.workspace_id,
+                    expires_at=issued_at + AGENT_TOKEN_LIFETIME,
                 )
             )
             await uow.commit()
