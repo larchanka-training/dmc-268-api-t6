@@ -29,7 +29,13 @@ from app.bootstrap.reviews_api import (
     get_run_publisher,
 )
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
-from app.common.infrastructure.db.enums import Engine, FindingCategory, FindingSeverity, RunState
+from app.common.infrastructure.db.enums import (
+    Engine,
+    FindingCategory,
+    FindingSeverity,
+    FindingSide,
+    RunState,
+)
 from app.main import (
     app,
     get_file_blob_cache,
@@ -51,6 +57,8 @@ from app.modules.repositories.application.rules_status import (
     StoredRulesStatus,
 )
 from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
+from app.modules.reviews.application.diff_map import DiffSide
+from app.modules.reviews.application.finding_side import Side
 from app.modules.reviews.application.get_run_actions import RunActionResponse
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.get_run_file_lines import (
@@ -1287,6 +1295,7 @@ _RUNTIME_ENUM_FIELDS: list[tuple[str, str, tuple[object, ...]]] = [
             ("category", (Category, FindingCategory)),
         )
     ),
+    ("FindingViewDto", "side", (Side, FindingSide, DiffSide)),
 ]
 
 

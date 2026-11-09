@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import AfterValidator, BaseModel, ConfigDict
 
 from app.common.domain.run_enums import Engine, RunStatus
+from app.modules.reviews.application.finding_side import Side
 from app.modules.reviews.application.review_output import Category, Severity
 from app.modules.reviews.application.run_trigger import RunTrigger
 from app.modules.reviews.application.verdict import Verdict
@@ -121,7 +122,7 @@ class FindingViewDto(ApiDto):
     old_line: int | None
     new_line: int | None
     end_line: int | None
-    side: str
+    side: Side
     severity: Severity
     category: Category
     title: str

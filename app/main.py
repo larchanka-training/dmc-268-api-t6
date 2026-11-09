@@ -126,6 +126,7 @@ from app.modules.reviews.api.dtos import (
 from app.modules.reviews.application.cancel_run import (
     CancelRun,
 )
+from app.modules.reviews.application.finding_side import Side
 from app.modules.reviews.application.get_metrics_summary import (
     FindingsByCategory,
     GetMetricsSummary,
@@ -643,7 +644,7 @@ def to_run_detail_dto(detail: RunDetail) -> RunDetailDto:
                 old_line=item.comment.old_line,
                 new_line=item.comment.new_line,
                 end_line=item.comment.end_line,
-                side=item.side,
+                side=cast(Side, item.side),
                 severity=cast(Severity, item.comment.severity),
                 category=cast(Category, item.comment.category),
                 title=item.comment.title,
