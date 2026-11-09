@@ -27,7 +27,6 @@ from app.modules.reviews.application.change_summary import (
 )
 from app.modules.reviews.application.llm import LlmCallFailed, LlmErrorCode, RunCallContext
 from app.modules.reviews.application.prompt_builder import ChangedFile, DiffLine
-from app.modules.reviews.infrastructure.llm.answers import change_summary_output_schema
 from app.modules.reviews.infrastructure.llm.gateway import HeuristicTokenCounter
 from app.modules.reviews.infrastructure.llm.models import GatewayChangeSummaryModel
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelPrice, ModelProfile
@@ -109,10 +108,10 @@ def test_change_summary_example_answer_passes_the_gateway_parse_path() -> None:
     assert "$schema" not in schema and "$id" not in schema
     assert schema["required"] == ["sentences"]
     assert schema["additionalProperties"] is False
-    local = change_summary_output_schema()["properties"]["sentences"]["items"]["pattern"]
-    assert local.endswith("(?![\\s\\S])")
+    # The schema file's pattern with its final end anchor (?![\s\S]) rewritten to "$" (#130).
     assert schema["properties"]["sentences"]["items"]["pattern"] == (
-        local.removesuffix("(?![\\s\\S])") + "$"
+        r"^[^\S\r\n]*(?:(?:[^\s.!?]+|\S*[.!?][^\s.!?]*[A-Za-z0-9][^\s.!?]*)[^\S\r\n]+)*"
+        r"\S+[^\S\r\n]*$"
     )
 
 

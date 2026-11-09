@@ -83,6 +83,10 @@ def test_change_summary_example_answer_passes_the_validator() -> None:
             json.dumps({"sentences": ['Adds "a job." Removes another.']}),
             ["sentences/0: does not match"],
         ),
+        (
+            json.dumps({"sentences": ["Adds a job.* Removes another.", "Adds a job.\u201d Ends."]}),
+            ["sentences/0: does not match", "sentences/1: does not match"],
+        ),
         ('{"sentences": ["Adds a job, e.g. a purge."]}', ["sentences/0: does not match"]),
         (
             json.dumps({"sentences": ["x" * 201]}),
@@ -104,6 +108,7 @@ def test_change_summary_example_answer_passes_the_validator() -> None:
         "inner-mark",
         "inner-mark-before-tab",
         "inner-mark-before-quote",
+        "inner-mark-before-other-punctuation",
         "abbreviation",
         "too-long",
         "prose-around",
@@ -129,9 +134,10 @@ def test_change_summary_answer_outside_the_schema_is_invalid(
         "Renames app/main.py to app/entry.py and bumps httpx to 0.28.1.",
         ".gitignore now ignores the cache directory!",
         'Adds a "dry run" flag to purge() in version 1.2 of the job?',
+        "Moves the cache \u2014 and its tests \u2014 to app/cache.py.",
         "Ends with a period and a trailing space. ",
     ],
-    ids=["dotted-names", "leading-dot", "quotes-and-calls", "trailing-space"],
+    ids=["dotted-names", "leading-dot", "quotes-and-calls", "punctuation-word", "trailing-space"],
 )
 def test_change_summary_one_sentence_with_dots_inside_its_words_is_valid(sentence: str) -> None:
     answer = json.dumps({"sentences": [sentence]})
