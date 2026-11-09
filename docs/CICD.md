@@ -491,8 +491,11 @@ push/head. Отсутствие rules/prompt потребляет receipt, а н
 Это wiring/runbook, не доказательство живого MR. Staging acceptance требует protected
 operator/PAT/webhook доступ, reviewed image, prompts/rules/workers/LLM и реальный
 succeeded GitLab run с inline findings, одной summary, replay без дублей и revoke.
-GitLab onboarding UI не добавлен: [UI #173](https://github.com/larchanka-training/dmc-268-ui-t6/issues/173)
-— общий docs follow-up; GitLab checklist — [#169 comment](https://github.com/larchanka-training/dmc-268-api-t6/issues/169#issuecomment-6399969129).
+GitLab onboarding UI не добавлен: подключение из портала —
+[#375](https://github.com/larchanka-training/dmc-268-api-t6/issues/375) и
+[UI #212](https://github.com/larchanka-training/dmc-268-ui-t6/issues/212), пользовательская
+документация — [UI #205](https://github.com/larchanka-training/dmc-268-ui-t6/issues/205);
+GitLab checklist — [#169 comment](https://github.com/larchanka-training/dmc-268-api-t6/issues/169#issuecomment-6399969129).
 
 ## 3. Образ и health check
 

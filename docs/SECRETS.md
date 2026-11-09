@@ -664,8 +664,11 @@ reviewed staging image/operator доступ, protected PAT/webhook secret, ра
 prompts/rules и LLM; результат — succeeded GitLab run, inline discussion(s), одна сводка,
 identical-delivery replay без дублей и revoke. Старые датированные environment snapshots
 ниже остаются историческими и не утверждают, что новая конфигурация уже развёрнута.
-GitLab onboarding UI не добавлен: [UI #173](https://github.com/larchanka-training/dmc-268-ui-t6/issues/173)
-— общий docs follow-up; GitLab-specific checklist находится в
+GitLab onboarding UI не добавлен: подключение проекта из портала без оператора —
+[#375](https://github.com/larchanka-training/dmc-268-api-t6/issues/375) и
+[UI #212](https://github.com/larchanka-training/dmc-268-ui-t6/issues/212), пользовательская
+документация GitLab — [UI #205](https://github.com/larchanka-training/dmc-268-ui-t6/issues/205);
+GitLab-specific checklist находится в
 [#169 comment](https://github.com/larchanka-training/dmc-268-api-t6/issues/169#issuecomment-6399969129).
 
 После серии операторских команд очистите временный login:
