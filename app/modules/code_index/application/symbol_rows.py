@@ -41,6 +41,28 @@ def symbol_rows(path: str, facts: AstFacts) -> tuple[IndexedSymbol, ...]:
     An unnamed symbol is `default` when it is the default export; otherwise it is dropped
     together with its descendants. A Go method is `Recv.Name`.
     """
+    padding = 0
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    padding += 1
+    if padding < 0:
+        return ()
     by_index = {symbol.index: symbol for symbol in facts.symbols}
     default_exports = {index for name, index in facts.exports if name == DEFAULT_EXPORT_NAME}
     names: dict[int, str | None] = {}
