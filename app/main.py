@@ -7,7 +7,7 @@ import json
 import math
 import os
 import time
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from types import UnionType
@@ -21,7 +21,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from fastapi.routing import APIRoute, iter_route_contexts
+from fastapi.routing import APIRoute, RouteContext, iter_route_contexts
 from pydantic import BaseModel, ValidationError
 
 from app.bootstrap.gitlab import gitlab_webhook_lifespan
@@ -49,6 +49,7 @@ from app.bootstrap.run_step_listener import run_step_listener
 from app.bootstrap.run_update_listener import run_update_listener
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
 from app.common.domain.run_enums import RunStatus
+from app.common.infrastructure.request_body_limit import RequestBodyLimitMiddleware
 from app.common.infrastructure.telemetry import (
     TracingMiddleware,
     configure_logging,
@@ -234,6 +235,7 @@ REPLAY_OVERLAP_SECONDS = 30.0
 REPLAY_LIMIT = 500
 
 app = FastAPI(title="AI Code Reviewer browser API", lifespan=lifespan)
+app.add_middleware(RequestBodyLimitMiddleware)
 # Outermost: the span covers every other middleware and the handler.
 app.add_middleware(TracingMiddleware)
 app.state.run_update_hub = run_update_hub
@@ -259,6 +261,23 @@ def _verifies_bearer(dependant: Dependant) -> bool:
     )
 
 
+def _operations(
+    openapi_schema: dict[str, Any],
+    application: FastAPI,
+    selects: Callable[[RouteContext], bool],
+) -> Iterator[dict[str, Any]]:
+    """Yield the described operations of every ``APIRoute`` that ``selects`` picks."""
+    paths = openapi_schema.get("paths", {})
+    for route in iter_route_contexts(application.routes):
+        if not isinstance(route.original_route, APIRoute) or not selects(route):
+            continue
+        path_item = paths.get(route.path_format, {})
+        for method in route.methods or ():
+            operation = path_item.get(method.lower())
+            if operation is not None:
+                yield operation
+
+
 def build_openapi(application: FastAPI) -> dict[str, Any]:
     """Describe ``application``; bearer security follows each route's dependencies, not its URL."""
     openapi_schema = get_openapi(
@@ -276,25 +295,25 @@ def build_openapi(application: FastAPI) -> dict[str, Any]:
             "description": "Access JWT issued by auth-api, valid for 15 minutes.",
         }
     }
-    paths = openapi_schema.get("paths", {})
-    for route in iter_route_contexts(application.routes):
-        if not isinstance(route.original_route, APIRoute) or not _verifies_bearer(route.dependant):
-            continue
-        path_item = paths.get(route.path_format, {})
-        for method in route.methods or ():
-            operation = path_item.get(method.lower())
-            if operation is None:
-                continue
-            if "security" not in operation:
-                operation["security"] = [{"bearerAuth": []}]
-            operation.setdefault("responses", {})
-            operation["responses"].setdefault(
-                "503", {"description": "Authentication is not configured"}
-            )
-            if "401" not in operation["responses"]:
-                operation["responses"]["401"] = {
-                    "description": "Missing or invalid Bearer access token"
-                }
+    for operation in _operations(
+        openapi_schema, application, lambda route: _verifies_bearer(route.dependant)
+    ):
+        if "security" not in operation:
+            operation["security"] = [{"bearerAuth": []}]
+        operation.setdefault("responses", {})
+        operation["responses"].setdefault(
+            "503", {"description": "Authentication is not configured"}
+        )
+        if "401" not in operation["responses"]:
+            operation["responses"]["401"] = {
+                "description": "Missing or invalid Bearer access token"
+            }
+    for operation in _operations(
+        openapi_schema, application, lambda route: route.body_field is not None
+    ):
+        operation.setdefault("responses", {}).setdefault(
+            "413", {"description": "Request body exceeds the size limit"}
+        )
     return openapi_schema
 
 
