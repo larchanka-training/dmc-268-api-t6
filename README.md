@@ -143,8 +143,8 @@ into a queued Run locally, follow the recipe in
 connection. It is off by default: the API needs `GITLAB_WEBHOOK_INTAKE_ENABLED=true` (otherwise
 every request gets `503`) and the connection needs `gitlab_admin activate`. `X-Gitlab-Token` is
 checked first, against the stored digest of that connection's webhook secret: a wrong token, an
-unknown or revoked connection get `401`, and a valid token for a connection that is not active
-gets `503`; a `webhook-id` or `Idempotency-Key` header is required (`400` without it or
+unknown or revoked connection get `401`, and a valid token for a connection that has not been
+activated yet (`intake_enabled` is false) gets `503`; a `webhook-id` or `Idempotency-Key` header is required (`400` without it or
 on a malformed request) and the body is limited to 10 MiB (`413`). An accepted delivery is stored
 in `webhook_events` and answered `202` with `{"status": "pending"}`, or `"duplicate"` for a
 repeated delivery key; webhook-worker projects it later. Connection setup (keyring, `gitlab_admin`
