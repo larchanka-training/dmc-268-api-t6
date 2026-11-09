@@ -10,6 +10,9 @@
 Показ идёт в `axyi/dmc268-t6-sandbox`: на него установлен staging App, поэтому песочница есть в
 списке Repositories staging UI. Готовить за 1–2 дня до показа и проверять за 15 минут до начала.
 
+Вкладки браузера, на которые ссылаются шаги: 1 — `.review/rules.md` в `main` песочницы; 2 —
+демо-PR; 3 — staging UI, Settings песочницы; 4 — staging UI, Analytics; 5 — запасной PR.
+
 | Что | Должно быть | Где проверить |
 |---|---|---|
 | Стенд | `{"status":"ok"}`; последний CI/CD на `main` api зелёный, staging выкачен из него | [staging-api /healthcheck](https://staging-api.dmc268-t6.axyi.ru/healthcheck), Actions api |
@@ -20,7 +23,6 @@
 | Бюджет | у workspace `GitHub: axyi` нет надписи «The daily budget is used up, reviews are paused until 00:00 UTC» | staging UI → Analytics → Budget today |
 | Демо-PR | открыт заранее, CI зелёный, лейбла `ai-review` нет | вкладка 2 |
 | Запасной PR | подготовлен за 1–2 дня до показа: окно `7 days` в Analytics скользящее, и прогон старше 7 суток из него выпадет. Лейбл поставлен, ревью опубликовано, в нём хотя бы один inline-комментарий в `shop/orders.py`, в Checks `AI Review` — «AI-ревью: …». Inline-комментариев нет — закрыть этот PR и подготовить запасной заново, на ветке `demo/<дата>-backup-2` | вкладка 5 |
-| Вкладки | 1 — `.review/rules.md` в `main`; 2 — демо-PR; 3 — staging UI, Settings песочницы; 4 — staging UI, Analytics; 5 — запасной PR | — |
 
 На 09.11.2026 Automatic review на staging выключен во всех подключённых репозиториях. Тот, кто
 готовит показ, включает его для песочницы и после показа возвращает как было.
