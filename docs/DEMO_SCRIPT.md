@@ -32,16 +32,23 @@
 Почему каждый показ идёт на новом PR. Ревью по лейблу запускается для пары (PR, head-коммит)
 только один раз. Повторный лейбл на том же коммите ничего не запустит.
 
-Подготовка обоих PR — одна и та же, с разными ветками (`<дата>` — день показа, `ГГГГММДД`):
+Подготовка обоих PR — одна и та же, с разными ветками (`<дата>` — день показа, `ГГГГММДД`).
 
-```bash
-git clone git@github.com:axyi/dmc268-t6-sandbox.git && cd dmc268-t6-sandbox
-git switch -c demo/<дата>-live origin/main      # для запасного: demo/<дата>-backup
-# shop/orders.py — листинг из приложения A
-git add shop/orders.py && git commit -m "feat(shop): add order lookups"
-git push -u origin HEAD
-gh pr create --base main --title "feat(shop): add order lookups" --body "Order lookups for the account page."
-```
+1. Клон и ветка:
+
+   ```bash
+   git clone git@github.com:axyi/dmc268-t6-sandbox.git && cd dmc268-t6-sandbox
+   git switch -c demo/<дата>-live origin/main      # для запасного: demo/<дата>-backup
+   ```
+
+2. Создать файл `shop/orders.py` и вставить в него весь блок кода из приложения A.
+3. Коммит, push и PR:
+
+   ```bash
+   git add shop/orders.py && git commit -m "feat(shop): add order lookups"
+   git push -u origin HEAD
+   gh pr create --base main --title "feat(shop): add order lookups" --body "Order lookups for the account page."
+   ```
 
 На запасном PR лейбл `ai-review` ставят сразу и дожидаются ревью. На демо-PR лейбл не ставят.
 
