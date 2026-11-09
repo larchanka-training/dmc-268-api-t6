@@ -8,7 +8,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict
 
 from app.common.domain.run_enums import Engine, RunStatus
 from app.modules.reviews.application.finding_side import Side
-from app.modules.reviews.application.review_output import Category, Severity
+from app.modules.reviews.application.review_output import Category, Effort, Severity
 from app.modules.reviews.application.run_trigger import RunTrigger
 from app.modules.reviews.application.verdict import Verdict
 
@@ -135,7 +135,7 @@ class FindingViewDto(ApiDto):
 class ReviewSummaryDto(ApiDto):
     problem: str
     done_well: str
-    effort: str
+    effort: Effort
 
 
 class SeverityCountsDto(ApiDto):

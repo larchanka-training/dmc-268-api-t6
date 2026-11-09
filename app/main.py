@@ -655,7 +655,9 @@ def to_run_detail_dto(detail: RunDetail) -> RunDetailDto:
             )
             for item in review.findings
         ],
-        summary=ReviewSummaryDto(**review.summary) if review.summary is not None else None,
+        summary=(
+            ReviewSummaryDto.model_validate(review.summary) if review.summary is not None else None
+        ),
         verdict=detail.verdict,
         severity_counts=SeverityCountsDto(**detail.severity_counts),
         budget=(

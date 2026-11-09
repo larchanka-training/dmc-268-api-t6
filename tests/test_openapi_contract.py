@@ -69,7 +69,7 @@ from app.modules.reviews.application.get_run_file_lines import (
 from app.modules.reviews.application.list_pulls import LatestRunRow, PullRequestRow
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
 from app.modules.reviews.application.rerun_run import RerunFacts
-from app.modules.reviews.application.review_output import Category, Severity
+from app.modules.reviews.application.review_output import Category, Effort, Severity
 from app.modules.reviews.application.run_events import RunUpdated
 from app.modules.reviews.application.run_trigger import RunTrigger
 from app.modules.reviews.application.try_enqueue_webhook_run import (
@@ -1296,6 +1296,7 @@ _RUNTIME_ENUM_FIELDS: list[tuple[str, str, tuple[object, ...]]] = [
         )
     ),
     ("FindingViewDto", "side", (Side, FindingSide, DiffSide)),
+    ("ReviewSummaryDto", "effort", (Effort,)),
 ]
 
 

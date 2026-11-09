@@ -47,7 +47,9 @@ def test_succeeded_check_run_with_null_verdict_never_falls_back_to_clean() -> No
     assert view.title == "AI-ревью: проверка неполная"
 
 
-@pytest.mark.parametrize("field", ["head_sha", "coverage_status", "verdict", "summary"])
+@pytest.mark.parametrize(
+    "field", ["head_sha", "coverage_status", "verdict", "summary", "summary_effort"]
+)
 def test_shared_reader_rejects_stale_or_malformed_saved_result(field: str) -> None:
     repository, _ = finalize(coverage([code_snapshot(), empty_snapshot()]))
     value = repository.response.copy()
@@ -57,6 +59,9 @@ def test_shared_reader_rejects_stale_or_malformed_saved_result(field: str) -> No
         value["coverage"] = value["coverage"] | {"status": "unknown"}
     elif field == "verdict":
         value["verdict"] = "blocking"
+    elif field == "summary_effort":
+        # Run detail types ``effort`` as ``Effort``: a stored value outside it must not reach it.
+        value["summary"] = value["summary"] | {"effort": "huge"}
     else:
         value["summary"] = {"problem": "raw model diagnostic"}
     assert read_saved_review_result(value, head_sha="a" * 40, severities=()) is None
