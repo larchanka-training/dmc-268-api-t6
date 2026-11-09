@@ -48,6 +48,7 @@ from app.modules.reviews.application.rag_index import (
     OpenReviewIndex,
     RagReadiness,
     has_retrieved_section,
+    hides_retrieved_comments,
 )
 from app.modules.reviews.application.review_context import (
     BuildReviewContext,
@@ -313,7 +314,11 @@ def _rag_readiness(
     elif index.indexed_commit_sha is not None and has_retrieved_section(
         prompt.review_system_key, prompt.review_system_version
     ):
-        plan = RagPlan()
+        plan = RagPlan(
+            hide_comments=hides_retrieved_comments(
+                prompt.review_system_key, prompt.review_system_version
+            )
+        )
         response = {"outcome": "used", "reason": _RAG_BUILD_FAILED}
     else:
         response = {"outcome": "not_ready", "reason": "prompt_version"}

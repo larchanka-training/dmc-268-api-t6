@@ -309,9 +309,11 @@ def _select(
     denied: Callable[[str], bool] = lambda path: False,
     store: BlobStore | None = None,
     reader: CachedBlobSource | None = None,
+    hide_comments: bool = False,
 ) -> RagCandidates:
     """Select on what L4 leaves behind: the head tree and the texts and facts of the PR
-    files it loaded, which are no RAG read; ``reader`` is the run's blob reader."""
+    files it loaded, which are no RAG read; ``reader`` is the run's blob reader.
+    ``hide_comments`` is what the plan of a run pinned to the prompt says (#498)."""
     blobs = store or BlobStore()
 
     async def run() -> RagCandidates:
@@ -352,6 +354,7 @@ def _select(
             loaded_facts=facts,
             shown=shown,
             denied=denied,
+            hide_comments=hide_comments,
         )
 
     return asyncio.run(run())

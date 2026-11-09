@@ -242,6 +242,10 @@ class RagPlan:
     """The RAG gate found a usable index and a prompt that shows retrieved blocks: the
     build fills the RAG slot. A block carries the commit of its own graph read."""
 
+    # The pinned prompt shows the comments of a retrieved block as markers (#498):
+    # ``hides_retrieved_comments`` decides it for the review and for the eval build alike.
+    hide_comments: bool = False
+
 
 @dataclass(frozen=True)
 class RagStats:
@@ -729,6 +733,7 @@ class BuildReviewContext:
                         loaded_facts=files.loaded_facts,
                         shown=displayed,
                         denied=denied,
+                        hide_comments=rag is not None and rag.hide_comments,
                     )
                 except Exception as exc:
                     if ends_the_run(exc):

@@ -84,6 +84,7 @@ from app.modules.reviews.application.graph_retriever import (
     GraphTarget,
 )
 from app.modules.reviews.application.prompt_budget import TokenCounter
+from app.modules.reviews.application.rag_comments import hide_comments as hidden
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -433,9 +434,11 @@ class ReverseEdgeSelector:
         loaded_facts: Mapping[str, AstFacts | FileUnavailable],
         shown: Collection[str],
         denied: Callable[[str], bool],
+        hide_comments: bool,
     ) -> RagCandidates:
         """Select on what L4 left: the head ``tree``, the PR files with head facts in
-        their L4 order, what L4 loaded, and the symbol ids of the definitions it shows."""
+        their L4 order, what L4 loaded, and the symbol ids of the definitions it shows.
+        ``hide_comments``: every block shows the comments of its file as markers (#498)."""
         files = _RevisionFiles(
             tree=tree,
             blobs=self._blobs,
@@ -484,6 +487,7 @@ class ReverseEdgeSelector:
             denied=denied,
             counter=self._counter,
             index_commit_sha=commit,
+            hide_comments=hide_comments,
         )
         for omission in removed.omissions:
             selection.drop(omission.reason, omission.path)
@@ -649,6 +653,7 @@ class _Selection:
         denied: Callable[[str], bool],
         counter: TokenCounter,
         index_commit_sha: str,
+        hide_comments: bool,
     ) -> None:
         self._diff_map = diff_map
         self._tree = tree
@@ -661,6 +666,7 @@ class _Selection:
         self._denied = denied
         self._counter = counter
         self._index_commit_sha = index_commit_sha
+        self._hide_comments = hide_comments
         self._files_shown = 0
         self.places: list[RetrievedPlace] = []
         self.omissions: list[RagOmission] = []
@@ -729,6 +735,8 @@ class _Selection:
             return
         self._files_shown += 1
         lines = text.split("\n")
+        if self._hide_comments:
+            lines = hidden(lines, facts.comments)
         for reader in new[:MAX_RAG_PLACES_PER_FILE]:
             self.places.append(self._place(path, lines, reader))
         if len(new) > MAX_RAG_PLACES_PER_FILE:
@@ -930,6 +938,13 @@ class _Selection:
         if isinstance(text, FileUnavailable):
             return None
         lines = text.split("\n")
+        if self._hide_comments:
+            # The removal was found in these facts, so they are loaded; a file without
+            # them is never shown with its comments.
+            facts = await base.files.facts_for(ref.path)
+            if isinstance(facts, FileUnavailable):
+                return None
+            lines = hidden(lines, facts.comments)
         ranges = _merged(ref.signature_ranges)
         body = "\n".join(
             line for part in ranges for line in lines[part.start_line - 1 : part.end_line]

@@ -20,6 +20,17 @@ def has_retrieved_section(review_system_key: str, review_system_version: str) ->
     return (review_system_key, review_system_version) in RETRIEVED_PROMPT_VERSIONS
 
 
+# The pinned review prompts, as `(key, version)`, whose retrieved blocks show every comment
+# as a marker (#498): text in a comment of unchanged code never reaches the model. Empty
+# until review.system v7 (#498 Part 2); v5 keeps the blocks as they are.
+COMMENT_FREE_PROMPT_VERSIONS: frozenset[tuple[str, str]] = frozenset()
+
+
+def hides_retrieved_comments(review_system_key: str, review_system_version: str) -> bool:
+    """Whether the retrieved blocks of a run pinned to this review prompt hide comments."""
+    return (review_system_key, review_system_version) in COMMENT_FREE_PROMPT_VERSIONS
+
+
 @dataclass(frozen=True)
 class RagReadiness:
     """The index as the review found it; ``index`` is None when RAG is not in effect.
