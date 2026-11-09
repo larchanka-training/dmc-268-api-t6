@@ -369,6 +369,33 @@ def test_syntax_error_marks_only_the_overlapping_symbol_incomplete() -> None:
     assert _symbol(facts, "broken").complete is False
 
 
+@pytest.mark.parametrize(
+    ("language", "source", "comments"),
+    [
+        # A comment marker inside a string is no comment; columns count UTF-8 bytes.
+        (AstLanguage.PYTHON, b'a = "#x"  # t\n# \xc3\xa9\n', [(1, 10, 1, 13), (2, 0, 2, 4)]),
+        (
+            AstLanguage.JAVASCRIPT,
+            b'const s = "//x"; // t\n/* a\n b */ f(`//${s}`);\n',
+            [(1, 17, 1, 21), (2, 0, 3, 5)],
+        ),
+        (AstLanguage.TYPESCRIPT, b"let n: number = 1; // t\n", [(1, 19, 1, 23)]),
+        (AstLanguage.TSX, b"const e = <div>{/* c */}</div>;\n", [(1, 16, 1, 23)]),
+        (
+            AstLanguage.GO,
+            b'package p\n\n// doc\nvar s = "//x" // t\n',
+            [(3, 0, 3, 6), (4, 14, 4, 18)],
+        ),
+    ],
+)
+def test_comments_are_located_by_line_and_byte_column(
+    language: AstLanguage, source: bytes, comments: list[tuple[int, int, int, int]]
+) -> None:
+    spans = _facts(language, source).comments
+
+    assert [(c.start_line, c.start_column, c.end_line, c.end_column) for c in spans] == comments
+
+
 def test_facts_survive_the_json_round_trip() -> None:
     for language, source in (
         (AstLanguage.PYTHON, _PYTHON),

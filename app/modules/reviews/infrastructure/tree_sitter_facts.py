@@ -24,6 +24,7 @@ from app.modules.reviews.application.ast_symbols import (
     AstImportName,
     AstLanguage,
     AstSymbol,
+    CommentSpan,
     ImportForm,
     ImportKind,
     SymbolKind,
@@ -55,6 +56,11 @@ _REFERENCE_TYPES = frozenset({"identifier", "type_identifier", "package_identifi
 _PYTHON_IMPORTS = frozenset(
     {"import_statement", "import_from_statement", "future_import_statement"}
 )
+# Comment nodes of the grammars (JavaScript and TypeScript also have ``<!--``); a RAG
+# excerpt shows none of them (#498).
+_COMMENT_TYPES = frozenset({"comment", "html_comment"})
+# Nodes walked between two checks of the CPU budget while comments are collected.
+_COMMENT_BUDGET_STRIDE = 1024
 _PYTHON_LABEL_OWNERS = _PYTHON_IMPORTS | {
     "attribute",
     "keyword_argument",
@@ -206,7 +212,16 @@ class _Extractor:
             package_name=self._package,
             build_constrained=self._constrained,
             has_errors=bool(self._errors),
+            comments=tuple(self._comments()),
         )
+
+    def _comments(self) -> Iterator[CommentSpan]:
+        for count, node in enumerate(_walk(self._root)):
+            if count % _COMMENT_BUDGET_STRIDE == 0:
+                self._check_budget()
+            if node.type in _COMMENT_TYPES:
+                start, end = node.start_point, node.end_point
+                yield CommentSpan(start.row + 1, start.column, end.row + 1, end.column)
 
     def _check_budget(self) -> None:
         """Stop the walk once the CPU budget of the file is spent."""

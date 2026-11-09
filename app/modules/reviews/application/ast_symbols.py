@@ -118,6 +118,16 @@ class AstImport:
 
 
 @dataclass(frozen=True)
+class CommentSpan:
+    """One comment of the source: 1-based lines, 0-based UTF-8 byte columns, end exclusive."""
+
+    start_line: int
+    start_column: int
+    end_line: int
+    end_column: int
+
+
+@dataclass(frozen=True)
 class AstFacts:
     language: AstLanguage
     profile_version: str
@@ -128,6 +138,8 @@ class AstFacts:
     package_name: str | None
     build_constrained: bool
     has_errors: bool
+    # Every comment in source order; a RAG excerpt shows none of them (#498).
+    comments: tuple[CommentSpan, ...]
 
     def symbol_named(self, name: str) -> tuple[AstSymbol, ...]:
         return tuple(item for item in self.symbols if item.name == name and item.enclosing is None)
@@ -193,6 +205,10 @@ def facts_to_json(facts: AstFacts) -> dict[str, Any]:
         "package_name": facts.package_name,
         "build_constrained": facts.build_constrained,
         "has_errors": facts.has_errors,
+        "comments": [
+            [item.start_line, item.start_column, item.end_line, item.end_column]
+            for item in facts.comments
+        ],
     }
 
 
@@ -233,4 +249,8 @@ def facts_from_json(value: dict[str, Any]) -> AstFacts:
         package_name=value["package_name"],
         build_constrained=bool(value["build_constrained"]),
         has_errors=bool(value["has_errors"]),
+        comments=tuple(
+            CommentSpan(int(item[0]), int(item[1]), int(item[2]), int(item[3]))
+            for item in value["comments"]
+        ),
     )
