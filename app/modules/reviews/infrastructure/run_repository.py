@@ -10,7 +10,19 @@ from typing import Any
 from typing import cast as type_cast
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, String, and_, case, cast, func, or_, select, true, update
+from sqlalchemy import (
+    ColumnElement,
+    String,
+    and_,
+    case,
+    cast,
+    func,
+    or_,
+    select,
+    true,
+    tuple_,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
@@ -208,11 +220,10 @@ class SqlAlchemyRunRepository:
         if repository is not None:
             statement = statement.where(Repository.full_name == repository)
         if cursor is not None:
+            # A row comparison is an index condition on ix_runs_created_id; the equivalent
+            # OR of two predicates is only a filter, read from the newest run down (#456).
             statement = statement.where(
-                or_(
-                    Run.created_at < cursor.created_at,
-                    and_(Run.created_at == cursor.created_at, Run.id < cursor.id),
-                )
+                tuple_(Run.created_at, Run.id) < (cursor.created_at, cursor.id)
             )
 
         async with self._session_scope() as session:
