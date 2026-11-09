@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Protocol
+from typing import Literal, Protocol
 
 from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.handle_review_run import FAST_RUN_COST_LIMIT
@@ -14,7 +14,15 @@ from app.modules.reviews.application.list_pulls import run_verdict
 from app.modules.reviews.application.saved_review_result import SavedReviewResult
 from app.modules.reviews.application.verdict import SEVERITIES
 
-_RANGES = {"24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30)}
+# A plain alias, not ``type``: the spec declares ``range`` inline, and a ``type`` alias would
+# become a schema of its own in ``GET /openapi.json``.
+MetricsRange = Literal["24h", "7d", "30d"]
+
+_RANGES: dict[MetricsRange, timedelta] = {
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+    "30d": timedelta(days=30),
+}
 _CATEGORIES = ("security", "correctness", "performance", "readability")
 _STATUSES = ("queued", "running", "publishing", "succeeded", "failed", "cancelled", "skipped")
 _TERMINAL = frozenset({"succeeded", "failed", "cancelled", "skipped"})
@@ -87,7 +95,7 @@ class WorkspaceDailyBudget:
 
 @dataclass(frozen=True)
 class MetricsSummary:
-    range: str
+    range: MetricsRange
     totals: MetricsTotals
     series: tuple[MetricsDay, ...]
     workspaces: tuple[WorkspaceDailyBudget, ...]
@@ -158,7 +166,9 @@ class GetMetricsSummary:
         self._source = source
         self._now = now
 
-    async def execute(self, scope: AuthScope, *, range: str, repo: str | None) -> MetricsSummary:
+    async def execute(
+        self, scope: AuthScope, *, range: MetricsRange, repo: str | None
+    ) -> MetricsSummary:
         if type(scope) is not AuthScope:
             raise ValueError("GetMetricsSummary requires an AuthScope")
         window = _RANGES.get(range)

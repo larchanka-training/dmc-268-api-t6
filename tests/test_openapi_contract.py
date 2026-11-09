@@ -9,7 +9,8 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
-from typing import Any, Self, get_args
+from enum import Enum
+from typing import Any, Self, TypeAliasType, get_args
 from uuid import UUID
 
 import pytest
@@ -28,7 +29,15 @@ from app.bootstrap.reviews_api import (
     get_run_publisher,
 )
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
-from app.common.infrastructure.db.enums import Engine, RunState
+from app.common.infrastructure.db.enums import (
+    Engine,
+    FindingCategory,
+    FindingSeverity,
+    FindingSide,
+    RunState,
+)
+from app.common.infrastructure.db.enums import SeverityThreshold as StoredSeverityThreshold
+from app.common.infrastructure.db.enums import WaitForCi as StoredWaitForCi
 from app.main import (
     app,
     get_file_blob_cache,
@@ -38,6 +47,12 @@ from app.main import (
 )
 from app.modules.code_index.domain.enums import PurgeReason, RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
+from app.modules.repositories.application.repository_enums import (
+    RepositoryEngine,
+    ReviewEvent,
+    SeverityThreshold,
+    WaitForCi,
+)
 from app.modules.repositories.application.repository_settings import (
     RepositorySettings,
     RepositorySettingsChange,
@@ -45,11 +60,15 @@ from app.modules.repositories.application.repository_settings import (
 from app.modules.repositories.application.rules_status import (
     GetRulesStatus,
     RulesDiagnostic,
+    RulesDocumentPath,
     RulesStatus,
     RulesStatusKind,
     StoredRulesStatus,
 )
 from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
+from app.modules.reviews.application.diff_map import DiffSide
+from app.modules.reviews.application.finding_side import Side
+from app.modules.reviews.application.get_metrics_summary import MetricsRange
 from app.modules.reviews.application.get_run_actions import RunActionResponse
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.get_run_file_lines import (
@@ -59,8 +78,9 @@ from app.modules.reviews.application.get_run_file_lines import (
 )
 from app.modules.reviews.application.list_pulls import LatestRunRow, PullRequestRow
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
+from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH
 from app.modules.reviews.application.rerun_run import RerunFacts
-from app.modules.reviews.application.review_output import Category, Severity
+from app.modules.reviews.application.review_output import Category, Effort, Severity
 from app.modules.reviews.application.run_events import RunUpdated
 from app.modules.reviews.application.run_trigger import RunTrigger
 from app.modules.reviews.application.try_enqueue_webhook_run import (
@@ -68,6 +88,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
     RunInsertCandidate,
 )
+from app.modules.reviews.application.verdict import SeverityThresholdValue, Verdict
 from tests.openapi_contract import (
     SPEC_PATH,
     _components,
@@ -1250,25 +1271,96 @@ def test_enums_match_the_ui_contract_and_the_review_output_model() -> None:
     ]
 
 
+def _python_values(source: object) -> list[object]:
+    """The members of an enum, the arguments of a ``Literal`` or its ``type`` alias, a constant."""
+    if isinstance(source, type) and issubclass(source, Enum):
+        return [member.value for member in source]
+    if isinstance(source, TypeAliasType):
+        source = source.__value__
+    return list(get_args(source)) or [source]
+
+
+def _schema_values(schema: Mapping[str, Any]) -> list[object]:
+    return list(schema["enum"]) if "enum" in schema else [schema["const"]]
+
+
+def _named_branch(schema: Mapping[str, Any]) -> tuple[bool, dict[str, Any]]:
+    """Whether ``schema`` admits null, and its other branch with the ``$ref`` name kept."""
+    branches = schema.get("anyOf", [])
+    others = [branch for branch in branches if branch != {"type": "null"}]
+    if len(branches) == 2 and len(others) == 1:
+        return True, others[0]
+    notes = {"title", "description"}
+    return False, {key: value for key, value in schema.items() if key not in notes}
+
+
+# Every runtime field whose spec schema is an enum, with each Python type that holds its values.
+_RUNTIME_ENUM_FIELDS: list[tuple[str, str, tuple[object, ...]]] = [
+    *(
+        (dto, field, (source,))
+        for dto in ("RunSessionDto", "RunDetailDto")
+        for field, source in (("status", RunState), ("engine", Engine), ("trigger", RunTrigger))
+    ),
+    ("RunDetailDto", "verdict", (Verdict,)),
+    ("LatestRunDto", "status", (RunState,)),
+    ("LatestRunDto", "verdict", (Verdict,)),
+    *(
+        (dto, field, sources)
+        for dto in ("ReviewCommentDto", "FindingViewDto")
+        for field, sources in (
+            ("severity", (Severity, FindingSeverity)),
+            ("category", (Category, FindingCategory)),
+        )
+    ),
+    ("FindingViewDto", "side", (Side, FindingSide, DiffSide)),
+    ("ReviewSummaryDto", "effort", (Effort,)),
+    ("MetricsSummaryDto", "range", (MetricsRange,)),
+    *(
+        (f"{kind}RulesStatusDto", "path", (RulesDocumentPath, RULES_DOCUMENT_PATH))
+        for kind in ("Present", "Missing", "Invalid", "Unavailable", "Pending")
+    ),
+    *(
+        (dto, field, sources)
+        for dto in ("RepositoryDto", "RepositoryUpdateDto")
+        for field, sources in (
+            ("defaultEngine", (RepositoryEngine,)),
+            ("waitForCi", (WaitForCi, StoredWaitForCi)),
+            ("reviewEvent", (ReviewEvent,)),
+            (
+                "severityThreshold",
+                (SeverityThreshold, StoredSeverityThreshold, SeverityThresholdValue),
+            ),
+        )
+    ),
+]
+
+
 @pytest.mark.parametrize(
-    ("field", "component", "python_values"),
-    [
-        ("status", "RunStatus", [state.value for state in RunState]),
-        ("engine", "Engine", [engine.value for engine in Engine]),
-        ("trigger", "RunTrigger", list(get_args(RunTrigger.__value__))),
-    ],
+    ("dto", "field", "sources"),
+    _RUNTIME_ENUM_FIELDS,
+    ids=[f"{dto}.{field}" for dto, field, _ in _RUNTIME_ENUM_FIELDS],
 )
 def test_runtime_run_dtos_declare_the_enums_of_the_spec(
-    field: str, component: str, python_values: list[str]
+    dto: str, field: str, sources: tuple[object, ...]
 ) -> None:
     response = TestClient(app).get("/openapi.json")
     assert response.status_code == 200
     runtime = response.json()["components"]["schemas"]
-    enum_ref = {"$ref": f"#/components/schemas/{component}"}
+    runtime_field = runtime[dto]["properties"][field]
+    spec_field = _components()[dto.removesuffix("Dto")]["properties"][field]
 
-    for dto in ("RunSessionDto", "RunDetailDto"):
-        assert runtime[dto]["properties"][field] == enum_ref
-    assert runtime[component]["enum"] == _components()[component]["enum"] == python_values
+    runtime_nullable, runtime_shape = _named_branch(runtime_field)
+    spec_nullable, spec_shape = _named_branch(spec_field)
+    # The shape of the spec: a ``$ref`` to the named enum, or an inline enum or const.
+    assert runtime_shape == spec_shape
+    # An optional field is a PATCH field: omitted keeps the value, and the DTO rejects an
+    # explicit null itself, so the null branch the schema gives it says nothing about the value.
+    if field in runtime[dto].get("required", []):
+        assert runtime_nullable == spec_nullable
+    values = _schema_values(_split_null(runtime_field, runtime)[1])
+    assert values == _schema_values(_split_null(spec_field, _components())[1])
+    for source in sources:
+        assert _python_values(source) == values, source
 
 
 @pytest.mark.parametrize(

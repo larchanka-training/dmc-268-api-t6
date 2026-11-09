@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, cast, get_args
 from uuid import UUID
 
 import pytest
@@ -15,6 +15,7 @@ from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.get_metrics_summary import (
     DayAggregate,
     GetMetricsSummary,
+    MetricsRange,
     MetricsRead,
     TerminalHead,
     WorkspaceSpend,
@@ -153,11 +154,18 @@ def test_invisible_repo_is_empty_and_omitted_repo_keeps_the_caller_workspace() -
     assert source.calls[1][3] is None
 
 
+@pytest.mark.parametrize("range_", get_args(MetricsRange))
+def test_every_declared_range_has_a_window(range_: MetricsRange) -> None:
+    use_case = GetMetricsSummary(_Source(_read()), now=lambda: _NOW)
+
+    assert asyncio.run(use_case.execute(_SCOPE, range=range_, repo=None)).range == range_
+
+
 def test_range_outside_the_three_windows_is_rejected() -> None:
     use_case = GetMetricsSummary(_Source(_read()), now=lambda: _NOW)
 
     with pytest.raises(ValueError, match="24h"):
-        asyncio.run(use_case.execute(_SCOPE, range="1h", repo=None))
+        asyncio.run(use_case.execute(_SCOPE, range=cast(MetricsRange, "1h"), repo=None))
 
 
 def test_execute_rejects_a_scope_that_is_not_an_auth_scope() -> None:
