@@ -371,69 +371,37 @@ def test_the_host_reads_nothing_when_the_stack_did_not_arrive(tmp_path: Path) ->
     assert _docker_calls(tmp_path) == []
 
 
-def test_the_summary_shows_the_outcome_line_without_the_ssh_banner(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("stack", "heading"), [("prod", "Prod"), ("staging", "Staging")])
+def test_the_summary_shows_the_outcome_line_without_the_ssh_banner(
+    tmp_path: Path, stack: str, heading: str
+) -> None:
     stdout = f"{LINE}\n{DRONE_SSH_BANNER}"
 
     result, summary = _bash(
-        _script(SHOW), tmp_path, {"DELIVERY_ID": DELIVERY, "LOOKUP_STDOUT": stdout}
+        _script(SHOW), tmp_path, {"DELIVERY_ID": DELIVERY, "STACK": stack, "LOOKUP_STDOUT": stdout}
     )
 
     assert result.returncode == 0, result.stderr
-    assert LINE in summary
-    assert "Successfully executed" not in summary
-
-
-@pytest.mark.parametrize(
-    ("stdout", "body"),
-    [
-        (f"{LINE}\n{DRONE_SSH_BANNER}", f"\n```text\n{LINE}\n```\n"),
-        (
-            DRONE_SSH_BANNER,
-            "- No outcome line in the last 168 h of the webhook-worker log: not processed yet,"
-            " deferred, an unknown delivery id, or the container was recreated by a later deploy"
-            " (its log is gone)\n",
-        ),
-    ],
-)
-def test_the_prod_summary_is_unchanged_by_the_stack_input(
-    tmp_path: Path, stdout: str, body: str
-) -> None:
-    result, summary = _bash(
-        _script(SHOW), tmp_path, {"DELIVERY_ID": DELIVERY, "STACK": "prod", "LOOKUP_STDOUT": stdout}
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert summary == f"### Prod webhook outcome\n\n- Delivery: `{DELIVERY}`\n{body}"
-
-
-def test_the_staging_summary_names_the_staging_stack(tmp_path: Path) -> None:
-    result, summary = _bash(
-        _script(SHOW),
-        tmp_path,
-        {
-            "DELIVERY_ID": DELIVERY,
-            "STACK": "staging",
-            "LOOKUP_STDOUT": f"{LINE}\n{DRONE_SSH_BANNER}",
-        },
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert (
-        summary
-        == f"### Staging webhook outcome\n\n- Delivery: `{DELIVERY}`\n\n```text\n{LINE}\n```\n"
+    # For prod, the summary it printed before the stack input (#574), byte for byte.
+    assert summary == (
+        f"### {heading} webhook outcome\n\n- Delivery: `{DELIVERY}`\n\n```text\n{LINE}\n```\n"
     )
 
 
 def test_the_summary_says_when_there_is_no_outcome_line(tmp_path: Path) -> None:
     result, summary = _bash(
-        _script(SHOW), tmp_path, {"DELIVERY_ID": DELIVERY, "LOOKUP_STDOUT": DRONE_SSH_BANNER}
+        _script(SHOW),
+        tmp_path,
+        {"DELIVERY_ID": DELIVERY, "STACK": "prod", "LOOKUP_STDOUT": DRONE_SSH_BANNER},
     )
 
     assert result.returncode == 0, result.stderr
-    assert DELIVERY in summary
-    assert "No outcome line" in summary
-    assert "recreated by a later deploy" in summary
-    assert "```" not in summary
+    assert summary == (
+        f"### Prod webhook outcome\n\n- Delivery: `{DELIVERY}`\n"
+        "- No outcome line in the last 168 h of the webhook-worker log: not processed yet,"
+        " deferred, an unknown delivery id, or the container was recreated by a later deploy"
+        " (its log is gone)\n"
+    )
 
 
 def test_the_summary_cannot_be_forged_with_a_closing_fence(tmp_path: Path) -> None:
