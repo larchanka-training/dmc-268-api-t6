@@ -12,6 +12,24 @@ from app.modules.reviews.application.review_output import ReviewOutput
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
 
 
+def _added_file_diff_map(path: str, line_count: int) -> DiffMap:
+    """One added file whose new-side lines ``1..line_count`` are anchorable."""
+    lines = "\n".join(f"+line{n}" for n in range(1, line_count + 1))
+    patch = f"@@ -0,0 +1,{line_count} @@\n{lines}"
+    return _diff_map_from_vcs(
+        VcsFile(
+            path,
+            "added",
+            None,
+            None,
+            line_count,
+            0,
+            line_count,
+            patch,
+        )
+    )
+
+
 def _diff_map_from_vcs(*files: VcsFile) -> DiffMap:
     pull_request = VcsPullRequest(
         locator=PullRequestLocator(

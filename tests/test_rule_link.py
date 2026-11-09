@@ -43,8 +43,8 @@ from app.modules.reviews.application.store_review_output import (
 from app.modules.reviews.application.verdict import HashedFinding, findings_hash
 from app.modules.reviews.infrastructure.models import Finding
 from app.modules.reviews.infrastructure.publication_findings import published_finding_from_row
+from tests.findings_post_processor_fakes import _added_file_diff_map
 from tests.policy_snapshot_fakes import make_policy_document_present
-from tests.test_findings_post_processor import _added_file_diff_map
 from tests.verifier_pipeline_fakes import (
     MAIN_BLOCK_ID,
     RUN_ID,

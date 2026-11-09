@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
+    InMemoryInstallationAccessTokenCache,
 )
 from app.modules.reviews.application.findings_post_processor import (
     ProcessedFinding,
@@ -43,7 +44,6 @@ from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunTraceUnitOfWork,
 )
 from tests.portal_postgres import HEAD, INSTALL_A, RUN_ATTEMPTED, Env, portal_schema
-from tests.test_retired_installation_postgres import DiscardTokenCache
 
 _LINK = (
     "https://github.com/octo/a/blob/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -182,7 +182,7 @@ def test_a_redelivered_review_keeps_its_findings_inline_with_their_comments(env:
                     app_id="42",
                     private_key="unused",
                     jwt_encoder=lambda claims, key: "jwt",
-                    cache=DiscardTokenCache(),
+                    cache=InMemoryInstallationAccessTokenCache(now=time.time),
                     now=time.time,
                 )
                 await PublishRunReview(
