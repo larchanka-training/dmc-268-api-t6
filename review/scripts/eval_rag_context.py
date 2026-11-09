@@ -53,7 +53,10 @@ from app.modules.reviews.application.prompt_builder import (
     parse_unified_diff,
 )
 from app.modules.reviews.application.rag_context import CachedBlobSource
-from app.modules.reviews.application.rag_index import has_retrieved_section
+from app.modules.reviews.application.rag_index import (
+    has_retrieved_section,
+    hides_retrieved_comments,
+)
 from app.modules.reviews.application.review_context import (
     BuildReviewContext,
     RagPlan,
@@ -242,6 +245,10 @@ async def build_arm_input(case_dir: Path, arm: Arm, *, review_model: str) -> Arm
         rag_blobs=blobs,
     )
     matcher = IgnoreMatcher(parse_review_ignore(None))
+    bindings = snapshot.prompt_bindings
+    # Arm B asks the gate the review asks (``review_context_stage``): the pinned prompt
+    # decides whether the retrieved blocks hide their comments (#498).
+    hide = hides_retrieved_comments(bindings.review_system_key, bindings.review_system_version)
     try:
         payload = await builder.execute(
             diff_map=diff_map,
@@ -249,7 +256,7 @@ async def build_arm_input(case_dir: Path, arm: Arm, *, review_model: str) -> Arm
             matcher=matcher,
             ignore=apply_ignore(matcher, diff_map, builtin_excluded=is_generated_path),
             token_budget=FAST_CONTEXT_TOKEN_BUDGET,
-            rag=RagPlan() if arm == "B" else None,
+            rag=RagPlan(hide_comments=hide) if arm == "B" else None,
         )
     finally:
         await parser.aclose()
@@ -259,7 +266,6 @@ async def build_arm_input(case_dir: Path, arm: Arm, *, review_model: str) -> Arm
             "(lock or generated files): its prompt would name them and the case cannot"
         )
 
-    bindings = snapshot.prompt_bindings
     section = has_retrieved_section(bindings.review_system_key, bindings.review_system_version)
     system = system_bytes.decode("utf-8")
     excerpts = snapshot_excerpts(payload, retrieved_section=section)
