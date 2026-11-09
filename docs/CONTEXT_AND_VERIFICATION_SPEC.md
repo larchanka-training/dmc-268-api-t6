@@ -1325,6 +1325,8 @@ unsupported LEFT или недоступном расширении AST/импо
 
 Для инкрементального ревью (`run.is_incremental = true`) вердикт PR и итоговые счетчики вычисляются над объединенным множеством активных находок: $F_{\text{active}} = (F_{\text{persisting}} \setminus F_{\text{resolved}}) \cup F_{\text{new}}$ ([`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6.8). Если хотя бы одна сохраняющаяся активная находка имеет уровень critical или high, вердикт строго устанавливается в `blocking` (исход `clean` категорически запрещён даже при полном отсутствии новых дефектов в инкрементальной дельте); при срабатывании summary-only по дельте (#365) вердикт также удерживается сохраняющимися активными находками базы.
 
+У инкрементального Run `coverage.version = 2`: итоговый `coverage.status` равен статусу дельты только при полном покрытии базового Run; при неполном покрытии базы он `partial` даже после чистой дельты (INC §6.4 и §6.8). Полный Run сохраняет v1; читатели принимают обе версии.
+
 Не вводится новый enum вердикта: отдельный `coverage.status` и причины позволяют
 UI отличить неполноту от незавершённого run. В списках и detail используется
 сохранённый итог; старый пересчёт `empty findings → clean` для v1 результата запрещён.
@@ -1663,6 +1665,8 @@ hunks, невозможная нулевая координата существ
 | `unsupported_change` | Достоверный gitlink/submodule либо доказанный чистый rename/mode-only без текстовых изменений и без поддерживаемого анализа; technical, если ранее не доказано исключение. Один raw `patch_state=metadata_only` не доказывает этот класс |
 | `too_large` | >20 000 additions+deletions, >20 000 LF-строк patch (включая context/заголовки), >1 048 576 UTF-8 байт patch или >1 048 576 сырых байт blob / достоверного blob size; либо явный provider too_large / остановка чтения на лимите; technical |
 | `missing_patch` / `truncated_patch` / `malformed_patch` | Нет полного достоверного patch обычного файла и нет доказательства предыдущих причин; incomplete, не разрешает none |
+
+В coverage v2 инкрементального Run есть отдельное доказанное исключение `outside_incremental_delta`: строка полного сохранённого diff не входит в закреплённый scope дельты (INC §6.4). Это не `file_omissions.reason` и не `drop_reason = 'out_of_incremental_diff_scope'` для кандидата модели. Исключение не входит в сумму для `all_excluded`; при наличии вернувшихся к базе путей (`delta_absent_paths`) Run должен дойти до T14, чтобы разрешить прежние треды.
 
 `empty_file` — доказанное исключение E только для `added` с поддерживаемым
 каноническим точным путём, без предыдущего пути (`previous_filename is None`, логический `old_path=null`),

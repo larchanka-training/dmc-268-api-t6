@@ -190,11 +190,23 @@
 | [11. Приёмочные сценарии и оценка качества](CONTEXT_AND_VERIFICATION_SPEC.md#11-приёмочные-сценарии-и-оценка-качества) | Приёмочные сценарии и оценка качества |
 | [12. Согласование контрактов и порядок внедрения](CONTEXT_AND_VERIFICATION_SPEC.md#12-согласование-контрактов-и-порядок-внедрения) | Что спека меняет в существующих контрактах, порядок внедрения |
 
+## Инкрементальное ревью и лимиты
+
+[`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) превышает 80 КБ. Перед чтением выполните `rg -n '^## |^### ' docs/INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md` и откройте только нужный диапазон строк:
+
+| Раздел | Содержание |
+| --- | --- |
+| §1–§5 | Инварианты, fingerprint, дедупликация, треды и базовые QA |
+| §6.1–§6.3 | Концепция, DDL и переходы Run |
+| §6.4–§6.5 | Активный Run, закреплённая голова и выбор базы |
+| §6.6–§6.7 | Развилки, scope дельты и вход модели |
+| §6.8–§6.9 | Вердикт, coverage и QA-INC |
+| §7 | Лимиты и квоты |
+
 ## Остальные файлы
 
 - Больше 80 КБ на 07.11.2026, карты нет, сразу `grep -n '^## '`: [CICD.md](CICD.md),
   [SECRETS.md](SECRETS.md), [RULES_FORMAT_SPEC.md](RULES_FORMAT_SPEC.md),
-  [INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md),
   [TEST_PLAN.md](TEST_PLAN.md), [RULES_MD_TEST_REPORT.md](test-plan/RULES_MD_TEST_REPORT.md),
   [ADR 0002](adr/0002-billing-monetization.md).
 - Журнал выбора LLM и аудит #178, вынесенные из SD §15:

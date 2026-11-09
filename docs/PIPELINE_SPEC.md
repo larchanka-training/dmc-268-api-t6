@@ -690,7 +690,7 @@ Legacy marker `<!-- ai-review findings_hash=… -->` не используетс
 | `verification_unavailable` | `failed` | verifier | да, сохранённые candidates/manifest checkpoint; максимум 3 попытки | Проверяющий временно недоступен. |
 | `verification_budget_exceeded` | `failed` | бюджет | нет | Бюджета недостаточно для обязательной проверки. |
 | `verification_deadline_exceeded` | `failed` | время | нет | Недостаточно времени для обязательной проверки. |
-| `snapshot_integrity_error` — **цель #107, код пока не пишет** | `failed` | diff/контекст | нет | Сохранённый снимок проверки не прошёл проверку целостности. На `main` пишется `policy_snapshot_integrity_error`. |
+| `snapshot_integrity_error` — **цель #306 Ч.2 для инкремента и #107 для полного Run, код пока не пишет** | `failed` | diff/контекст | нет, требуется новый Run | Закреплённый scope/coverage/digest или идентичность пути инкремента не прошли проверку. Ревью не опубликовано; запустите новый Run. На `main` пишется `policy_snapshot_integrity_error` только для снимка политики. |
 | `lease_expired` | `failed` | инфраструктура | да: реконсилер | Обработка прервалась 3 раза подряд. |
 | `internal_error` | `failed` | прочее | да: прогон | Внутренняя ошибка сервиса. |
 | `superseded` | `cancelled` | отмена | — | В PR новый коммит — ревью будет для него. |
