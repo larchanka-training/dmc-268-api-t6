@@ -335,7 +335,102 @@ def test_verifier_workflow_contract_is_safe_and_keeps_legacy_selection() -> None
     assert "path: ${{ runner.temp }}/verifier-report.json" in upload
     assert "eval-raw-responses" not in upload
     assert "retention-days: 14" in upload
+    verifier_summary = text.split("      - name: Summarize verifier evaluation\n", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+    assert "if: ${{ always() && inputs.corpus == 'verifier' }}" in verifier_summary
+    assert (
+        text.index("      - name: Summarize evaluation\n")
+        < text.index("      - name: Summarize verifier evaluation\n")
+        < text.index("      - name: Upload evaluation report\n")
+    )
     _assert_workflow_contract(text)
+
+
+def _verifier_summary(tmp_path: Path, report: dict[str, object] | None) -> str:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "uv"
+    shim.write_text('#!/bin/bash\nexec "$PYTHON_EXE" -\n')
+    shim.chmod(0o755)
+    if report is not None:
+        (tmp_path / "verifier-report.json").write_text(json.dumps(report))
+    summary = tmp_path / "summary.md"
+    result = _run(
+        "Summarize verifier evaluation",
+        tmp_path,
+        {
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "PYTHON_EXE": sys.executable,
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_STEP_SUMMARY": str(summary),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    return summary.read_text()
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "gate_status", "cost", "overrun"),
+    [
+        ("complete", "passed", "0.000200", False),
+        ("quality_failed", "failed", "0.000220", False),
+        ("no_evaluated_candidates", "failed", "0.000200", False),
+        ("approved_overrun_exceeded", "failed", "0.600000", True),
+    ],
+)
+def test_verifier_summary_shows_safe_outcome_for_each_terminal_reason(
+    tmp_path: Path, stop_reason: str, gate_status: str, cost: str, overrun: bool
+) -> None:
+    report: dict[str, object] = {
+        "stop_reason": stop_reason,
+        "proposed_gate": {"status": gate_status, "approval_status": "pending_tech_lead"},
+        "metrics": {"cost_usd": cost},
+        "approved_overrun_exceeded": overrun,
+        "cases": [{"reason": "RAW MODEL TEXT", "provider_key": "SECRET KEY"}],
+    }
+
+    content = _verifier_summary(tmp_path, report)
+
+    assert content == (
+        "## Verifier corpus evaluation\n\n"
+        f"Stop reason: {stop_reason}\n\n"
+        f"Proposed gate: {gate_status}\n\n"
+        "Gate approval: pending_tech_lead\n\n"
+        f"Cost (USD): {cost}\n\n"
+        f"Approved overrun exceeded: {str(overrun).lower()}\n"
+    )
+    assert "RAW MODEL TEXT" not in content
+    assert "SECRET KEY" not in content
+
+
+def test_verifier_summary_escapes_every_dynamic_value(tmp_path: Path) -> None:
+    report: dict[str, object] = {
+        "stop_reason": "<stop>&",
+        "proposed_gate": {"status": "<gate>&", "approval_status": "<approval>&"},
+        "metrics": {"cost_usd": "<cost>&"},
+        "approved_overrun_exceeded": "<overrun>&",
+    }
+
+    content = _verifier_summary(tmp_path, report)
+
+    assert "Stop reason: &lt;stop&gt;&amp;" in content
+    assert "Proposed gate: &lt;gate&gt;&amp;" in content
+    assert "Gate approval: &lt;approval&gt;&amp;" in content
+    assert "Cost (USD): &lt;cost&gt;&amp;" in content
+    assert "Approved overrun exceeded: &lt;overrun&gt;&amp;" in content
+    assert "<stop>" not in content
+    assert "<gate>" not in content
+    assert "<approval>" not in content
+    assert "<cost>" not in content
+    assert "<overrun>" not in content
+
+
+def test_verifier_summary_explains_missing_report(tmp_path: Path) -> None:
+    assert _verifier_summary(tmp_path, None) == (
+        "## Verifier corpus evaluation\n\n"
+        "No verifier report was produced. See the failed step for details.\n"
+    )
 
 
 def test_summary_uses_replay_metrics_without_model_diagnostics(tmp_path: Path) -> None:
@@ -572,7 +667,7 @@ def _assert_selection_contract(text: str) -> None:
     assert '          if [[ "${EVAL_CORPUS:-}" == rag ]]; then\n' in text
     assert '            system="$EVAL_REVIEW_PROMPT_FILE"\n' in text
     bodies = _run_bodies(text)
-    assert len(bodies) == 10
+    assert len(bodies) == 11
     assert not [body for body in bodies if "${{" in body]
     assert (
         'validate_dataset.py --root "$RUNNER_TEMP/eval-corpus" --final "${profile[@]}"\n'
