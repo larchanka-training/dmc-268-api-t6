@@ -85,6 +85,21 @@ API baseline gates локально и в обязательном CI: `uv run r
 
 Вынесено в [test-plan/rules-md-scenarios-163.md](test-plan/rules-md-scenarios-163.md#28-каталог-сценариев-reviewrulesmd-163) (#380).
 
+### 2.9. Приём GitLab MR (#169)
+
+Pytest покрывает приём GitLab на fakes и на мигрированной PostgreSQL. Файлам с маркером `integration` нужен `TEST_DATABASE_URL`, тестам очереди и worker — ещё RabbitMQ (стенд — выше в §2). Живой MR, redelivery без дублей и revoke на staging — отдельный ручной gate ([SECRETS](SECRETS.md), раздел «Installed GitLab»), pytest его не заменяет. Публикация в MR discussions — §1.
+
+| Область | Что проверяется | Тесты |
+| --- | --- | --- |
+| Admission | Строгий флаг `GITLAB_WEBHOOK_INTAKE_ENABLED`, по умолчанию выключен; `app.main` пускает только включённые и аутентифицированные подключения | [`test_gitlab_webhook_admission.py`](../tests/test_gitlab_webhook_admission.py) |
+| Auth | `X-Gitlab-Token` против digest своего подключения, без keyring | [`test_gitlab_webhook_auth.py`](../tests/test_gitlab_webhook_auth.py), [`test_gitlab_webhook_auth_postgres.py`](../tests/test_gitlab_webhook_auth_postgres.py) |
+| Receipts | HTTP-граница: заголовки, 10 МиБ, строгий JSON, коды ответа; stable delivery key, дубли, неизменяемый origin, leases | [`test_gitlab_webhook_delivery.py`](../tests/test_gitlab_webhook_delivery.py), [`test_gitlab_webhook_receipts.py`](../tests/test_gitlab_webhook_receipts.py), [`test_gitlab_accept_webhook.py`](../tests/test_gitlab_accept_webhook.py), [`test_gitlab_receipts_postgres.py`](../tests/test_gitlab_receipts_postgres.py) |
+| Проекция и запуск | MR-события → проекция, eligibility, enqueue Run | [`test_gitlab_merge_request_projection.py`](../tests/test_gitlab_merge_request_projection.py), [`test_gitlab_projection_postgres.py`](../tests/test_gitlab_projection_postgres.py), [`test_gitlab_run_trigger.py`](../tests/test_gitlab_run_trigger.py), [`test_gitlab_run_trigger_postgres.py`](../tests/test_gitlab_run_trigger_postgres.py), [`test_gitlab_enqueue_queue_postgres.py`](../tests/test_gitlab_enqueue_queue_postgres.py) |
+| Изоляция workspace | Резервация проекта одним подключением; одинаковые номера проектов у разных арендаторов и origin; credential и rerun только своей установки | [`test_gitlab_connections_postgres.py`](../tests/test_gitlab_connections_postgres.py), [`test_gitlab_management_postgres.py`](../tests/test_gitlab_management_postgres.py), [`test_gitlab_request_credentials_postgres.py`](../tests/test_gitlab_request_credentials_postgres.py), [`test_gitlab_run_credentials_postgres.py`](../tests/test_gitlab_run_credentials_postgres.py), [`test_gitlab_rerun_postgres.py`](../tests/test_gitlab_rerun_postgres.py) |
+| Управление | CLI `gitlab_admin` и lifecycle: create, bind, activate, rotate, revoke | [`test_gitlab_admin.py`](../tests/test_gitlab_admin.py), [`test_gitlab_admin_postgres.py`](../tests/test_gitlab_admin_postgres.py), [`test_gitlab_connection_lifecycle.py`](../tests/test_gitlab_connection_lifecycle.py), [`test_gitlab_connection_management.py`](../tests/test_gitlab_connection_management.py) |
+| Check-run | Run GitLab не вызывает GitHub checks, origin не подменяется GitHub-установкой | [`test_gitlab_check_runs_postgres.py`](../tests/test_gitlab_check_runs_postgres.py) |
+| Worker | Replay доставок в webhook-worker, review-worker GitLab на PostgreSQL и RabbitMQ | [`test_gitlab_webhook_worker.py`](../tests/test_gitlab_webhook_worker.py), [`test_gitlab_worker.py`](../tests/test_gitlab_worker.py), [`test_gitlab_worker_postgres.py`](../tests/test_gitlab_worker_postgres.py), [`test_gitlab_worker_outbox_postgres.py`](../tests/test_gitlab_worker_outbox_postgres.py) |
+
 ## 3. Методология LLM eval
 
 ### 3.1. Корпус и вход оценки
