@@ -15,6 +15,8 @@ from app.modules.reviews.application.vcs_diff import (
 )
 
 MAX_DIFF_LINES = 3000
+# Characters in a stored provider name: the width of both name columns of a run's diff.
+MAX_STORED_NAME_LENGTH = 1024
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,24 @@ class DiffSnapshot:
     omission_reason: str | None = None
     review_patch: str | None = None
     summary_only: bool = False
+
+
+def holds_without_loss(snapshot: DiffSnapshot) -> bool:
+    """Whether the run can store every provider name of the change unchanged (CVS §9.1).
+
+    An omitted file is withheld by those names; one with a NUL, a lone surrogate or more
+    characters than the column holds cannot be stored, so its isolation cannot be proven.
+    """
+    for name in (snapshot.filename, snapshot.previous_filename):
+        if name is None:
+            continue
+        try:
+            name.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        if "\x00" in name or len(name) > MAX_STORED_NAME_LENGTH:
+            return False
+    return True
 
 
 def is_proven_empty_snapshot(snapshot: DiffSnapshot) -> bool:
