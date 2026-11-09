@@ -82,8 +82,10 @@ markers = [
 complexity = 10
 max_args = 5
 max_lines = 50
-# Fake test secrets (the .gitleaks.toml allowlist) need no entry: under tests/ Skylos counts only
-# provider-shaped secrets, and it finds none in the files that hold them.
+# Fake test secrets (the .gitleaks.toml allowlist) need no entry, and Skylos has no config
+# allowlist for secrets: its secret scan skips test paths (tests/, test_*.py). A fake secret
+# elsewhere uses the FAKE_..._DO_NOT_USE marker of .gitleaks.toml, or carries
+# `# skylos: ignore[SKY-S101]` with a reason on its own line.
 exclude = [
     # Teaching Terraform stacks (#264): CI never applies them, findings there are noise.
     "terraform",
