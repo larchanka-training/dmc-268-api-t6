@@ -1760,6 +1760,7 @@ verifier. Исчерпание бюджета не разрешает публи
 | `RepoConventions` | Полный digest base-input/provenance, политика и версии (ниже) | PostgreSQL + Redis | immutable для ключа; TTL не заменяет provenance | старый head-influenced cache не переиспользуется |
 | Снимок диффа run (Р-15) | `(run_id, filename)` + diff_snapshot_id | PG: исходный доступный UI patch отдельно от review_patch/DiffMap | текст (`patch`, `review_patch`) — `RUN_DATA_RETENTION_DAYS` (90) дней с `finished_at` завершённого прогона; метаданные строки — до удаления Workspace (каскад) | собственный снимок каждого run |
 | Контекст и доказательства | `call_id`/manifest_id + workspace-scoped content digest | PG: manifest и deduplicated точные excerpts; полный rendered prompt не обязателен | `RUN_DATA_RETENTION_DAYS` (90) дней с `finished_at` завершённого прогона; `context_payloads` со статусом `summary_only` — до удаления Workspace (абзац ниже) | аудит не зависит от TTL Redis |
+| Кандидаты ревью | `(run_id, attempt)` | PostgreSQL: `review_candidate_checkpoints` с принятым ответом модели и подогнанным контекстом, включая строки кода | `RUN_DATA_RETENTION_DAYS` (90) дней с `finished_at` терминального прогона; итог в `final_review_results` остаётся | повторная попытка читает точный принятый контекст |
 | Результат прогона | `run_id UNIQUE` + final result digest и snapshot bindings | PostgreSQL | immutable после publishing | retry доставки читает сохранённый итог этого прогона; в другой head или run по findings hash не копируется (одинаковый окончательный вход модели — строка «Ответ модели ревью и верификатора») |
 | Ответ модели ревью и верификатора | `review-result-v1`: operation (`review` или `verification`), `repository_id`, модель, версия промпта, версия выходной схемы, версия профиля, digest окончательных rendered messages и digest тела запроса без messages (`max_tokens`, sampling после `extra_body`, `response_format` целиком) | Существующий Redis, префикс `review-result:`; отдельный сервер не вводится | 7 дней (`BLOB_CACHE_TTL`); попадание пропускает вызов модели и `llm.call`, в трейсе — `llm.result_cache` с источником принятого вызова (`source_run_id`, `source_call_id`, `source_manifest_id`); промах, недоступность, испорченная запись и ответ, не прошедший `check_answer` текущего manifest, — обычный вызов | тот же окончательный вход ревью или верификатора не вызывает модель снова |
 | Промпт у провайдера | стабильные версионированные блоки с раздельными source roles | prompt caching провайдера | зависит от provider profile | кэш не повышает доверие документа/конвенций |
@@ -1791,13 +1792,15 @@ diff или findings hash; ничего в сандбоксе. Снимки по
 Workspace.
 
 **Срок хранения данных прогона (#457).** Текст диффа (`code_change_diffs.patch`,
-`review_patch`), `context_manifests` и `context_payloads` живут `RUN_DATA_RETENTION_DAYS`
+`review_patch`), `context_manifests`, `context_payloads` и
+`review_candidate_checkpoints` живут `RUN_DATA_RETENTION_DAYS`
 дней (по умолчанию 90, от 1 до 3650) с `finished_at` прогона в терминальном состоянии.
 Раз в час leader-задача worker очищает их батчами (`FOR UPDATE SKIP LOCKED`) и ставит
 `runs.data_purged_at`; `runs.updated_at` не меняется, события SSE нет. Строки диффа остаются
 без текста, а `context_payloads` со статусом `summary_only` остаются целиком: на них держатся
-`summaryOnly`, его причина в check-run и запасной вердикт, текста кода в них нет. Вердикт,
-находки и счётчики серьёзности не меняются; `/diff` отвечает 200, файлы с `patch: null`.
+`summaryOnly`, его причина в check-run и запасной вердикт, текста кода в них нет.
+`final_review_results`, вердикт, находки и счётчики серьёзности не меняются;
+`/diff` отвечает 200, файлы с `patch: null`.
 Блоб не принадлежит прогону, один блоб делят многие: задача затирает его текст по его
 собственному `expires_at`, после которого читатель всё равно получает `EXPIRED`. Строка блоба
 остаётся, чтобы `/files` отвечал 410, а не 404; новая запись того же блоба возвращает текст.

@@ -31,8 +31,6 @@ from app.modules.reviews.application.review_output import (
     EvidenceRef,
     FindingPostProcessingInput,
     ReviewFindingV2,
-    ReviewOutput,
-    ReviewPublication,
     RuleLineRef,
     VerifiedReviewOutput,
 )
@@ -43,8 +41,10 @@ from app.modules.reviews.application.store_review_output import (
 from app.modules.reviews.application.verdict import HashedFinding, findings_hash
 from app.modules.reviews.infrastructure.models import Finding
 from app.modules.reviews.infrastructure.publication_findings import published_finding_from_row
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
 from tests.findings_post_processor_fakes import _added_file_diff_map
 from tests.policy_snapshot_fakes import make_policy_document_present
+from tests.review_output_fakes import InMemoryFinalization
 from tests.verifier_pipeline_fakes import (
     MAIN_BLOCK_ID,
     RUN_ID,
@@ -62,6 +62,10 @@ _LINK = (
     "https://github.com/acme/widgets/blob/"
     "1111111111111111111111111111111111111111/.review/rules.md?plain=1#L5-L8"
 )
+
+
+class _Publisher(_AcceptingCheckpointPublisher, FakePublisher):
+    pass
 
 
 def _hashed(rule_link: str | None = None) -> HashedFinding:
@@ -245,7 +249,7 @@ def _executed(
     *,
     severity_threshold: Literal["all", "warning", "critical"] = "all",
 ) -> VerifiedReviewOutput:
-    publisher = FakePublisher()
+    publisher = _Publisher()
     pipeline = ExecuteReviewRun(
         FakeProcessor(),
         _SnapshotRepository(severity_threshold),
@@ -297,12 +301,18 @@ _LINES_URL = (
 )
 
 
-class _StoringRepository:
+class _StoringRepository(InMemoryFinalization):
     def __init__(self, repository: str | None, max_inline: int | None) -> None:
         self._repository = repository
         self._max_inline = max_inline
-        self.processed: ProcessedReviewOutput | None = None
-        self.findings_hash: str | None = None
+
+    @property
+    def processed(self) -> ProcessedReviewOutput | None:
+        return self.finalized_processed
+
+    @property
+    def findings_hash(self) -> str | None:
+        return self._finalized_plan.findings_hash if self._finalized_plan else None
 
     async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
         return FindingPostProcessingInput(
@@ -321,20 +331,8 @@ class _StoringRepository:
             head_sha="a" * 40,
             head_current=True,
             repository_review_event="COMMENT",
+            attempt=1,
         )
-
-    async def store_review_output(
-        self,
-        run_id: UUID,
-        answer: dict[str, Any],
-        parsed: ReviewOutput,
-        processed: ProcessedReviewOutput,
-    ) -> ReviewPublication:
-        self.processed = processed
-        return ReviewPublication(head_sha="a" * 40, findings=(), review_body="body")
-
-    async def enter_publishing(self, run_id: UUID, **kwargs: Any) -> None:
-        self.findings_hash = kwargs["postprocess_response"]["findings_hash"]
 
 
 def _stored(
@@ -350,6 +348,7 @@ def _stored(
         cast(Any, lambda: FakeUnitOfWork(reviews)),
         FakeQueue(),
         worker_id="test-worker",
+        expected_attempt=1,
         run_url=lambda _: None,
     )
     output = VerifiedReviewOutput(

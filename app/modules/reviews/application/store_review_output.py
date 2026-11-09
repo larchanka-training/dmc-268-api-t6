@@ -24,8 +24,6 @@ from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
     InvalidReviewOutput,
     ReviewOutput,
-    ReviewOutputRepository,
-    ReviewPublication,
     RuleLineRef,
     VerifiedReviewOutput,
     _as_json_object,
