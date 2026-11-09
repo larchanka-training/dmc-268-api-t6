@@ -344,14 +344,14 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                         "WHERE key='review.system' AND is_active=true"
                     )
                 )
-                assert active_version == 5
-                v5_id = await session.scalar(
-                    text("SELECT id FROM prompt_versions WHERE key='review.system' AND version=5")
+                assert active_version == 6
+                v6_id = await session.scalar(
+                    text("SELECT id FROM prompt_versions WHERE key='review.system' AND version=6")
                 )
-                assert v5_id is not None
+                assert v6_id is not None
                 candidate = await SqlAlchemyWebhookRunStore(session).lock_candidate(change_id)
                 assert isinstance(candidate, RunInsertCandidate)
-                assert candidate.prompt_version_id == v5_id
+                assert candidate.prompt_version_id == v6_id
                 pending = await SqlAlchemyWebhookRunStore(session).insert_webhook_run(
                     candidate, datetime.now(UTC)
                 )
@@ -545,7 +545,7 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                         1,
                         "fast",
                         datetime.now(UTC) + timedelta(minutes=5),
-                        v5_id,
+                        v6_id,
                         rule_id,
                         "bitbucket-rag-worker",
                     )
