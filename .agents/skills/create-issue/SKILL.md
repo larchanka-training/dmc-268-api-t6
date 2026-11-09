@@ -37,6 +37,7 @@ All in `.agents/skills/create-issue/scripts/`:
 | `issue-link.sh OWNER/REPO#N [--parent REF] [--blocked-by REF]...`          | Set native links on an existing issue, idempotently, each read back                  |
 | `issue-link.sh OWNER/REPO --check [--parent REF] [--blocked-by REF]...`    | Look the link targets up for an issue not created yet; writes nothing                |
 | `issue-batch.py <batch.json> [--dry-run] [--no-board]`                     | A batch of issues: validate, preview, create in order once, resume on a rerun        |
+| `issue-board.py ISSUE_URL [STATUS]`                                        | Recheck a recorded board failure; preserve Status unless explicitly requested        |
 | `issue-batch.py --compare-shape GOLDEN CANDIDATE`                          | Compare two batch files by shape — how the golden `examples/` are checked            |
 
 Creating labels or milestones, comments, closing: plain `gh` calls — `references/hosts.md`.

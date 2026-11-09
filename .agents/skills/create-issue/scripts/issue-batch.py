@@ -48,7 +48,8 @@ Errors: {"error": "..."} on stderr; the item scripts' stderr is passed through, 
 Exit
 ----
 0 every item done · 2 usage or invalid batch (nothing ran), a state entry that does
-not match its item, or an item exit 2 · 3 auth · 4 an item exit 4, or a duplicate
+not match its item, an item exit 2, or another run holding this batch's lock · 3 auth ·
+4 an item exit 4, or a duplicate
 that is not adopted · 5 network/unknown, or a create whose result could not be read
 or recorded · 6 an issue — created now or recorded earlier — whose board step failed
 · 7 a native link failed (wins over 6). 2-5 stop the batch: the state file keeps what
@@ -58,8 +59,9 @@ shape, 1 different, 2 a file is not a batch.
 State: ${XDG_CACHE_HOME:-$HOME/.cache}/create-issue/batches/<id>.json —
 {"started_at": ISO, "items": {key: {"url", "number", "repo", "summary", "board",
 "links"}}}; started_at is written before the first create, each entry atomically
-right after its item.
-Test seam: ISSUE_BATCH_SCRIPTS_DIR — the directory issue-create.sh and issue-link.sh
+right after its item. A real run holds an OS lock on adjacent <id>.lock through
+its final result; a concurrent run stops, and a crashed run releases the lock.
+Test seam: ISSUE_BATCH_SCRIPTS_DIR — the directory issue-create.sh, issue-link.sh and issue-board.py
 are run from (default: this script's directory; a warning says when it is set); the
 builder always runs from here.
 """
@@ -68,6 +70,7 @@ builder always runs from here.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import re
@@ -472,7 +475,9 @@ def refusal(dup: dict[str, Any], started_at: str | None, user: Any) -> str | Non
     if author.lower() != user.lower():
         return f"it was opened by {author}, not by you ({user})"
     start, created = earliest(started_at), when(dup.get("createdAt"))
-    if start is None or created is None or created < start:
+    if created is None:
+        return "its creation time is unknown"
+    if start is None or created < start:
         skew = f"more than {CLOCK_SKEW_S} s"
         return f"it was created {skew} before this batch started ({started_at})"
     return None
@@ -528,17 +533,17 @@ def how_to_record(key: str, state_file: str) -> str:
 
 def how_to_start(item: dict[str, Any], dup: dict[str, Any], path: Path) -> str:
     """The way out for a duplicate maybe_own() flags on a first run, before the state
-    file exists: the whole file load_state() accepts, ready to write — and its directory,
-    which a new container or machine lacks too. started_at is the issue's createdAt, so a
-    rerun also adopts the issues that lost run created after it."""
+    file exists: the whole file load_state() accepts, ready to write. The lock already
+    created its directory. started_at is the issue's createdAt, so a rerun also adopts
+    the issues that lost run created after it."""
     record = {"url": dup.get("url"), "number": dup.get("number"), "repo": item["repo"]}
     state = {
         "started_at": dup.get("createdAt"),
         "items": {item["key"]: {**record, "summary": item["summary"]}},
     }
     return (
-        "if it is this batch's own issue (a run whose state file is lost created it), create "
-        f"{path.parent} if it is missing, then write {path} as "
+        "if it is this batch's own issue (a run whose state file is lost created it), "
+        f"write {path} as "
         f"{json.dumps(state, ensure_ascii=False)} and rerun; {NO_RENAME}"
     )
 
@@ -765,11 +770,34 @@ def run(
                 links = ensure_links(key, entry, spec)
                 record(key, {**entry, "links": links}, new=False)
                 if entry.get("board") == "failed":
-                    worst = max(worst, 6)
-                    warn(
-                        f'item "{key}": {entry["url"]} is recorded with a failed board step — '
-                        f"{BOARD_REPAIR.format(url=entry['url'])}, then set its Status on the board"
-                    )
+                    code, board_out, msg = 6, None, ""
+                    if not no_board:
+                        code, board_out, msg, _ = call(
+                            "issue-board.py",
+                            [entry["url"], *([spec["status"]] if spec.get("status") else [])],
+                        )
+                    if (
+                        code == 0
+                        and isinstance(board_out, dict)
+                        and board_out.get("board") == "added"
+                    ):
+                        entry = {**entry, "board": "added"}
+                        record(key, {**entry, "links": links}, new=False)
+                    elif code == 6:
+                        worst = max(worst, 6)
+                        repair = BOARD_REPAIR.format(url=entry["url"])
+                        if spec.get("status"):
+                            repair += f", then set its Status to {spec['status']} on the board"
+                        warn(
+                            f'item "{key}": {entry["url"]} is recorded with a failed board step — '
+                            f"{repair}"
+                        )
+                    else:
+                        stop(
+                            key,
+                            code,
+                            f"issue-board.py could not check its board (exit {code}): {msg}",
+                        )
                 result(key, entry, verified=None, board=entry.get("board"), links=links)
                 continue
             spec_path = Path(work) / f"{key}.json"
@@ -918,10 +946,22 @@ def main(argv: list[str]) -> int:
             err(f'item "{with_status}" sets "status" but --no-board skips the board — drop one')
     builder = validate(batch)
     path = state_file(batch["id"])
-    state, rerun = load_state(path, ordered)
     if dry:
+        state, rerun = load_state(path, ordered)
         return preview(batch, ordered, state, rerun, no_board, builder)
-    return run(batch, ordered, state, rerun, path, no_board, builder)
+    lock_path = path.with_suffix(".lock")
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock = lock_path.open("a+")
+    except OSError as exc:
+        err(f"cannot open the batch lock {lock_path}: {exc} — nothing was created", 5)
+    with lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            err(f'batch "{batch["id"]}" is already running — wait for it to finish, then rerun')
+        state, rerun = load_state(path, ordered)
+        return run(batch, ordered, state, rerun, path, no_board, builder)
 
 
 if __name__ == "__main__":

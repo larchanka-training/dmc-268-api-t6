@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A stand-in for issue-create.sh and issue-link.sh in the issue-batch.py tests.
 
-Copied into one directory under both names, which ISSUE_BATCH_SCRIPTS_DIR points the
+Copied into one directory under the three script names, which ISSUE_BATCH_SCRIPTS_DIR points the
 driver at. Every call appends one JSON line to $STUB_LOG: {"script", "argv", "spec",
 "state"} — the spec file the driver passed (create only) and the batch state file as
 it was when the call started ($STUB_STATE), so a test sees what was recorded before
@@ -19,6 +19,7 @@ or by the issue ref (link):
   author and createdAt default to OPEN, the user and DUP_CREATED.
 * `link`: {"OWNER/REPO#N": {"code"}} — 7 marks every link failed; another non-zero
   code prints only an error.
+* `board`: {"issue URL": {"found": true}} — a recorded board failure has been repaired.
 * `user`: the authenticated login both scripts report (default octocat).
 """
 # SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/create-issue/tests/fake_issue_scripts.py
@@ -28,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -87,6 +89,8 @@ def create(argv: list[str], cfg: dict[str, Any]) -> int:
         print(json.dumps(dry, ensure_ascii=False))
         return 0
     code = item.get("code", 0)
+    if item.get("pause"):
+        time.sleep(item["pause"])
     if code == 4 and "duplicate" in item:
         dup = duplicate(item["duplicate"], repo, user)
         url = dup["url"]
@@ -134,6 +138,13 @@ def link(argv: list[str], cfg: dict[str, Any]) -> int:
     return int(code)
 
 
+def board(argv: list[str], cfg: dict[str, Any]) -> int:
+    log_call("board", argv, None)
+    found = cfg.get("board", {}).get(argv[0], {}).get("found", False)
+    print(json.dumps({"board": "added" if found else "failed"}))
+    return 0 if found else 6
+
+
 def main() -> int:
     cfg = json.loads(Path(os.environ["STUB_CFG"]).read_text(encoding="utf-8"))
     name = Path(sys.argv[0]).name
@@ -141,6 +152,8 @@ def main() -> int:
         return create(sys.argv[1:], cfg)
     if name == "issue-link.sh":
         return link(sys.argv[1:], cfg)
+    if name == "issue-board.py":
+        return board(sys.argv[1:], cfg)
     fail(name, 99)
 
 

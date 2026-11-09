@@ -108,6 +108,13 @@ def main() -> None:
         answer(cfg["project_view"])
     if argv[:2] == ["project", "field-list"]:
         answer(cfg["fields"])
+    if argv[:2] == ["project", "item-list"]:
+        replies = cfg["project_items"]
+        if isinstance(replies, list):
+            with open(os.environ["STUB_LOG"], encoding="utf-8") as fh:
+                n = sum(1 for line in fh if json.loads(line)[1:3] == ["project", "item-list"])
+            answer(replies[n - 1])
+        answer(replies)
     if argv[:3] == ["api", "-X", "POST"] and len(argv) == 6 and argv[4] == "-F":
         kind = (
             "sub_issue_post"
