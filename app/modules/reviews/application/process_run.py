@@ -224,13 +224,15 @@ class ReviewRunProcessor:
                 # The policy comes first: it decides what the diff threshold counts.
                 await self._context_stage.begin(run_id)
                 stage = self._context_stage
-                snapshot_path = stage.snapshot_for_llm is not None
-                if conventions_input is not None and stage.snapshot_for_llm is not None:
-                    # R1: the pinned prompt must be the one the snapshot names; checked once
-                    # the snapshot is known, before any diff read or write.
-                    pinned_prompt = _pinned_conventions_prompt(
-                        conventions_input, stage.snapshot_for_llm
-                    )
+                policy_snapshot = stage.snapshot_for_llm
+                if policy_snapshot is not None:
+                    snapshot_path = True
+                    if conventions_input is not None:
+                        # R1: the pinned prompt must be the one the snapshot names; checked
+                        # once the snapshot is known, before any diff read or write.
+                        pinned_prompt = _pinned_conventions_prompt(
+                            conventions_input, policy_snapshot
+                        )
 
                 def excluded(snapshot: DiffSnapshot) -> bool:
                     return stage.excludes_change(snapshot.filename, snapshot.previous_filename)
