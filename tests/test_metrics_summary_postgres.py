@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import event, text
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.get_metrics_summary import GetMetricsSummary
@@ -441,6 +441,59 @@ def test_a_summary_only_head_has_no_verdict_and_its_result_is_not_read(portal_en
         exercise(),
         loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
     )
+
+
+def test_the_summary_reads_without_jit_and_leaves_the_pooled_connection_as_it_was(
+    portal_env: Env,
+) -> None:
+    async def exercise() -> tuple[list[str], object, object]:
+        # One pooled connection, as in the API, so a leaked setting would show on it.
+        engine = create_async_engine(
+            portal_env.database_url,
+            connect_args={"options": f"-csearch_path={portal_env.schema}"},
+            pool_size=1,
+            max_overflow=0,
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        scope = AuthScope(42, (WS_A,))
+        statements: list[str] = []
+
+        def record(
+            conn: object,
+            cursor: object,
+            statement: str,
+            parameters: object,
+            context: object,
+            executemany: bool,
+        ) -> None:
+            del conn, cursor, parameters, context, executemany
+            statements.append(" ".join(statement.split()))
+
+        try:
+            async with engine.connect() as connection:
+                before = await connection.scalar(text("SHOW jit"))
+            event.listen(engine.sync_engine, "before_cursor_execute", record)
+            try:
+                await GetMetricsSummary(
+                    SqlAlchemyMetricsSummary(factory, scope), now=lambda: _NOW
+                ).execute(scope, range="30d", repo=None)
+            finally:
+                event.remove(engine.sync_engine, "before_cursor_execute", record)
+            async with engine.connect() as connection:
+                after = await connection.scalar(text("SHOW jit"))
+        finally:
+            await engine.dispose()
+        return statements, before, after
+
+    statements, before, after = asyncio.run(
+        exercise(),
+        loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
+    )
+
+    # JIT compilation of the window aggregates cost more than it saved (docs/test-plan).
+    assert statements[0] == "SET LOCAL jit = off"
+    assert all(statement.upper().startswith("SELECT") for statement in statements[1:])
+    assert after == before
 
 
 def test_metrics_summary_matches_pull_verdicts_and_published_findings(

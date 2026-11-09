@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Date, String, and_, cast, func, select, true
+from sqlalchemy import Date, String, and_, cast, func, select, text, true
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -61,6 +61,10 @@ class SqlAlchemyMetricsSummary:
         repo: str | None,
     ) -> MetricsRead:
         async with self._session_factory() as session:
+            # The window aggregates cost enough to trigger JIT, whose compile time exceeded
+            # the gain (#456, docs/test-plan/db-profile-456.md). LOCAL ends with this
+            # read-only transaction, so the pooled connection keeps the server setting.
+            await session.execute(text("SET LOCAL jit = off"))
             runs = await self._runs(session, window_start, window_end, repo)
             heads = await self._terminal_heads(session, window_start, window_end, repo)
             severities, categories, day_categories = await self._finding_counts(
