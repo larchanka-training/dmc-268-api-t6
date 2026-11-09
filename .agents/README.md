@@ -85,6 +85,15 @@ Shared files: change and commit them in `dmc-268-ui-t6` and open its pull reques
 change is final, `cp` to `dmc-268-api-t6`, `diff -r` the two paths to confirm byte-identity, and
 only then commit the copy. The order in full: `skills/implement-issue/references/loop.md` §4.
 
+CI checks the copies in api: the `SYNC drift vs ui main` check (`.github/workflows/sync-drift.yml`,
+`scripts/check_sync_drift.py`) compares this tree with ui `main` on every pull request that changes
+`.agents/`, the PR template, the workflow or the script, and on every push to `main`. It takes the
+SYNC files from the markers of both repos (a marker that names another path, like the quoted one
+above, does not count) and the JSON paths from the "JSON files under … carry no marker" sentence
+above, so keep that sentence's form: without it the check fails. It lists every file that differs
+or exists on one side only. Between the merge of a ui change and its api copy the check is red on
+purpose, the signal to finish the copy; it is not a required check, so it blocks no pull request.
+
 ## How to add a skill
 
 Each `skills/<dir>/SKILL.md` needs frontmatter: `name` (matches the directory),
