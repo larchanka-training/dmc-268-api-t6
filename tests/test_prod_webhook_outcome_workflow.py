@@ -249,12 +249,18 @@ def _lookup(tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess[str
     return result, _docker_calls(tmp_path)
 
 
-def test_the_lookup_prints_only_the_outcome_line_of_the_delivery(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("stack", "project"), [("prod", "dmc-268-api-prod"), ("staging", "dmc-268-api-staging")]
+)
+def test_the_lookup_prints_only_the_outcome_line_of_the_delivery(
+    tmp_path: Path, stack: str, project: str
+) -> None:
     other = LINE.replace(DELIVERY, "00000000-0000-0000-0000-000000000000")
     unrelated = f"processing receipt for {DELIVERY} (no outcome yet)"
     # One line per stream: the worker's logging goes to stderr, other output to stdout.
     result, calls = _lookup(
         tmp_path,
+        STACK=stack,
         STUB_PS_OUTPUT=f"{WORKER}\n",
         STUB_LOG_STDOUT=f"{other}\n{unrelated}",
         STUB_LOG_STDERR=f"{LINE}\nGitHub webhook delivery {DELIVERY}X event=x status=y detail=z",
@@ -265,22 +271,7 @@ def test_the_lookup_prints_only_the_outcome_line_of_the_delivery(tmp_path: Path)
     assert result.stderr == ""
     assert calls == [
         "ps -aq --no-trunc"
-        " --filter label=com.docker.compose.project=dmc-268-api-prod"
-        " --filter label=com.docker.compose.service=webhook-worker",
-        f"logs --since 168h {WORKER}",
-    ]
-
-
-def test_the_staging_stack_reads_the_staging_workers(tmp_path: Path) -> None:
-    result, calls = _lookup(
-        tmp_path, STACK="staging", STUB_PS_OUTPUT=f"{WORKER}\n", STUB_LOG_STDERR=LINE
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == f"{LINE}\n"
-    assert calls == [
-        "ps -aq --no-trunc"
-        " --filter label=com.docker.compose.project=dmc-268-api-staging"
+        f" --filter label=com.docker.compose.project={project}"
         " --filter label=com.docker.compose.service=webhook-worker",
         f"logs --since 168h {WORKER}",
     ]
