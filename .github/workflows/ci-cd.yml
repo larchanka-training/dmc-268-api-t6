@@ -684,8 +684,18 @@ jobs:
 
       - name: Skylos gate
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-        run: scripts/skylos_quality.sh "${BASE_SHA}" "${RUNNER_TEMP}/skylos"
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          # A PR is checked out as its merge commit, whose first parent is the base it merges
+          # into; the event's base.sha can name an older tip of the base branch. A push to main
+          # is checked against the commit before the push.
+          if [[ "${EVENT_NAME}" == pull_request ]]; then
+            base="$(git rev-parse HEAD^1)"
+          else
+            base="${PUSH_BEFORE}"
+          fi
+          scripts/skylos_quality.sh "${base}" "${RUNNER_TEMP}/skylos"
 
       - name: Upload Skylos report
         if: always()

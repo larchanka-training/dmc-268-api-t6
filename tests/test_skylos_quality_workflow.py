@@ -203,12 +203,75 @@ def test_job_gates_pull_requests_and_pushes_to_main() -> None:
     assert checkout["with"] == {"fetch-depth": 0, "persist-credentials": False}
     gate = _step(job, "Skylos gate")
     assert gate["env"] == {
-        "BASE_SHA": "${{ github.event_name == 'pull_request'"
-        " && github.event.pull_request.base.sha || github.event.before }}"
+        "EVENT_NAME": "${{ github.event_name }}",
+        "PUSH_BEFORE": "${{ github.event.before }}",
     }
-    assert gate["run"].strip() == 'scripts/skylos_quality.sh "${BASE_SHA}" "${RUNNER_TEMP}/skylos"'
     upload = _step(job, "Upload Skylos report")
     assert upload["if"] == "always()"
     assert upload["with"]["path"] == "${{ runner.temp }}/skylos/"
     # Both passes always write a report: a missing one means the gate step broke.
     assert upload["with"]["if-no-files-found"] == "error"
+
+
+FAKE_GATE_SCRIPT = """#!/usr/bin/env bash
+printf '%s\\n' "$@" > "${FAKE_GATE_ARGS}"
+"""
+
+
+def _git(repo: Path, *args: str) -> str:
+    """Git without the caller's ``GIT_*`` keys (a hook's index) and user or system config."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env |= {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    identity = ["-c", "user.name=t", "-c", "user.email=t@example.test"]
+    return subprocess.run(
+        ["git", *identity, *args], cwd=repo, env=env, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _gate_args(tmp_path: Path, repo: Path, event: str, before: str) -> list[str]:
+    """Run the ``Skylos gate`` step in ``repo`` with a fake script; returns its arguments."""
+    (repo / "scripts").mkdir(exist_ok=True)
+    script = repo / "scripts/skylos_quality.sh"
+    script.write_text(FAKE_GATE_SCRIPT, encoding="utf-8")
+    script.chmod(0o755)
+    args = tmp_path / "gate-args"
+    step = _step(_workflow()["jobs"][JOB_ID], "Skylos gate")
+    result = subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        cwd=repo,
+        env={
+            **os.environ,
+            "EVENT_NAME": event,
+            "PUSH_BEFORE": before,
+            "RUNNER_TEMP": str(tmp_path),
+            "FAKE_GATE_ARGS": str(args),
+        },
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return args.read_text(encoding="utf-8").splitlines()
+
+
+def test_a_pull_request_is_checked_against_the_base_it_merges_into(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "base when the PR was opened")
+    _git(repo, "switch", "-q", "-c", "feature")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "the PR")
+    _git(repo, "switch", "-q", "main")
+    # main moves on after the PR is opened; the event's base.sha can still name the old tip.
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "merged to main later")
+    base = _git(repo, "rev-parse", "HEAD")
+    # actions/checkout checks a PR out as its merge commit: the base first, the PR second.
+    _git(repo, "merge", "-q", "--no-ff", "-m", "Merge feature into main", "feature")
+
+    assert _gate_args(tmp_path, repo, "pull_request", "") == [base, f"{tmp_path}/skylos"]
+
+
+def test_a_push_is_checked_against_the_push_range(tmp_path: Path) -> None:
+    before = "4ffabb1020f53a5d6652adf8021c2ede16dda4f0"
+
+    assert _gate_args(tmp_path, tmp_path, "push", before) == [before, f"{tmp_path}/skylos"]
