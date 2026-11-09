@@ -6,9 +6,11 @@ with a scripted code; Skylos itself is not installed in the test environment.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -36,8 +38,19 @@ FAKE_UVX = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "${FAKE_UVX_LOG}"
 codes=(${FAKE_UVX_EXIT})
 call="$(wc -l < "${FAKE_UVX_LOG}")"
+report='{"code_health": []}'
+if [[ -n "${FAKE_UVX_REPORT:-}" ]]; then
+  report="${FAKE_UVX_REPORT}"
+fi
+while (($#)); do
+  if [[ "$1" == -o ]]; then
+    printf '%s' "${report}" > "$2"
+  fi
+  shift
+done
 exit "${codes[$((call - 1))]}"
 """
+CHECKER = REPO_ROOT / "scripts/skylos_changed_functions.py"
 
 
 def _pinned_version() -> str:
@@ -50,7 +63,7 @@ def _pinned_version() -> str:
 
 
 def _run_script(
-    tmp_path: Path, *args: str, exits: str = "0 0"
+    tmp_path: Path, *args: str, exits: str = "0 0", report: str = ""
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Run the script with a fake ``uvx``; returns the result and the logged command lines."""
     bin_dir = tmp_path / "bin"
@@ -68,6 +81,7 @@ def _run_script(
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
             "FAKE_UVX_LOG": str(log),
             "FAKE_UVX_EXIT": exits,
+            "FAKE_UVX_REPORT": report,
         },
         capture_output=True,
         encoding="utf-8",
@@ -92,11 +106,12 @@ def test_two_gated_passes_with_the_pinned_skylos(tmp_path: Path) -> None:
     assert " --diff-base origin/main " in calls[0] and " --diff origin/main " in calls[0]
     assert f"--format json-ci -o {reports}/changed-lines.json" in calls[0]
     # Pass 2: size and complexity of the changed functions against the merge base (file level).
+    # --gate keeps the policy of the merge base; the verdict is the checker's, so --force.
     assert calls[1].startswith(skylos)
     assert " --diff-base origin/main " in calls[1] and "--diff" not in functions
     assert f"--select {','.join(FUNCTION_RULES)}" in calls[1]
-    assert {"--quality", "--gate", "--summary"} <= set(functions)
-    assert "--danger" not in functions and "--secrets" not in functions
+    assert {"--quality", "--gate", "--force"} <= set(functions)
+    assert not {"--danger", "--secrets", "--summary"} & set(functions)
     assert f"--format json-ci -o {reports}/changed-functions.json" in calls[1]
 
 
@@ -109,6 +124,71 @@ def test_the_worst_pass_decides_and_both_passes_run(tmp_path: Path, exits: str, 
 
     assert result.returncode == code
     assert len(calls) == 2, calls
+
+
+def _health(change: str, rule: str = "SKY-C304") -> dict[str, Any]:
+    return {
+        "rule_id": rule,
+        "file": f"{REPO_ROOT}/app/example.py",
+        "line": 7,
+        "message": "Function has 55 code lines (limit: 50)",
+        "code_health_change": change,
+    }
+
+
+@pytest.mark.parametrize(
+    ("change", "rule", "code"),
+    [
+        ("introduced", "SKY-C304", 1),
+        ("worsened", "SKY-Q301", 1),
+        # No base version: a moved legacy file, or a new file that pass 1 checks line by line.
+        ("unverified", "SKY-C304", 0),
+        ("introduced", "SKY-L028", 0),
+    ],
+)
+def test_only_functions_the_change_made_worse_fail(
+    tmp_path: Path, change: str, rule: str, code: int
+) -> None:
+    report = json.dumps({"code_health": [_health(change, rule)]})
+
+    result, _ = _run_script(tmp_path, "origin/main", str(tmp_path / "reports"), report=report)
+
+    assert result.returncode == code
+    assert ("app/example.py:7" in result.stdout) is bool(code)
+
+
+def _check(tmp_path: Path, report: str) -> subprocess.CompletedProcess[str]:
+    path = tmp_path / "changed-functions.json"
+    path.write_text(report, encoding="utf-8")
+    summary = tmp_path / "summary.md"
+    return subprocess.run(
+        [sys.executable, str(CHECKER), str(path), ",".join(FUNCTION_RULES)],
+        cwd=REPO_ROOT,
+        env={**os.environ, "GITHUB_STEP_SUMMARY": str(summary)},
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+
+def test_the_checker_lists_each_failing_function_in_the_log_and_summary(tmp_path: Path) -> None:
+    report = json.dumps({"code_health": [_health("worsened"), _health("unverified")]})
+
+    result = _check(tmp_path, report)
+
+    assert result.returncode == 1
+    failing = "SKY-C304  app/example.py:7  Function has 55 code lines (limit: 50) (worsened)"
+    assert failing in result.stdout
+    assert "unverified" not in result.stdout
+    assert failing in (tmp_path / "summary.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("report", ["", "[]", "{}", '{"code_health": {}}'])
+def test_an_unreadable_report_is_incomplete(tmp_path: Path, report: str) -> None:
+    result = _check(tmp_path, report)
+
+    assert result.returncode == 2
+    assert "cannot read" in result.stderr
 
 
 def test_reports_default_to_a_temporary_directory(tmp_path: Path) -> None:

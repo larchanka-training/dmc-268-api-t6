@@ -5,7 +5,9 @@
 # Two Skylos --gate passes against BASE_REF, both run; the worse exit code wins:
 #   1. new findings on the changed lines: dead code, quality, security, secrets;
 #   2. size and complexity of the changed functions, compared with the merge base, so that a
-#      function grown past a limit fails even when its `def` line did not change.
+#      function grown past a limit fails even when its `def` line did not change. Skylos's own
+#      verdict would also fail a moved legacy file (no base version to compare with), so the
+#      verdict is scripts/skylos_changed_functions.py's: only metrics the change made worse.
 # Limits and exclusions are [tool.skylos] in pyproject.toml. Skylos reads them from the merge base
 # of BASE_REF and HEAD, so a change to them applies only to pull requests after its merge.
 # Exit codes: 0 both gates passed, 1 a gate failed, 2 usage error or incomplete analysis.
@@ -26,23 +28,31 @@ mkdir -p "${reports}"
 reports="$(cd "${reports}" && pwd)"
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-# skylos_gate <report name> <skylos args>: one gated scan with a JSON report.
+# skylos_gate <report name> <skylos args>: one scan with a JSON report. --gate also makes
+# Skylos read the policy from the merge base.
 skylos_gate() {
   local report="$1"
   shift
-  uvx --from "skylos==${SKYLOS_VERSION}" skylos . "$@" --gate --summary \
+  uvx --from "skylos==${SKYLOS_VERSION}" skylos . "$@" --gate \
     --format json-ci -o "${reports}/${report}.json"
 }
 
 echo "== Skylos ${SKYLOS_VERSION}: new findings on the lines changed since ${base}"
 status=0
-skylos_gate changed-lines --quality --danger --secrets --diff-base "${base}" --diff "${base}" \
-  || status=$?
+skylos_gate changed-lines --summary --quality --danger --secrets \
+  --diff-base "${base}" --diff "${base}" || status=$?
 
 echo "== Skylos ${SKYLOS_VERSION}: size and complexity of the functions changed since ${base}"
 functions=0
-skylos_gate changed-functions --quality --diff-base "${base}" --select "${FUNCTION_RULES}" \
-  || functions=$?
+# Skylos's forced verdict would list moved files too: its output is shown only on a failure.
+output="$(skylos_gate changed-functions --force --quality --diff-base "${base}" \
+  --select "${FUNCTION_RULES}" 2>&1)" || functions=$?
+if ((functions == 0)); then
+  python3 scripts/skylos_changed_functions.py "${reports}/changed-functions.json" \
+    "${FUNCTION_RULES}" || functions=$?
+else
+  printf '%s\n' "${output}" >&2
+fi
 
 if ((functions > status)); then
   status="${functions}"
