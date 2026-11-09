@@ -369,7 +369,8 @@ docker compose up -d worker        # сервис worker в docker-compose.yml
 `/api/v4`, по умолчанию `https://gitlab.com`. `WORKER_ID`
 (по умолчанию `hostname:pid`) пишется в `runs.worker_id`, `PORTAL_URL` даёт ссылку на
 прогон в check-run. Некорректный непустой `PORTAL_URL` не даёт worker стартовать;
-[проверка и восстановление](SECRETS.md#portal_url) описаны в операторской документации. `CODE_INDEX_*` (#142) настраивают индексатор графа, а
+[проверка и восстановление](SECRETS.md#portal_url) описаны в операторской документации.
+`CODE_INDEX_*` (#142) настраивают индексатор графа, а
 `CODE_INDEX_TTL_DAYS`, `CODE_INDEX_TTL_INTERVAL_SECONDS`, `CODE_INDEX_GC_INTERVAL_SECONDS`,
 `CODE_INDEX_GC_BATCH_ROWS`, `CODE_INDEX_RECONCILE_INTERVAL_SECONDS` и
 `CODE_INDEX_RECONCILE_BATCH` (#143, SD §10) — его leader-задачи: все необязательны,
