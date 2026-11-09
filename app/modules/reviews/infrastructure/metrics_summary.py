@@ -63,10 +63,9 @@ class SqlAlchemyMetricsSummary:
         async with self._session_factory() as session:
             runs = await self._runs(session, window_start, window_end, repo)
             heads = await self._terminal_heads(session, window_start, window_end, repo)
-            severities, categories = await self._finding_counts(
+            severities, categories, day_categories = await self._finding_counts(
                 session, window_start, window_end, repo
             )
-            day_categories = await self._day_categories(session, window_start, window_end, repo)
             workspaces = await self._workspaces(session, today_start)
         return MetricsRead(
             status_counts=dict(runs.status_counts),
@@ -223,11 +222,18 @@ class SqlAlchemyMetricsSummary:
 
     async def _finding_counts(
         self, session: AsyncSession, start: datetime, end: datetime, repo: str | None
-    ) -> tuple[dict[str, int], dict[str, int]]:
+    ) -> tuple[dict[str, int], dict[str, int], dict[date, dict[str, int]]]:
+        """Totals by severity and by category, and categories per UTC day, in one pass."""
+        day = _utc_day()
         rows = (
             await session.execute(
                 self._visible(
-                    (cast(Finding.severity, String), cast(Finding.category, String), func.count()),
+                    (
+                        day,
+                        cast(Finding.severity, String),
+                        cast(Finding.category, String),
+                        func.count(),
+                    ),
                     start,
                     end,
                     repo,
@@ -240,43 +246,21 @@ class SqlAlchemyMetricsSummary:
                         Finding.drop_reason.is_(None),
                     ),
                 )
-                .group_by(Finding.severity, Finding.category)
+                .group_by(day, Finding.severity, Finding.category)
             )
         ).all()
         severities: dict[str, int] = defaultdict(int)
         categories: dict[str, int] = defaultdict(int)
-        for severity, category, count in rows:
+        by_day: dict[date, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for item_day, severity, category, count in rows:
             severities[severity] += int(count)
             categories[category] += int(count)
-        return dict(severities), dict(categories)
-
-    async def _day_categories(
-        self, session: AsyncSession, start: datetime, end: datetime, repo: str | None
-    ) -> dict[date, dict[str, int]]:
-        category_day = _utc_day()
-        categories = (
-            await session.execute(
-                self._visible(
-                    (category_day, cast(Finding.category, String), func.count()),
-                    start,
-                    end,
-                    repo,
-                )
-                .join(
-                    Finding,
-                    and_(
-                        Finding.run_id == Run.id,
-                        Finding.published.is_(True),
-                        Finding.drop_reason.is_(None),
-                    ),
-                )
-                .group_by(category_day, Finding.category)
-            )
-        ).all()
-        by_day: dict[date, dict[str, int]] = defaultdict(dict)
-        for item_day, category, count in categories:
-            by_day[_as_date(item_day)][category] = int(count)
-        return by_day
+            by_day[_as_date(item_day)][category] += int(count)
+        return (
+            dict(severities),
+            dict(categories),
+            {item_day: dict(counts) for item_day, counts in by_day.items()},
+        )
 
     async def _workspaces(
         self, session: AsyncSession, today_start: datetime

@@ -165,8 +165,8 @@ def test_metrics_summary_counts_visible_runs_and_todays_spend(portal_env: Env) -
             await engine.dispose()
 
         # Runs by day and state, terminal heads, their saved results, the diff fallback of a
-        # head without one, findings by day, findings by severity and category, workspaces.
-        assert first_selects == 7
+        # head without one, findings by day, severity and category, workspaces.
+        assert first_selects == 6
         assert len(statements) == first_selects
         assert summary.totals.runs_by_status.succeeded == 1
         assert summary.totals.runs_by_status.failed == 1
@@ -268,6 +268,77 @@ def test_a_day_sums_runs_of_every_state_with_and_without_usage(portal_env: Env) 
         assert by_day["2026-10-27"].average_duration_seconds == 2700.0
         assert (by_day["2026-10-28"].run_count, by_day["2026-10-28"].cost_usd) == (1, Decimal(0))
         assert by_day["2026-10-28"].average_duration_seconds == 0.0
+
+    asyncio.run(
+        exercise(),
+        loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
+    )
+
+
+def test_a_day_counts_each_category_across_severities(portal_env: Env) -> None:
+    async def exercise() -> None:
+        engine = portal_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        scope = AuthScope(42, (WS_A,))
+        first, second = uuid4(), uuid4()
+        try:
+            async with factory.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE runs SET created_at = '2020-01-01T00:00:00Z', "
+                        "finished_at = '2020-01-01T00:00:00Z'"
+                    )
+                )
+                await _insert_run(
+                    session,
+                    first,
+                    PR_OPEN,
+                    "succeeded",
+                    datetime(2026, 10, 26, 10, tzinfo=UTC),
+                    datetime(2026, 10, 26, 11, tzinfo=UTC),
+                    "j" * 64,
+                )
+                await _insert_run(
+                    session,
+                    second,
+                    PR_NEW,
+                    "succeeded",
+                    datetime(2026, 10, 27, 10, tzinfo=UTC),
+                    datetime(2026, 10, 27, 11, tzinfo=UTC),
+                    "k" * 64,
+                )
+                await _finding(session, first, "critical", "security", published=True)
+                await _finding(session, first, "high", "security", published=True)
+                await _finding(session, first, "low", "readability", published=True)
+                await _finding(session, second, "high", "security", published=True)
+                await _finding(session, second, "medium", "performance", published=True)
+                await _finding(session, second, "info", "correctness", published=False)
+            summary = await GetMetricsSummary(
+                SqlAlchemyMetricsSummary(factory, scope), now=lambda: _NOW
+            ).execute(scope, range="7d", repo=None)
+        finally:
+            await engine.dispose()
+
+        severity = summary.totals.findings_by_severity
+        assert (severity.critical, severity.high, severity.medium, severity.low, severity.info) == (
+            1,
+            2,
+            1,
+            1,
+            0,
+        )
+        category = summary.totals.findings_by_category
+        assert (
+            category.security,
+            category.correctness,
+            category.performance,
+            category.readability,
+        ) == (3, 0, 1, 1)
+        by_day = {item.day.isoformat(): item.findings_by_category for item in summary.series}
+        assert (by_day["2026-10-26"].security, by_day["2026-10-26"].readability) == (2, 1)
+        assert by_day["2026-10-26"].performance == 0
+        assert (by_day["2026-10-27"].security, by_day["2026-10-27"].performance) == (1, 1)
+        assert by_day["2026-10-27"].correctness == 0
 
     asyncio.run(
         exercise(),
