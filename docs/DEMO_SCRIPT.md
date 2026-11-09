@@ -54,7 +54,7 @@ T0 — момент, когда на шаге 3 поставлен лейбл. �
 |---|---|---|---|
 | 0:00–0:45 | 1. Правила команды | Вкладка 1: `.review/rules.md` | Разделы `# Security` (параметризованный SQL), `## Python` (`except Exception` только на границе фоновой задачи), `# Performance` (запрос на каждый элемент списка), блок `review-ignore` |
 | 0:45–1:30 | 2. PR с багами | Вкладка 2 → Files changed | Новый файл `shop/orders.py`; во вкладке Checks — зелёный `CI / check` |
-| 1:30–2:00 | 3. Триггер | Справа Labels → `ai-review`. Засечь T0 | Лейбл `ai-review` на PR; в Checks появляется `AI Review` — «AI-ревью выполняется» |
+| 1:30–2:00 | 3. Триггер | Справа Labels → `ai-review`. Засечь T0 | Лейбл `ai-review` на PR; когда worker берёт Run, в Checks появляется `AI Review` — «AI-ревью выполняется» |
 | 2:00–3:30 | 4. Правила в портале | Вкладка 3: Settings песочницы | Automatic review включён; CI waiting — `Auto (wait for CI when the commit has checks)`; панель Review rules — `File found`, `.review/rules.md`, `main`, текст файла, Ignored paths `**/*.min.js` и `generated/**` |
 | 3:30–4:30 | 5. Прогон идёт | Вкладка 3: Runs → строка демо-PR | Страница `Run for PR #<N>`: этапы `Collecting context` → `Model analysis` → `Publishing`, растёт список `Review session`, модель, `Token limit`, `Cost limit` |
 | 4:30–6:00 | 6. Ревью на PR | Вкладка 2 → Conversation. Ревью нет — §3 | Ревью от `dmc268-t6-reviewer[bot]`: `Executive summary` с `Verdict` и `Risk Score`, `Risk summary`; inline-комментарии в `shop/orders.py`; в Checks `AI Review` — «AI-ревью: <вердикт>» |
@@ -82,10 +82,14 @@ T0 — момент, когда на шаге 3 поставлен лейбл. �
 T0 + 4:00 — 5:30 от начала показа. Если на шаге 6 ревью ещё нет, ведущий продолжает шаг 5. К
 порогу ревью не пришло — ведущий переключается на запасной PR.
 
-1. Причину назвать по `AI Review` во вкладке Checks демо-PR, не больше 20 секунд:
-   - `AI Review` нет: Run не создан. Причины: Automatic review выключен, CI не зелёный, лейбл не
-     `ai-review`, не подходит Branch filter, PR закрыт. На странице Runs строки демо-PR нет.
-   - «AI-ревью пропущено»: причина пропуска — в тексте check-run.
+1. Причину назвать по `AI Review` во вкладке Checks демо-PR и по странице Runs, не больше 20
+   секунд. Check-run создаётся, когда worker берёт Run, а не когда Run создан
+   ([PIPELINE_SPEC.md §1](PIPELINE_SPEC.md#1-состояния-и-переходы), T1 и T4):
+   - `AI Review` нет, строки демо-PR в Runs нет: Run не создан. Причины: Automatic review
+     выключен, CI не зелёный, лейбл не `ai-review`, PR закрыт.
+   - `AI Review` нет, строка демо-PR в Runs есть со статусом `queued`: Run создан и ждёт worker.
+   - «AI-ревью пропущено»: Run пропущен, причина — в тексте check-run. Например, Branch filter не
+     подходит: «Целевая ветка PR не подходит под фильтр веток репозитория.»
    - «AI-ревью выполняется»: прогон идёт дольше цели, модель отвечает медленно.
    - «AI-ревью не выполнено»: прогон упал, причина — в поле `Reason` на странице Run.
 2. Вкладка 5: шаги 6 и 7 идут на запасном PR и его Run. Шаги 8 и 9 не меняются: прогон запасного
