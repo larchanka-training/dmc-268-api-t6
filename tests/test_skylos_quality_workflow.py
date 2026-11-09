@@ -17,20 +17,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml  # type: ignore[import-untyped]
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from tests.ci_workflow import REPO_ROOT, REQUIRED_CHECKS, ci_workflow, git, job_step
+
 SCRIPT = REPO_ROOT / "scripts/skylos_quality.sh"
-WORKFLOW = REPO_ROOT / ".github/workflows/ci-cd.yml"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 JOB_ID = "skylos-quality"
-# Required checks of ruleset `main` on 09.11.2026: the tech lead adds this job after the merge.
-REQUIRED_CHECKS = {
-    "OpenAPI lint",
-    "Python lint / type / test",
-    "Webhook container smoke",
-    "Edge Caddyfile validate",
-}
 # Skylos 5.x lists these as advice in a diff scan; the gate counts them only by name.
 FUNCTION_RULES = ["SKY-Q301", "SKY-C303", "SKY-C304"]
 SHA_PINNED = re.compile(r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$")
@@ -271,27 +263,14 @@ def test_every_exclusion_states_its_reason() -> None:
         assert lines[index - 1].lstrip().startswith("# "), entry
 
 
-def _workflow() -> dict[str, Any]:
-    workflow: dict[str, Any] = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    return workflow
-
-
-def _step(job: dict[str, Any], name: str) -> dict[str, Any]:
-    steps = [step for step in job["steps"] if step.get("name") == name]
-    assert len(steps) == 1, f"step {name!r} must exist exactly once"
-    step: dict[str, Any] = steps[0]
-    return step
-
-
 def test_job_gates_pull_requests_and_pushes_to_main() -> None:
-    workflow = _workflow()
+    workflow = ci_workflow()
     job = workflow["jobs"][JOB_ID]
 
     assert job["name"] == "Skylos quality"
     assert job["name"] not in REQUIRED_CHECKS
-    # PR and push to main (workflow triggers); a manual run has no diff range. YAML 1.1 reads
-    # the `on` key as True.
-    triggers: dict[str, Any] = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))[True]
+    # PR and push to main (workflow triggers); a manual run has no diff range.
+    triggers: dict[str, Any] = workflow[True]
     assert set(triggers) == {"pull_request", "push", "workflow_dispatch"}
     assert triggers["push"] == {"branches": ["main"]}
     assert job["if"] == "github.event_name != 'workflow_dispatch'"
@@ -305,14 +284,14 @@ def test_job_gates_pull_requests_and_pushes_to_main() -> None:
         if "uses" in step:
             assert SHA_PINNED.match(step["uses"]), step["uses"]
 
-    checkout = _step(job, "Checkout")
+    checkout = job_step(job, "Checkout")
     assert checkout["with"] == {"fetch-depth": 0, "persist-credentials": False}
-    gate = _step(job, "Skylos gate")
+    gate = job_step(job, "Skylos gate")
     assert gate["env"] == {
         "EVENT_NAME": "${{ github.event_name }}",
         "PUSH_BEFORE": "${{ github.event.before }}",
     }
-    upload = _step(job, "Upload Skylos report")
+    upload = job_step(job, "Upload Skylos report")
     assert upload["if"] == "always()"
     assert upload["with"]["path"] == "${{ runner.temp }}/skylos/"
     # Both passes always write a report: a missing one means the gate step broke.
@@ -324,16 +303,6 @@ printf '%s\\n' "$@" > "${FAKE_GATE_ARGS}"
 """
 
 
-def _git(repo: Path, *args: str) -> str:
-    """Git without the caller's ``GIT_*`` keys (a hook's index) and user or system config."""
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env |= {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
-    identity = ["-c", "user.name=t", "-c", "user.email=t@example.test"]
-    return subprocess.run(
-        ["git", *identity, *args], cwd=repo, env=env, check=True, capture_output=True, text=True
-    ).stdout.strip()
-
-
 def _gate_args(tmp_path: Path, repo: Path, event: str, before: str) -> list[str]:
     """Run the ``Skylos gate`` step in ``repo`` with a fake script; returns its arguments."""
     (repo / "scripts").mkdir(exist_ok=True)
@@ -341,7 +310,7 @@ def _gate_args(tmp_path: Path, repo: Path, event: str, before: str) -> list[str]
     script.write_text(FAKE_GATE_SCRIPT, encoding="utf-8")
     script.chmod(0o755)
     args = tmp_path / "gate-args"
-    step = _step(_workflow()["jobs"][JOB_ID], "Skylos gate")
+    step = job_step(ci_workflow()["jobs"][JOB_ID], "Skylos gate")
     result = subprocess.run(
         ["bash", "-e", "-c", step["run"]],
         cwd=repo,
@@ -363,16 +332,16 @@ def _gate_args(tmp_path: Path, repo: Path, event: str, before: str) -> list[str]
 def test_a_pull_request_is_checked_against_the_base_it_merges_into(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    _git(repo, "init", "-q", "-b", "main")
-    _git(repo, "commit", "-q", "--allow-empty", "-m", "base when the PR was opened")
-    _git(repo, "switch", "-q", "-c", "feature")
-    _git(repo, "commit", "-q", "--allow-empty", "-m", "the PR")
-    _git(repo, "switch", "-q", "main")
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "base when the PR was opened")
+    git(repo, "switch", "-q", "-c", "feature")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "the PR")
+    git(repo, "switch", "-q", "main")
     # main moves on after the PR is opened; the event's base.sha can still name the old tip.
-    _git(repo, "commit", "-q", "--allow-empty", "-m", "merged to main later")
-    base = _git(repo, "rev-parse", "HEAD")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "merged to main later")
+    base = git(repo, "rev-parse", "HEAD")
     # actions/checkout checks a PR out as its merge commit: the base first, the PR second.
-    _git(repo, "merge", "-q", "--no-ff", "-m", "Merge feature into main", "feature")
+    git(repo, "merge", "-q", "--no-ff", "-m", "Merge feature into main", "feature")
 
     assert _gate_args(tmp_path, repo, "pull_request", "") == [base, f"{tmp_path}/skylos"]
 

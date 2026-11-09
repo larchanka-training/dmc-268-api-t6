@@ -14,58 +14,23 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml  # type: ignore[import-untyped]
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = REPO_ROOT / ".github/workflows/ci-cd.yml"
+from tests.ci_workflow import REQUIRED_CHECKS, ci_workflow, git, git_env, job_step
+
 JOB_ID = "pr-size"
-# Required checks of ruleset `main` on 03.11.2026
-# (gh api repos/larchanka-training/dmc-268-api-t6/rules/branches/main): never the size job.
-REQUIRED_CHECKS = {
-    "OpenAPI lint",
-    "Python lint / type / test",
-    "Webhook container smoke",
-    "Edge Caddyfile validate",
-}
 SLICING_RULE = (
     "https://github.com/larchanka-training/dmc-268-api-t6/blob/main"
     "/.agents/skills/create-issue/references/slicing.md"
 )
 
 
-def _workflow() -> dict[str, Any]:
-    workflow: dict[str, Any] = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    return workflow
-
-
 def _job() -> dict[str, Any]:
-    job: dict[str, Any] = _workflow()["jobs"][JOB_ID]
+    job: dict[str, Any] = ci_workflow()["jobs"][JOB_ID]
     return job
 
 
 def _step(name: str) -> dict[str, Any]:
-    steps = [step for step in _job()["steps"] if step.get("name") == name]
-    assert len(steps) == 1, f"step {name!r} must exist exactly once"
-    step: dict[str, Any] = steps[0]
-    return step
-
-
-def _git_env() -> dict[str, str]:
-    """No inherited ``GIT_*`` key (a hook's ``GIT_INDEX_FILE``) and no user or system config."""
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env |= {
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_AUTHOR_NAME": "t",
-        "GIT_AUTHOR_EMAIL": "t@example.test",
-        "GIT_COMMITTER_NAME": "t",
-        "GIT_COMMITTER_EMAIL": "t@example.test",
-    }
-    return env
-
-
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=repo, env=_git_env(), check=True, capture_output=True)
+    return job_step(_job(), name)
 
 
 def _write(repo: Path, path: str, lines: int, seed: str | None = None) -> None:
@@ -84,22 +49,22 @@ def _measure(
     """
     origin = tmp_path / "origin"
     origin.mkdir()
-    _git(origin, "init", "-q", "--initial-branch=main")
+    git(origin, "init", "-q", "--initial-branch=main")
     for path, lines in {**base, "README.md": 1, "main_only.txt": 1}.items():
         _write(origin, path, lines)
-    _git(origin, "add", "-A")
-    _git(origin, "commit", "-qm", "base")
-    _git(origin, "checkout", "-qb", "pr")
+    git(origin, "add", "-A")
+    git(origin, "commit", "-qm", "base")
+    git(origin, "checkout", "-qb", "pr")
     change(origin)
-    _git(origin, "add", "-A")
-    _git(origin, "commit", "-qm", "pr")
-    _git(origin, "checkout", "-q", "main")
+    git(origin, "add", "-A")
+    git(origin, "commit", "-qm", "pr")
+    git(origin, "checkout", "-q", "main")
     # The base moves on after the branch point: none of it may count as the PR's size.
     _write(origin, "main_only.txt", 5000)
-    _git(origin, "commit", "-qam", "main moves on")
-    _git(origin, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+    git(origin, "commit", "-qam", "main moves on")
+    git(origin, "merge", "-q", "--no-ff", "-m", "merge", "pr")
     clone = tmp_path / "clone"
-    _git(tmp_path, "clone", "-q", "--depth", "2", origin.as_uri(), str(clone))
+    git(tmp_path, "clone", "-q", "--depth", "2", origin.as_uri(), str(clone))
 
     output = tmp_path / "output"
     summary = tmp_path / "summary.md"
@@ -107,7 +72,7 @@ def _measure(
         ["bash", "-e", "-c", _step("Measure PR size")["run"]],
         cwd=clone,
         env={
-            **_git_env(),
+            **git_env(),
             "PR_SIZE_EXCLUDE": _job()["env"]["PR_SIZE_EXCLUDE"],
             "GITHUB_OUTPUT": str(output),
             "GITHUB_STEP_SUMMARY": str(summary),
@@ -126,7 +91,7 @@ def _measure(
 
 
 def test_job_only_informs_on_pull_requests() -> None:
-    workflow = _workflow()
+    workflow = ci_workflow()
     job = _job()
     # The job name is the check name: it must stay out of the required checks of ruleset `main`.
     assert job["name"] == "PR size label"
@@ -178,7 +143,7 @@ def test_label_by_added_lines(tmp_path: Path, lines: int, label: str) -> None:
 
 def test_deleted_lines_count_too(tmp_path: Path) -> None:
     def change(repo: Path) -> None:
-        _git(repo, "rm", "-q", "old.txt")
+        git(repo, "rm", "-q", "old.txt")
         _write(repo, "new.txt", 100)
 
     label, _, summary = _measure(tmp_path, {"old.txt": 200}, change)
@@ -223,7 +188,7 @@ def test_a_nested_uv_lock_and_a_binary_file(tmp_path: Path) -> None:
 
 def test_a_renamed_file_counts_only_its_changed_lines(tmp_path: Path) -> None:
     def change(repo: Path) -> None:
-        _git(repo, "mv", "app/old_name.py", "app/new_name.py")
+        git(repo, "mv", "app/old_name.py", "app/new_name.py")
         lines = (repo / "app/new_name.py").read_text(encoding="utf-8").splitlines(keepends=True)
         lines[0] = "edited\n"
         (repo / "app/new_name.py").write_text("".join(lines), encoding="utf-8")
