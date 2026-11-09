@@ -15,7 +15,7 @@ import tree_sitter_go
 import tree_sitter_javascript
 import tree_sitter_python
 import tree_sitter_typescript
-from tree_sitter import Language, Node, Parser
+from tree_sitter import Language, Node, Parser, Query, QueryCursor
 
 from app.modules.reviews.application.ast_symbols import (
     MAX_REFERENCES_PER_SYMBOL,
@@ -59,8 +59,6 @@ _PYTHON_IMPORTS = frozenset(
 # Comment nodes of the grammars (JavaScript and TypeScript also have ``<!--``); a RAG
 # excerpt shows none of them (#498).
 _COMMENT_TYPES = frozenset({"comment", "html_comment"})
-# Nodes walked between two checks of the CPU budget while comments are collected.
-_COMMENT_BUDGET_STRIDE = 1024
 _PYTHON_LABEL_OWNERS = _PYTHON_IMPORTS | {
     "attribute",
     "keyword_argument",
@@ -98,6 +96,21 @@ def _grammar(language: AstLanguage) -> Language:
             capsule = tree_sitter_go.language()
         _GRAMMARS[language] = Language(capsule)
     return _GRAMMARS[language]
+
+
+_COMMENT_QUERIES: dict[AstLanguage, Query] = {}
+
+
+def _comment_query(language: AstLanguage) -> Query:
+    # The query matches in tree-sitter's C code: a walk over every node in Python took up to a
+    # fifth of the CPU budget of a file (#498).
+    if language not in _COMMENT_QUERIES:
+        grammar = _grammar(language)
+        kinds = sorted(
+            kind for kind in _COMMENT_TYPES if grammar.id_for_node_kind(kind, True) is not None
+        )
+        _COMMENT_QUERIES[language] = Query(grammar, " ".join(f"({kind}) @c" for kind in kinds))
+    return _COMMENT_QUERIES[language]
 
 
 def extract_facts(
@@ -216,12 +229,12 @@ class _Extractor:
         )
 
     def _comments(self) -> Iterator[CommentSpan]:
-        for count, node in enumerate(_walk(self._root)):
-            if count % _COMMENT_BUDGET_STRIDE == 0:
-                self._check_budget()
-            if node.type in _COMMENT_TYPES:
-                start, end = node.start_point, node.end_point
-                yield CommentSpan(start.row + 1, start.column, end.row + 1, end.column)
+        self._check_budget()
+        captured = QueryCursor(_comment_query(self._language)).captures(self._root)
+        # Comments never nest: ordered by their start, they are ordered in the file.
+        for node in sorted(captured.get("c", ()), key=lambda node: node.start_byte):
+            start, end = node.start_point, node.end_point
+            yield CommentSpan(start.row + 1, start.column, end.row + 1, end.column)
 
     def _check_budget(self) -> None:
         """Stop the walk once the CPU budget of the file is spent."""
