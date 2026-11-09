@@ -205,4 +205,5 @@
   [eval-baselines.md](test-plan/eval-baselines.md), [rag-scenarios-146.md](test-plan/rag-scenarios-146.md).
 - Профиль дашборда, индексы и цена запросов `runs`, `findings`, `usage_events` (#456):
   [db-profile-456.md](test-plan/db-profile-456.md), остальные планы —
-  [db-profile-456-plans.md](test-plan/db-profile-456-plans.md).
+  [db-profile-456-plans.md](test-plan/db-profile-456-plans.md), изменения и цифры «после» —
+  [db-profile-456-after.md](test-plan/db-profile-456-after.md).
