@@ -57,7 +57,7 @@ T0 — момент, когда на шаге 3 поставлен лейбл. �
 | 1:30–2:00 | 3. Триггер | Справа Labels → `ai-review`. Засечь T0 | Лейбл `ai-review` на PR; когда worker берёт Run, в Checks появляется `AI Review` — «AI-ревью выполняется» |
 | 2:00–3:30 | 4. Правила в портале | Вкладка 3: Settings песочницы | Automatic review включён; CI waiting — `Auto (wait for CI when the commit has checks)`; панель Review rules — `File found`, `.review/rules.md`, `main`, текст файла, Ignored paths `**/*.min.js` и `generated/**` |
 | 3:30–4:30 | 5. Прогон идёт | Вкладка 3: Runs → строка демо-PR | Страница `Run for PR #<N>`: этапы `Collecting context` → `Model analysis` → `Publishing`, растёт список `Review session`, модель, `Token limit`, `Cost limit` |
-| 4:30–6:00 | 6. Ревью на PR | Вкладка 2 → Conversation. Ревью нет — §3 | Ревью от `dmc268-t6-reviewer[bot]`: `Executive summary` с `Verdict` и `Risk Score`, `Risk summary`; inline-комментарии в `shop/orders.py`; в Checks `AI Review` — «AI-ревью: <вердикт>» |
+| 4:30–6:00 | 6. Ревью на PR | Вкладка 2 → Conversation. Ревью нет — §3 | Ревью от `dmc268-t6-reviewer[bot]`: `Executive summary` с `Verdict` и `Risk Score`, `Risk summary`; inline-комментарии в `shop/orders.py` (ожидаются, см. под таблицей); в Checks `AI Review` — «AI-ревью: <вердикт>» |
 | 6:00–7:00 | 7. Цена прогона | Вкладка 3: Run, обновить | Status `succeeded`; Findings по severity; Duration; Input tokens, Output tokens, Cost; дифф с находками, фильтр по Severity |
 | 7:00–7:30 | 8. Аудит | Вкладка 3: Audit | Верхняя строка — демо-PR: Trigger `webhook`, Status `succeeded`, Cost |
 | 7:30–8:30 | 9. Аналитика | Вкладка 4: `7 days`, репозиторий `axyi/dmc268-t6-sandbox` | Плитки `Runs: Succeeded`, `Pull requests: Blocking` / `Attention` / `Clean`, `Critical`…`Info`, `Cost`; график `Findings by day`; блок `Budget today` |
@@ -65,8 +65,10 @@ T0 — момент, когда на шаге 3 поставлен лейбл. �
 
 Итого 8:30, с Playground — 9:30.
 
-Что модель найдёт в `shop/orders.py`, ожидаемо, но не гарантированно: LLM не детерминирован. На
-экране гарантированы признаки из столбца «Результат», а не конкретные находки.
+Что модель найдёт в `shop/orders.py`, ожидаемо, но не гарантированно: LLM не детерминирован.
+Гарантированы check-run `AI Review` и ревью с `Executive summary`. Хотя бы один inline-комментарий
+ожидается, но тоже не гарантирован: при вердикте `clean` его может не быть. Конкретные находки
+не гарантированы тем более.
 
 | Строка в листинге | Дефект | Правило |
 |---|---|---|
@@ -96,7 +98,9 @@ T0 + 4:00 — 5:30 от начала показа. Если на шаге 6 ре
    запасного PR, а не верхнюю. Его прогон старше, поэтому строка ниже. Строка демо-PR, если Run
    создан, стоит выше, в текущем статусе. Шаг 9 не меняется: прогон запасного PR попадает в окно
    `7 days`.
-3. Restart во время показа не нажимать: новый прогон займёт столько же. После показа:
+3. Ревью пришло, но без inline-комментариев: шаг 6 закончить на `Executive summary` демо-PR,
+   inline-комментарии показать на запасном PR (вкладка 5), шаг 7 — на Run демо-PR.
+4. Restart во время показа не нажимать: новый прогон займёт столько же. После показа:
    - Restart на завершённом Run;
    - если Run нет, новый push в ветку демо-PR.
 
