@@ -33,6 +33,10 @@ from app.modules.reviews.application.vcs_diff import VcsFile
 from app.modules.reviews.application.verdict import (
     SeverityThresholdValue,
 )
+
+# Re-exported with its own name for the files that still import it from here; they take it
+# from tests.findings_post_processor_fakes at their next edit (.agents/rules/backend.md §5).
+from tests.findings_post_processor_fakes import _added_file_diff_map as _added_file_diff_map
 from tests.findings_post_processor_fakes import (
     _body_only_accounted_in_review_body,
     _diff_map_from_vcs,
@@ -41,24 +45,6 @@ from tests.findings_post_processor_fakes import (
 )
 from tests.test_diff_anchor import _diff_map
 from tests.test_diff_anchor import _file as anchor_file
-
-
-def _added_file_diff_map(path: str, line_count: int) -> DiffMap:
-    """One added file whose new-side lines ``1..line_count`` are anchorable."""
-    lines = "\n".join(f"+line{n}" for n in range(1, line_count + 1))
-    patch = f"@@ -0,0 +1,{line_count} @@\n{lines}"
-    return _diff_map_from_vcs(
-        VcsFile(
-            path,
-            "added",
-            None,
-            None,
-            line_count,
-            0,
-            line_count,
-            patch,
-        )
-    )
 
 
 def _default_diff_map() -> DiffMap:

@@ -175,6 +175,7 @@ def _hashed(finding: Finding) -> HashedFinding:
         body=finding.body,
         suggestion=finding.suggestion,
         inline=finding.inline_comment,
+        rule_link=finding.rule_link,
     )
 
 

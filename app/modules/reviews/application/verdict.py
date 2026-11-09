@@ -34,6 +34,8 @@ class HashedFinding:
     body: str
     suggestion: str | None
     inline: bool
+    # Part of the published comment text (#465); see ``findings_hash`` for a finding without one.
+    rule_link: str | None = None
 
 
 def severity_counts(severities: Iterable[str]) -> dict[str, int]:
@@ -71,14 +73,25 @@ def review_event(repository_review_event: str, run_verdict: Verdict | None) -> s
 
 
 def findings_hash(findings: Iterable[HashedFinding]) -> str:
-    """SHA-256 of the sorted findings, 64 lowercase hex characters (``comments.findings_hash``)."""
+    """SHA-256 of the sorted findings, 64 lowercase hex characters (``comments.findings_hash``).
+
+    A finding without a rule link hashes as it did before the field existed, so the pointer of
+    a run already in ``publishing`` keeps matching its rows.
+    """
     items = sorted(
-        (asdict(item) for item in findings),
+        (_hashed_fields(item) for item in findings),
         key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
     )
     return sha256(
         json.dumps(items, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     ).hexdigest()
+
+
+def _hashed_fields(item: HashedFinding) -> dict[str, object]:
+    fields = asdict(item)
+    if item.rule_link is None:
+        del fields["rule_link"]
+    return fields
 
 
 def publish_message_id(run_id: UUID, head_sha: str, hash_: str) -> UUID:

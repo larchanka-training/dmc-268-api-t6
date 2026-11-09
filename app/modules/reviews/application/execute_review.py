@@ -427,6 +427,7 @@ class ExecuteReviewRun:
             verify_request=verified.verify_request if verified is not None else None,
             verify_response=verified.verify_response if verified is not None else None,
             incomplete_paths=incomplete_paths,
+            rule_line_refs=verified.rule_line_refs if verified is not None else None,
         )
         return await self._publisher.execute(run_id, model_output)
 
@@ -678,6 +679,12 @@ class ExecuteReviewRun:
                 )
             )
         final_findings = [p.finding for p in surviving_processed]
+        # CONTRACT: the passes above keep the candidate's finding object, as positions rely on.
+        rule_lines_by_finding = {
+            id(cand.finding): record.rule_line_refs[cand.candidate_id]
+            for cand in supported
+            if cand.candidate_id in record.rule_line_refs
+        }
 
         data["findings"] = [f.model_dump() for f in final_findings]
         # Deterministic summary is ALWAYS built from post-threshold supported findings (CVS §8.2)
@@ -706,5 +713,10 @@ class ExecuteReviewRun:
                 "decisions": [
                     decision.model_dump(mode="json", exclude={"reason"}) for decision in decisions
                 ]
+            },
+            rule_line_refs={
+                index: rule_lines_by_finding[id(finding)]
+                for index, finding in enumerate(final_findings)
+                if id(finding) in rule_lines_by_finding
             },
         )
