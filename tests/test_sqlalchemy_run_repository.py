@@ -146,13 +146,12 @@ def test_sqlalchemy_run_repository_filters_and_orders_with_a_tied_timestamp_curs
     sql = str(compiled)
     assert "runs.state =" in sql
     assert "repositories.full_name =" in sql
-    assert "runs.created_at <" in sql
-    assert "runs.created_at =" in sql
-    assert "runs.id <" in sql
+    # One row comparison, the same order as ORDER BY: an index condition, not a filter (#456).
+    assert "(runs.created_at, runs.id) <" in sql
     assert "ORDER BY runs.created_at DESC, runs.id DESC" in sql
     assert "succeeded" in compiled.params.values()
     assert "org/repo" in compiled.params.values()
-    assert list(compiled.params.values()).count(created_at) == 2
+    assert list(compiled.params.values()).count(created_at) == 1
     assert run.id in compiled.params.values()
 
 
