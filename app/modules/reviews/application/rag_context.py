@@ -699,6 +699,11 @@ class _Selection:
         if isinstance(facts, FileUnavailable):
             self.drop(_UNREADABLE.get(facts.reason, RAG_EDGE_UNCONFIRMED), path)
             return
+        if self._hide_comments and facts.has_errors:
+            # Its comment spans cannot be trusted: a comment that never closes has no node,
+            # and its text would be shown as code (#498).
+            self.drop(RAG_EDGE_UNCONFIRMED, path)
+            return
         text = await self._files.text(path)
         if isinstance(text, FileUnavailable):
             self.drop(_UNREADABLE.get(text.reason, RAG_EDGE_UNCONFIRMED), path)
@@ -939,10 +944,10 @@ class _Selection:
             return None
         lines = text.split("\n")
         if self._hide_comments:
-            # The removal was found in these facts, so they are loaded; a file without
-            # them is never shown with its comments.
+            # The removal was found in these facts, and the base resolution accepts no file
+            # with syntax errors; a file without clean spans is never shown all the same.
             facts = await base.files.facts_for(ref.path)
-            if isinstance(facts, FileUnavailable):
+            if isinstance(facts, FileUnavailable) or facts.has_errors:
                 return None
             lines = hidden(lines, facts.comments)
         ranges = _merged(ref.signature_ranges)
