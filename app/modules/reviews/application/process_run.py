@@ -19,6 +19,7 @@ from app.modules.reviews.application.get_run_diff import (
     DiffSnapshot,
     DiffSnapshotRepository,
     StoreDiffSnapshot,
+    holds_without_loss,
     is_proven_empty_snapshot,
     review_files_from_snapshots,
 )
@@ -217,10 +218,13 @@ class ReviewRunProcessor:
                 if conventions_input is None:
                     return None
             excluded: Callable[[DiffSnapshot], bool] | None = None
+            # The snapshot path withholds an omitted file by its stored names (CVS §9.1).
+            snapshot_path = False
             if self._context_stage is not None:
                 # The policy comes first: it decides what the diff threshold counts.
                 await self._context_stage.begin(run_id)
                 stage = self._context_stage
+                snapshot_path = stage.snapshot_for_llm is not None
                 if conventions_input is not None and stage.snapshot_for_llm is not None:
                     # R1: the pinned prompt must be the one the snapshot names; checked once
                     # the snapshot is known, before any diff read or write.
@@ -262,6 +266,15 @@ class ReviewRunProcessor:
                         )
                         for file in fetched.files
                     ]
+                    if snapshot_path and not all(holds_without_loss(file) for file in files):
+                        # Not stored, the name leaves its source no identity to withhold it
+                        # by: the run fails before any model call (RFS §11). The message
+                        # names no path; nothing of this diff is written.
+                        raise PolicyError(
+                            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+                            "A changed file name cannot be stored unchanged, so the isolation "
+                            "of its source cannot be proven",
+                        )
                     async with self._uow_factory() as uow:
                         stored_files = await StoreDiffSnapshot(uow.repository).execute(
                             run_id=run_id,
