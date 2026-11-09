@@ -8,6 +8,7 @@ import html
 import json
 import subprocess
 import sys
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, tzinfo
 from decimal import Decimal
@@ -89,6 +90,8 @@ def _expected_reply(case: dict[str, Any], reason: str) -> httpx.Response:
 @pytest.mark.parametrize(
     ("flag", "value", "message"),
     [
+        ("--stop-threshold-usd", "$0.50", "must be a decimal USD amount"),
+        ("--approved-overrun-usd", "not-a-number", "must be a decimal USD amount"),
         ("--stop-threshold-usd", "NaN", "--stop-threshold-usd must be finite and positive"),
         ("--stop-threshold-usd", "Infinity", "--stop-threshold-usd must be finite and positive"),
         ("--stop-threshold-usd", "0", "--stop-threshold-usd must be finite and positive"),
@@ -391,6 +394,7 @@ def test_real_gateway_route_records_decision_usage_and_empty_case_skips_call() -
     )
     assert first["accepted_call_id"] == first["call_manifests"][0]["call_id"]
     assert len(first["call_manifests"]) == 1
+    assert first["call_manifests"][0].get("fx") is None
     assert first["call_manifests"][0]["rendered_messages_sha256"] == (
         "417c53f420b6b3de8867e93085faf0c5976b10406e97db762a9b87172ff88d2e"
     )
@@ -516,6 +520,7 @@ def test_eurouter_route_uses_shared_ecb_quote_and_accounts_eur_cost(tmp_path: Pa
     )
     model_requests: list[httpx.Request] = []
     fx_requests: list[httpx.Request] = []
+    observation_date = datetime.now(UTC).date().isoformat()
 
     def model_reply(request: httpx.Request) -> httpx.Response:
         case = cases[len(model_requests)]
@@ -559,12 +564,11 @@ def test_eurouter_route_uses_shared_ecb_quote_and_accounts_eur_cost(tmp_path: Pa
 
     def fx_reply(request: httpx.Request) -> httpx.Response:
         fx_requests.append(request)
-        today = datetime.now(UTC).date().isoformat()
         return httpx.Response(
             200,
             text=(
                 "KEY,FREQ,CURRENCY,CURRENCY_DENOM,EXR_TYPE,EXR_SUFFIX,TIME_PERIOD,OBS_VALUE\n"
-                f"EXR.D.USD.EUR.SP00.A,D,USD,EUR,SP00,A,{today},1.2\n"
+                f"EXR.D.USD.EUR.SP00.A,D,USD,EUR,SP00,A,{observation_date},1.2\n"
             ),
         )
 
@@ -584,6 +588,8 @@ def test_eurouter_route_uses_shared_ecb_quote_and_accounts_eur_cost(tmp_path: Pa
             )
 
     report = asyncio.run(exercise())
+    persisted = json.loads((tmp_path / "eurouter-report.json").read_text())
+    assert persisted == json.loads(json.dumps(report))
     assert len(fx_requests) == 1
     assert fx_requests[0].url.host == "data-api.ecb.europa.eu"
     assert "authorization" not in fx_requests[0].headers
@@ -595,6 +601,22 @@ def test_eurouter_route_uses_shared_ecb_quote_and_accounts_eur_cost(tmp_path: Pa
     assert [item["status"] for item in report["cases"]] == ["supported", "supported"]
     assert [item["cost_usd"] for item in report["cases"]] == ["0.012000", "0.012000"]
     assert report["metrics"]["cost_usd"] == "0.024000"
+    expected_fx = {
+        "source": "EXR.D.USD.EUR.SP00.A",
+        "observation_date": observation_date,
+        "rate_usd_per_eur": "1.2",
+        "stale_cache": False,
+    }
+    for case in persisted["cases"]:
+        assert len(case["call_manifests"]) == 1
+        call = case["call_manifests"][0]
+        assert call["call_id"] == case["accepted_call_id"]
+        assert call["fx"] == expected_fx
+        assert Decimal(case["cost_usd"]) == Decimal("0.01") * Decimal(
+            call["fx"]["rate_usd_per_eur"]
+        )
+    assert "sk-test" not in json.dumps(persisted)
+    assert "Visible interpolation" not in json.dumps(persisted)
 
 
 def test_eurouter_fx_failure_has_safe_reason_before_model_request(tmp_path: Path) -> None:
@@ -687,6 +709,106 @@ def test_offline_score_counts_failures_and_cost_without_dropping_denominators() 
     assert score["false_rejected"] == {"count": 0, "total": 4, "rate": 0.0}
     assert score["invalid"] == {"count": 8, "total": 10, "rate": 0.8}
     assert score["cost_usd"] == "0.13"
+
+
+def test_injected_invented_supported_is_counted_and_fails_proposed_gate(tmp_path: Path) -> None:
+    cases = load_dataset(CORPUS)["cases"]
+    candidate_cases = [case for case in cases if case["input"]["candidate"] is not None]
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        case = candidate_cases[len(requests)]
+        requests.append(request)
+        if case["id"] == "VFY-06":
+            case = deepcopy(case)
+            case["expected"]["status"] = "supported"
+        return _expected_reply(case, "Decision from fake provider")
+
+    async def exercise() -> dict[str, Any]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await run_all(
+                cases,
+                _settings(),
+                OpenAICompatibleTransport(client),
+                tmp_path / "report.json",
+                corpus_bytes=CORPUS.read_bytes(),
+                stop_threshold_usd=Decimal("0.5"),
+                approved_overrun_usd=Decimal("0"),
+                window_end=datetime.now(UTC) + timedelta(minutes=3),
+                approval_ref="approved-test-run",
+            )
+
+    report = asyncio.run(exercise())
+    assert len(requests) == 10
+    assert report["attempted_cases"] == 11
+    assert report["metrics"]["false_supported"]["invented"] == {
+        "count": 1,
+        "total": 4,
+        "rate": 0.25,
+    }
+    assert report["metrics"]["false_supported"]["injected"] == {
+        "count": 1,
+        "total": 3,
+        "rate": 1 / 3,
+    }
+    assert report["proposed_gate"]["checks"]["injected_invented_supported_0_of_3"] is False
+    assert report["proposed_gate"]["status"] == "failed"
+    assert report["stop_reason"] == "quality_failed"
+
+
+@pytest.mark.parametrize(
+    ("invalid_calls", "total_calls", "passes_gate"), [(1, 11, True), (2, 12, False)]
+)
+def test_repaired_invalid_generation_rate_controls_proposed_gate(
+    tmp_path: Path, invalid_calls: int, total_calls: int, passes_gate: bool
+) -> None:
+    cases = load_dataset(CORPUS)["cases"]
+    candidate_cases = [case for case in cases if case["input"]["candidate"] is not None]
+    answers: list[dict[str, Any] | None] = []
+    for index, case in enumerate(candidate_cases):
+        if index < invalid_calls:
+            answers.append(None)
+        answers.append(case)
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        answer = answers[len(requests)]
+        requests.append(request)
+        return (
+            completion("{}")
+            if answer is None
+            else _expected_reply(answer, "Decision from fake provider")
+        )
+
+    async def exercise() -> dict[str, Any]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await run_all(
+                cases,
+                _settings(),
+                OpenAICompatibleTransport(client),
+                tmp_path / "report.json",
+                corpus_bytes=CORPUS.read_bytes(),
+                stop_threshold_usd=Decimal("0.5"),
+                approved_overrun_usd=Decimal("0"),
+                window_end=datetime.now(UTC) + timedelta(minutes=3),
+                approval_ref="approved-test-run",
+            )
+
+    report = asyncio.run(exercise())
+    assert len(requests) == total_calls
+    assert report["attempted_cases"] == report["evaluated_cases"] == 11
+    assert report["proposed_gate"]["checks"]["overall_status_11_of_11"] is True
+    assert report["metrics"]["invalid"] == {
+        "count": invalid_calls,
+        "total": total_calls,
+        "rate": invalid_calls / total_calls,
+    }
+    assert report["proposed_gate"]["checks"]["terminal_invalid_failed_0_of_11"] is True
+    assert report["proposed_gate"]["checks"]["invalid_generation_rate_at_most_0_10"] is (
+        passes_gate
+    )
+    assert report["proposed_gate"]["status"] == ("passed" if passes_gate else "failed")
+    assert report["stop_reason"] == ("complete" if passes_gate else "quality_failed")
 
 
 @pytest.mark.parametrize("mode", ["invalid", "fx_unavailable", "success"])

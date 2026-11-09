@@ -4,10 +4,12 @@
 Use the existing eval-live.yml workflow with corpus=verifier and six explicitly
 approved dispatch values. The equivalent local CLI requires the same approval:
 uv run --env-file .env python -m review.scripts.eval_verifier \
-  --allow-paid --model MODEL --fallback-model none --output REPORT.json \
+  --allow-paid --model MODEL --fallback-model CONFIGURED_FALLBACK_OR_NONE --output REPORT.json \
   --stop-threshold-usd 0.50 \
   --approved-overrun-usd 0.05 --window-end APPROVED_ISO_8601_END \
   --approval-ref ISSUE-COMMENT-URL
+Use none only when the configured verifier route has no fallback; unset verifier
+models inherit the review route's corresponding models.
 The report omits prompts, provider envelopes, credentials, and model reasons.
 The cost threshold stops new cases after observed spend reaches it. One case may
 exceed the threshold and even the approved allowance because provider-reported
@@ -25,7 +27,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
@@ -378,6 +380,7 @@ async def run_case(
             "recovery_kind": entry.manifest.recovery_kind,
             "rendered_messages_sha256": entry.rendered_messages_sha256,
             "paid_metadata_error": record.paid_metadata_error,
+            "fx": record.fx.as_json() if record.fx is not None else None,
             "blocks": [
                 {
                     "block_id": block.block_id,
@@ -707,14 +710,21 @@ async def run_all(
     return report
 
 
+def _decimal_usd(value: str) -> Decimal:
+    try:
+        return Decimal(value)
+    except InvalidOperation as exc:
+        raise argparse.ArgumentTypeError("must be a decimal USD amount") from exc
+
+
 def main(*, provider_transport: httpx.AsyncBaseTransport | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--fallback-model", required=True, help="configured fallback model or none")
-    parser.add_argument("--stop-threshold-usd", type=Decimal, required=True)
-    parser.add_argument("--approved-overrun-usd", type=Decimal, required=True)
+    parser.add_argument("--stop-threshold-usd", type=_decimal_usd, required=True)
+    parser.add_argument("--approved-overrun-usd", type=_decimal_usd, required=True)
     parser.add_argument("--window-end", required=True, help="approved end time, ISO 8601 with zone")
     parser.add_argument("--approval-ref", required=True)
     parser.add_argument("--allow-paid", action="store_true")

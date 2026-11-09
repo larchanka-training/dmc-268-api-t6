@@ -60,7 +60,7 @@ on:
         required: false
         type: string
       verifier_fallback_model:
-        description: "Approved verifier fallback model, or none"
+        description: "Approved fallback matching configured route; none only if route has no fallback"
         required: false
         type: string
       verifier_stop_threshold_usd:
@@ -318,6 +318,35 @@ jobs:
                   summary.write("<pre>" + html.escape(format_console(report)) + "</pre>\n")
               else:
                   summary.write("No evaluation report was produced. See the failed step for details.\n")
+          PYTHON
+
+      - name: Summarize verifier evaluation
+        if: ${{ always() && inputs.corpus == 'verifier' }}
+        shell: bash
+        run: |
+          uv run python - <<'PYTHON'
+          import html
+          import json
+          import os
+          from pathlib import Path
+
+          report_path = Path(os.environ["RUNNER_TEMP"]) / "verifier-report.json"
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+              summary.write("## Verifier corpus evaluation\n\n")
+              if not report_path.is_file():
+                  summary.write("No verifier report was produced. See the failed step for details.\n")
+              else:
+                  report = json.loads(report_path.read_text(encoding="utf-8"))
+                  fields = (
+                      ("Stop reason", report["stop_reason"]),
+                      ("Proposed gate", report["proposed_gate"]["status"]),
+                      ("Gate approval", report["proposed_gate"]["approval_status"]),
+                      ("Cost (USD)", report["metrics"]["cost_usd"]),
+                      ("Approved overrun exceeded", str(report["approved_overrun_exceeded"]).lower()),
+                  )
+                  summary.write("\n\n".join(
+                      f"{label}: {html.escape(str(value))}" for label, value in fields
+                  ) + "\n")
           PYTHON
 
       # Export metrics and per-case hashes/statuses, not raw model text or diagnostics.
