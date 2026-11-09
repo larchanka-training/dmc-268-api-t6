@@ -82,7 +82,7 @@ T0 — момент, когда на шаге 3 поставлен лейбл. �
 | Строка в листинге | Дефект | Правило |
 |---|---|---|
 | `find_orders` | значение пользователя подставлено в SQL через f-string | `# Security` в `.review/rules.md` |
-| `load_orders` | отдельный запрос на каждый id | `# Performance` в `.review/rules.md` |
+| `load_orders` | отдельный запрос на каждый id | `# Performance` в `.review/rules.md`. На репетиции 09.11 модель не нашла его ни разу (0 из 2): зрителям не обещать |
 | `amount_due` | `except Exception` вне фоновой задачи | `## Python` в `.review/rules.md` |
 | `amount_due` | деление на 100 возвращает float, функция обещает центы (`int`) | `AGENTS.md` песочницы: деньги в целых центах |
 
