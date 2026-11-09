@@ -445,3 +445,17 @@ def test_the_summary_cannot_be_forged_with_a_closing_fence(tmp_path: Path) -> No
 
     assert summary.count("```") == 2
     assert "\n## forged" not in summary
+
+
+def test_the_docs_describe_the_staging_stack_and_how_long_a_line_lives() -> None:
+    cicd = (REPO_ROOT / "docs" / "CICD.md").read_text(encoding="utf-8")
+    (paragraph,) = [p for p in cicd.split("\n\n") if p.startswith("**Prod webhook outcome**")]
+    secrets = (REPO_ROOT / "docs" / "SECRETS.md").read_text(encoding="utf-8")
+    after = secrets.split("\n#### Регистрация и проверка\n", 1)[1]
+    procedure = re.split(r"(?m)^#{3,4} ", after, maxsplit=1)[0]
+
+    assert "`stack`" in paragraph
+    assert "`dmc-268-api-staging`" in paragraph
+    assert "пересоздан более поздним выкатом" in paragraph
+    assert "`stack: staging`" in procedure
+    assert "до пересоздания контейнера `webhook-worker`" in procedure
