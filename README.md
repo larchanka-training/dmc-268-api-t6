@@ -139,6 +139,16 @@ GitHub calls fail and it marks each delivery failed after three tries. To turn t
 into a queued Run locally, follow the recipe in
 [docs/WEBHOOK_WORKER.md](docs/WEBHOOK_WORKER.md#github-local-recipe-a-signed-labeled-delivery-creates-a-queued-run).
 
+`POST /webhooks/gitlab/{installationId}` receives merge request events for one installed GitLab
+connection. It is off by default: the API needs `GITLAB_WEBHOOK_INTAKE_ENABLED=true` and the
+connection needs `gitlab_admin activate`, otherwise it answers `503`. `X-Gitlab-Token` is checked
+against the stored digest of that connection's webhook secret (wrong token, unknown or revoked
+connection → `401`); a `webhook-id` or `Idempotency-Key` header is required (`400` without it or
+on a malformed request) and the body is limited to 10 MiB (`413`). An accepted delivery is stored
+in `webhook_events` and answered `202` with `{"status": "pending"}`, or `"duplicate"` for a
+repeated delivery key; webhook-worker projects it later. Connection setup (keyring, `gitlab_admin`
+create, bind and activate, the project hook): [docs/SECRETS.md](docs/SECRETS.md).
+
 ### webhook-worker
 
 webhook-worker projects installation and pull request events from stored deliveries. It wakes on
