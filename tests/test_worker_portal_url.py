@@ -155,7 +155,7 @@ def test_worker_settings_reject_malformed_nonempty_portal_urls(portal_url: str) 
         # No @host: the parser reads the password as the port and quotes it in its ValueError,
         # so this case fails without `from None` in app/worker.py. Keep the secret in that message.
         "https://alice:do-not-log-this",
-        "https://alice:do-not-log-this@ui.test／x",
+        "https://alice:do-not-log-this@ui.test\uff0fx",
     ],
     ids=["bad-port", "nfkc-netloc"],
 )
