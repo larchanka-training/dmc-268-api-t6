@@ -697,23 +697,25 @@ Prod-выкат (`deploy-prod.yml`, job `deploy-prod`) идёт в Environment `
 
 #### Настройки prod App
 
-Приложение регистрирует техлид (владелец `axyi`); порядок — «Регистрация и проверка» ниже. Права и события те же, что у staging App.
+Приложение регистрирует техлид в организации `dmc-268` (staging App принадлежит `axyi`); порядок — «Регистрация и проверка» ниже. Права и события те же, что у staging App.
 
 | Параметр | Значение |
 |---|---|
-| Имя / bot login | `dmc268-t6-reviewer-prod` / `dmc268-t6-reviewer-prod[bot]` |
-| Homepage | `https://ui.<APP_DOMAIN>` |
+| Имя / slug / bot login | `AI CodeReviewer Bot` / `ai-codereviewer-bot` / `ai-codereviewer-bot[bot]` (`GH_APP_BOT_LOGIN`) |
+| Homepage | `https://www.<APP_DOMAIN>` |
 | Callback URL | `https://ui.<APP_DOMAIN>/auth/callback` |
+| Setup URL | `https://ui.<APP_DOMAIN>/repositories`, redirect on update включён |
 | Webhook | active, `https://api.<APP_DOMAIN>/webhooks/github`, свой secret (`openssl rand -hex 32`), SSL verification включена |
 | Permissions | actions: read, checks: write, contents: read, issues: write, metadata: read, pull_requests: write, statuses: read |
 | Events | `check_suite`, `pull_request`, `push`, `status`, `workflow_run` |
-| Остальное | user authorization, setup URL, redirect on update и места установки — как у staging App |
+| Авторизация | request user authorization (OAuth) during installation и device flow выключены |
+| Видимость | public, как staging App: private App организации ставится только на её репозитории |
 
 Не ставить prod App на репозиторий, где уже стоит staging App: два App-ревьюера на одном репозитории мешают CI-гейту друг друга.
 
 #### Регистрация и проверка
 
-1. Техлид регистрирует App по таблице выше и заводит secrets и variables из таблицы имён в Environment `production` (значения без `'` и trailing `\`; локальные `.pem` удалить).
+1. Техлид регистрирует App по таблице выше и заводит secrets и variables из таблицы имён в Environment `production` (значения без `'` и trailing `\`; `GH_APP_BOT_LOGIN` — `<slug>[bot]` этого App; локальные `.pem` удалить). Права и события сверяет пустой вывод `diff <(gh api apps/dmc268-t6-reviewer | jq -S '{permissions, events: (.events|sort)}') <(gh api apps/ai-codereviewer-bot | jq -S '{permissions, events: (.events|sort)}')`; URL webhook и callback видны только в настройках App.
 2. После merge и отдельного «да» техлида — dispatch Deploy prod; сначала проверить, куда указывает `:staging` (выкат ещё и промоушен). Approve ревьюера; ждать «Outcome: deployed».
 3. Установить prod App на репозиторий, где нет staging App. Доставка `installation` приходит сразу, но пока установка не привязана к Workspace, worker её не проецирует (`ignored_unknown_installation`, п. 5).
 4. Войти на prod UI `https://ui.<APP_DOMAIN>`: вход привязывает к Workspace установки, видимые токену пользователя, и будит неспроецированные доставки `installation` / `installation_repositories` и отложенные после последней попытки. Только они подключают репозитории установки: сам вход строки репозиториев не создаёт. Проверка требует развёрнутого prod UI (ui#185).
