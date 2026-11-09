@@ -19,6 +19,7 @@
 | Вход | браузер вошёл в [staging UI](https://staging-ui.dmc268-t6.axyi.ru) через GitHub под пользователем с доступом к установке App на песочнице; у этого пользователя на GitHub право triage или выше в песочнице, иначе на шаге 3 лейбл не поставить | Repositories: в списке есть `axyi/dmc268-t6-sandbox`; на демо-PR справа у Labels есть шестерёнка |
 | Правила | `.review/rules.md` лежит в `main` песочницы. Правила читаются из base-коммита PR ([RULES_FORMAT_SPEC.md §3.1](RULES_FORMAT_SPEC.md#31-ревизия-и-тип-объекта)), поэтому в демо-PR файл не добавляют и не меняют | GitHub, `main` песочницы |
 | CI | `.github/workflows/ci.yml` в `main` песочницы: job `check` на каждый PR | GitHub, `main` песочницы |
+| Код песочницы | в `main` песочницы есть `shop/models.py` (`Order`), `shop/pricing.py` (`order_total` и `with_tax` возвращают целые центы) и `AGENTS.md` с правилом «Money is kept in integer cents, never in floats.». На них опирается листинг приложения A и строка таблицы находок про центы | GitHub, `main` песочницы |
 | Настройки репозитория | Automatic review — включён; CI waiting — `Auto`; Verdict — `Comment`; Comment limit — `10`; Branch filter — пусто; Severity threshold — `All`; RAG — `Ready` | staging UI → Repositories → Settings песочницы |
 | Бюджет | у workspace `GitHub: axyi` нет надписи «The daily budget is used up, reviews are paused until 00:00 UTC» | staging UI → Analytics → Budget today |
 | Демо-PR | открыт заранее, CI зелёный, лейбла `ai-review` нет | вкладка 2 |
