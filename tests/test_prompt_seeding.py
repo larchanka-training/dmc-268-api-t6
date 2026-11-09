@@ -199,6 +199,54 @@ def test_first_seed_makes_the_newest_version_of_each_prompt_active(
 
 
 @pytest.mark.integration
+def test_seeding_review_summary_into_a_seeded_database_leaves_the_other_rows_unchanged(
+    migrated_prompt_database: tuple[str, str],
+) -> None:
+    """#316 AC8: the deploy that adds ``review.summary`` inserts its row and nothing else."""
+    database_url, schema = migrated_prompt_database
+    assets = load_prompt_assets(REPO_ROOT / "review" / "prompts")
+    before_summary = tuple(asset for asset in assets if asset.key != "review.summary")
+    every_column = select(
+        PromptVersion.id,
+        PromptVersion.key,
+        PromptVersion.version,
+        PromptVersion.content,
+        PromptVersion.checksum,
+        PromptVersion.is_active,
+        PromptVersion.created_at,
+    ).order_by(PromptVersion.key, PromptVersion.version)
+
+    async def exercise() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory.begin() as session:
+                assert await seed_prompt_versions(session, before_summary) == len(before_summary)
+            # Read persisted rows through a fresh session after each commit.
+            async with factory() as session:
+                before = [dict(row) for row in (await session.execute(every_column)).mappings()]
+            async with factory.begin() as session:
+                assert await seed_prompt_versions(session, assets) == 1
+            async with factory() as session:
+                after = [dict(row) for row in (await session.execute(every_column)).mappings()]
+            return before, after
+        finally:
+            await engine.dispose()
+
+    before, after = asyncio.run(exercise())
+
+    assert before
+    assert [row for row in after if row["key"] != "review.summary"] == before
+    assert [
+        (row["key"], row["version"], row["is_active"])
+        for row in after
+        if row["key"] == "review.summary"
+    ] == [("review.summary", 1, True)]
+
+
+@pytest.mark.integration
 def test_seed_activates_version_two_after_deactivating_version_one(
     migrated_prompt_database: tuple[str, str],
 ) -> None:
