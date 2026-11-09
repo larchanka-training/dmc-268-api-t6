@@ -7,7 +7,9 @@ from uuid import UUID
 from pydantic import AfterValidator, BaseModel, ConfigDict
 
 from app.common.domain.run_enums import Engine, RunStatus
+from app.modules.reviews.application.review_output import Category, Severity
 from app.modules.reviews.application.run_trigger import RunTrigger
+from app.modules.reviews.application.verdict import Verdict
 
 
 def to_camel(value: str) -> str:
@@ -74,8 +76,8 @@ class ReviewCommentDto(ApiDto):
     old_line: int | None
     new_line: int | None
     end_line: int | None
-    severity: str
-    category: str
+    severity: Severity
+    category: Category
     title: str
     body: str
     rule_name: str | None
@@ -120,8 +122,8 @@ class FindingViewDto(ApiDto):
     new_line: int | None
     end_line: int | None
     side: str
-    severity: str
-    category: str
+    severity: Severity
+    category: Category
     title: str
     body: str
     suggestion: str | None
@@ -155,15 +157,15 @@ class RunDetailDto(RunSessionDto):
     pull_request: PullRequestDetailDto
     findings: list[FindingViewDto]
     summary: ReviewSummaryDto | None
-    verdict: str | None
+    verdict: Verdict | None
     severity_counts: SeverityCountsDto
     budget: RunBudgetDto | None
 
 
 class LatestRunDto(ApiDto):
     id: UUID
-    status: str
-    verdict: str | None
+    status: RunStatus
+    verdict: Verdict | None
 
 
 class PullRequestSummaryDto(ApiDto):

@@ -173,6 +173,7 @@ from app.modules.reviews.application.rerun_run import (
     RerunRun,
     RerunUnitOfWork,
 )
+from app.modules.reviews.application.review_output import Category, Severity
 from app.modules.reviews.application.run_events import (
     InMemoryRunStepHub,
     InMemoryRunUpdateHub,
@@ -643,8 +644,8 @@ def to_run_detail_dto(detail: RunDetail) -> RunDetailDto:
                 new_line=item.comment.new_line,
                 end_line=item.comment.end_line,
                 side=item.side,
-                severity=item.comment.severity,
-                category=item.comment.category,
+                severity=cast(Severity, item.comment.severity),
+                category=cast(Category, item.comment.category),
                 title=item.comment.title,
                 body=item.comment.body,
                 suggestion=item.suggestion,
@@ -715,7 +716,7 @@ def to_pull_request_summary_dto(item: PullRequestSummary) -> PullRequestSummaryD
         latest_run=(
             LatestRunDto(
                 id=item.latest_run.id,
-                status=item.latest_run.status,
+                status=RunStatus(item.latest_run.status),
                 verdict=item.latest_run.verdict,
             )
             if item.latest_run is not None
@@ -731,8 +732,8 @@ def to_review_comment_dto(item: PublishedComment) -> ReviewCommentDto:
         old_line=item.old_line,
         new_line=item.new_line,
         end_line=item.end_line,
-        severity=item.severity,
-        category=item.category,
+        severity=cast(Severity, item.severity),
+        category=cast(Category, item.category),
         title=item.title,
         body=item.body,
         rule_name=item.rule_name,

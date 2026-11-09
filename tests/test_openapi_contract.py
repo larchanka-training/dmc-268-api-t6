@@ -29,7 +29,7 @@ from app.bootstrap.reviews_api import (
     get_run_publisher,
 )
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
-from app.common.infrastructure.db.enums import Engine, RunState
+from app.common.infrastructure.db.enums import Engine, FindingCategory, FindingSeverity, RunState
 from app.main import (
     app,
     get_file_blob_cache,
@@ -69,6 +69,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
     RunInsertCandidate,
 )
+from app.modules.reviews.application.verdict import Verdict
 from tests.openapi_contract import (
     SPEC_PATH,
     _components,
@@ -1274,6 +1275,17 @@ _RUNTIME_ENUM_FIELDS: list[tuple[str, str, tuple[object, ...]]] = [
         (dto, field, (source,))
         for dto in ("RunSessionDto", "RunDetailDto")
         for field, source in (("status", RunState), ("engine", Engine), ("trigger", RunTrigger))
+    ),
+    ("RunDetailDto", "verdict", (Verdict,)),
+    ("LatestRunDto", "status", (RunState,)),
+    ("LatestRunDto", "verdict", (Verdict,)),
+    *(
+        (dto, field, sources)
+        for dto in ("ReviewCommentDto", "FindingViewDto")
+        for field, sources in (
+            ("severity", (Severity, FindingSeverity)),
+            ("category", (Category, FindingCategory)),
+        )
     ),
 ]
 
