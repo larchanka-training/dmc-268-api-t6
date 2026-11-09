@@ -693,7 +693,7 @@ jobs:
         with:
           name: skylos-report
           path: ${{ runner.temp }}/skylos/
-          if-no-files-found: warn
+          if-no-files-found: error
 
   openapi-lint:
     # The name is a required status check on main; keep it verbatim.

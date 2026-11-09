@@ -210,3 +210,5 @@ def test_job_gates_pull_requests_and_pushes_to_main() -> None:
     upload = _step(job, "Upload Skylos report")
     assert upload["if"] == "always()"
     assert upload["with"]["path"] == "${{ runner.temp }}/skylos/"
+    # Both passes always write a report: a missing one means the gate step broke.
+    assert upload["with"]["if-no-files-found"] == "error"
