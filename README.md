@@ -148,7 +148,7 @@ gets `503`; a `webhook-id` or `Idempotency-Key` header is required (`400` withou
 on a malformed request) and the body is limited to 10 MiB (`413`). An accepted delivery is stored
 in `webhook_events` and answered `202` with `{"status": "pending"}`, or `"duplicate"` for a
 repeated delivery key; webhook-worker projects it later. Connection setup (keyring, `gitlab_admin`
-create, bind and activate, the project hook): [docs/SECRETS.md](docs/SECRETS.md).
+`create`, `bind-project` and `activate`, the project hook): [docs/SECRETS.md](docs/SECRETS.md).
 
 ### webhook-worker
 
