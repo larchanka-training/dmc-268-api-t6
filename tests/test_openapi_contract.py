@@ -9,7 +9,8 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
-from typing import Any, Self, get_args
+from enum import Enum
+from typing import Any, Self, TypeAliasType, get_args
 from uuid import UUID
 
 import pytest
@@ -1250,25 +1251,53 @@ def test_enums_match_the_ui_contract_and_the_review_output_model() -> None:
     ]
 
 
+def _python_values(source: object) -> list[object]:
+    """The members of an enum, the arguments of a ``Literal`` or its ``type`` alias, a constant."""
+    if isinstance(source, type) and issubclass(source, Enum):
+        return [member.value for member in source]
+    if isinstance(source, TypeAliasType):
+        source = source.__value__
+    return list(get_args(source)) or [source]
+
+
+def _schema_values(schema: Mapping[str, Any]) -> list[object]:
+    return list(schema["enum"]) if "enum" in schema else [schema["const"]]
+
+
+def _without_notes(schema: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in schema.items() if key not in {"title", "description"}}
+
+
+# Every runtime field whose spec schema is an enum, with each Python type that holds its values.
+_RUNTIME_ENUM_FIELDS: list[tuple[str, str, tuple[object, ...]]] = [
+    *(
+        (dto, field, (source,))
+        for dto in ("RunSessionDto", "RunDetailDto")
+        for field, source in (("status", RunState), ("engine", Engine), ("trigger", RunTrigger))
+    ),
+]
+
+
 @pytest.mark.parametrize(
-    ("field", "component", "python_values"),
-    [
-        ("status", "RunStatus", [state.value for state in RunState]),
-        ("engine", "Engine", [engine.value for engine in Engine]),
-        ("trigger", "RunTrigger", list(get_args(RunTrigger.__value__))),
-    ],
+    ("dto", "field", "sources"),
+    _RUNTIME_ENUM_FIELDS,
+    ids=[f"{dto}.{field}" for dto, field, _ in _RUNTIME_ENUM_FIELDS],
 )
 def test_runtime_run_dtos_declare_the_enums_of_the_spec(
-    field: str, component: str, python_values: list[str]
+    dto: str, field: str, sources: tuple[object, ...]
 ) -> None:
     response = TestClient(app).get("/openapi.json")
     assert response.status_code == 200
     runtime = response.json()["components"]["schemas"]
-    enum_ref = {"$ref": f"#/components/schemas/{component}"}
+    runtime_field = runtime[dto]["properties"][field]
+    spec_field = _components()[dto.removesuffix("Dto")]["properties"][field]
 
-    for dto in ("RunSessionDto", "RunDetailDto"):
-        assert runtime[dto]["properties"][field] == enum_ref
-    assert runtime[component]["enum"] == _components()[component]["enum"] == python_values
+    # The shape of the spec: a ``$ref`` to the named enum, nullable or not, or an inline enum.
+    assert _without_notes(runtime_field) == _without_notes(spec_field)
+    values = _schema_values(_split_null(runtime_field, runtime)[1])
+    assert values == _schema_values(_split_null(spec_field, _components())[1])
+    for source in sources:
+        assert _python_values(source) == values, source
 
 
 @pytest.mark.parametrize(
