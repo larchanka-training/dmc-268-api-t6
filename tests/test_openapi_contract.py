@@ -1301,8 +1301,11 @@ def test_browser_contract_documents_auth_configuration_and_provider_failures() -
     for path, item in paths.items():
         if path.startswith("/api/"):
             for method, operation in item.items():
-                # The badge asks for no authentication; callback and logout, public too, do.
-                if method in HTTP_METHODS and path != "/api/badges/github/{owner}/{repo}.svg":
+                # Static public reads need no auth configuration.
+                if method in HTTP_METHODS and path not in {
+                    "/api/badges/github/{owner}/{repo}.svg",
+                    "/api/agent/instructions",
+                }:
                     assert "503" in operation["responses"], (method, path)
     assert "502" in paths["/api/auth/github/callback"]["post"]["responses"]
 

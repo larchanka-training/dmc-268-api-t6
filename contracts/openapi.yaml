@@ -1096,6 +1096,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AgentDeviceChallenge"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/ValidationFailed"
         "502":
@@ -1134,6 +1136,8 @@ paths:
                 $ref: "#/components/schemas/AgentDevicePoll"
         "404":
           description: The requested repository is not available to the consenting user.
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/ValidationFailed"
         "429":
