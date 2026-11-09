@@ -1,7 +1,7 @@
 """Keep accepted review candidates outside the capped public action trace (#435).
 
-Revision ID: 20261107_0059
-Revises: 20261104_0058
+Revision ID: 20261109_0061
+Revises: 20261106_0060
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision = "20261107_0059"
-down_revision = "20261104_0058"
+revision = "20261109_0061"
+down_revision = "20261106_0060"
 branch_labels = None
 depends_on = None
 
