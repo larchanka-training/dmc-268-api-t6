@@ -130,6 +130,7 @@ from app.modules.reviews.application.finding_side import Side
 from app.modules.reviews.application.get_metrics_summary import (
     FindingsByCategory,
     GetMetricsSummary,
+    MetricsRange,
     MetricsSummary,
 )
 from app.modules.reviews.application.get_run import (
@@ -885,7 +886,7 @@ async def list_runs(
 async def get_metrics_summary(
     use_case: Annotated[GetMetricsSummary, Depends(get_metrics_summary_use_case)],
     scope: Annotated[AuthScope, Depends(get_auth_scope)],
-    range: Annotated[Literal["24h", "7d", "30d"], Query()] = "24h",
+    range: Annotated[MetricsRange, Query()] = "24h",
     repo: Annotated[
         str | None, Query(min_length=1, max_length=REPOSITORY_FULL_NAME_MAX_LENGTH)
     ] = None,

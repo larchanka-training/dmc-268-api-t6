@@ -59,6 +59,7 @@ from app.modules.repositories.application.rules_status import (
 from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
 from app.modules.reviews.application.diff_map import DiffSide
 from app.modules.reviews.application.finding_side import Side
+from app.modules.reviews.application.get_metrics_summary import MetricsRange
 from app.modules.reviews.application.get_run_actions import RunActionResponse
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.get_run_file_lines import (
@@ -1297,6 +1298,7 @@ _RUNTIME_ENUM_FIELDS: list[tuple[str, str, tuple[object, ...]]] = [
     ),
     ("FindingViewDto", "side", (Side, FindingSide, DiffSide)),
     ("ReviewSummaryDto", "effort", (Effort,)),
+    ("MetricsSummaryDto", "range", (MetricsRange,)),
 ]
 
 

@@ -8,6 +8,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict
 
 from app.common.domain.run_enums import Engine, RunStatus
 from app.modules.reviews.application.finding_side import Side
+from app.modules.reviews.application.get_metrics_summary import MetricsRange
 from app.modules.reviews.application.review_output import Category, Effort, Severity
 from app.modules.reviews.application.run_trigger import RunTrigger
 from app.modules.reviews.application.verdict import Verdict
@@ -235,7 +236,7 @@ class WorkspaceDailyBudgetDto(ApiDto):
 
 
 class MetricsSummaryDto(ApiDto):
-    range: str
+    range: MetricsRange
     totals: MetricsTotalsDto
     series: list[MetricsDayDto]
     workspaces: list[WorkspaceDailyBudgetDto]
