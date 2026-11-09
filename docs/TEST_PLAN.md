@@ -87,7 +87,9 @@ API baseline gates локально и в обязательном CI: `uv run r
 
 ### 2.9. Приём GitLab MR (#169)
 
-Pytest покрывает приём GitLab на fakes и на мигрированной PostgreSQL. Файлам с маркером `integration` нужен `TEST_DATABASE_URL`, тестам очереди и worker — ещё RabbitMQ (стенд — выше в §2). Живой MR, redelivery без дублей и revoke на staging — отдельный ручной gate ([SECRETS](SECRETS.md), раздел «Installed GitLab»), pytest его не заменяет. Публикация в MR discussions — §1.
+Pytest покрывает приём GitLab на fakes и на мигрированной PostgreSQL. Файлам с маркером `integration` нужен `TEST_DATABASE_URL`. Живой MR, redelivery без дублей и revoke на staging — отдельный ручной gate ([SECRETS](SECRETS.md), раздел «Installed GitLab»), pytest его не заменяет. Публикация в MR discussions — §1.
+
+**Брокер для очереди и worker GitLab.** [`test_gitlab_enqueue_queue_postgres.py`](../tests/test_gitlab_enqueue_queue_postgres.py) и [`test_gitlab_worker_postgres.py`](../tests/test_gitlab_worker_postgres.py) нужен ещё `TEST_RABBITMQ_URL`, но не стенд из §2: вне CI они принимают только одноразовый брокер `127.0.0.1:58447` с vhost `dmc169-test`. С другим адресом оба падают, без переменной — skipped. Брокер поднимают отдельным контейнером с образом из `docker-compose.yml`: `docker run -d --name <имя> -p 127.0.0.1:58447:5672 -e RABBITMQ_DEFAULT_USER=app -e RABBITMQ_DEFAULT_PASS=app -e RABBITMQ_DEFAULT_VHOST=dmc169-test rabbitmq:4-management-alpine`. Пока в `docker logs <имя>` нет строки `Server startup complete`, `rabbitmqctl` и `rabbitmq-diagnostics` в контейнере не запускают: они создадут `.erlang.cookie` от root, и сервер упадёт с `eacces` (#257). Затем тесты запускают с `TEST_RABBITMQ_URL=amqp://app:app@127.0.0.1:58447/dmc169-test`, после прогона контейнер удаляют. В CI (`GITHUB_ACTIONS=true`) адрес не проверяется: тесты берут брокер своего шарда.
 
 | Область | Что проверяется | Тесты |
 | --- | --- | --- |
