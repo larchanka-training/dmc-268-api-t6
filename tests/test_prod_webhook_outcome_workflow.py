@@ -1,9 +1,9 @@
-"""The read-only lookup of a prod webhook outcome (#308 Part 2).
+"""The read-only lookup of a webhook outcome on the course VPS (#308 Part 2, staging #574).
 
 Nobody on the team has SSH to the course VPS, so a manual workflow prints the ``webhook-worker``
-outcome line of one GitHub delivery id from the prod project's log. It reads only: no Environment,
-no VPS lock, no deploy. Text contracts on the workflow file, and its shell steps run as scripts with
-a stub ``docker`` on PATH.
+outcome line of one GitHub delivery id from the log of the prod project (default) or the staging
+one. It reads only: no Environment, no VPS lock, no deploy. Text contracts on the workflow file, and
+its shell steps run as scripts with a stub ``docker`` on PATH.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ import pytest
 
 from tests.deploy_host_fakes import _run_script, _workflow_step
 from tests.deploy_prod_workflow_fakes import (
+    CI_WORKFLOW,
+    REPO_ROOT,
     VPS_LOGIN,
     _ssh_script,
 )
@@ -28,12 +30,14 @@ from tests.monitoring_acceptance_workflow import DRONE_SSH_BANNER
 
 WORKFLOW = DEPLOY_PROD.parent / "prod-webhook-outcome.yml"
 
-VALIDATE = "Validate the delivery id"
+VALIDATE = "Validate the inputs"
 TARGET = "Resolve prod target"
 LOOKUP = "Read the webhook-worker outcome line"
 SHOW = "Show the outcome"
 
 DELIVERY = "72d3162e-cc78-11e3-81ab-4c9367dc0958"
+STACKS = ("prod", "staging")
+NOT_A_STACK = ["", "dev", "Prod", "staging ", "prod\n", "dmc-268-api-prod", "prod staging", "$(id)"]
 WORKER = "a" * 64
 LINE = (
     f"GitHub webhook delivery {DELIVERY} event=pull_request status=projected_pr"
@@ -104,12 +108,36 @@ def test_only_a_manual_dispatch_with_a_required_delivery_id_starts_it() -> None:
     assert text.startswith("name: Prod webhook outcome\n")
     trigger = text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
     assert re.findall(r"(?m)^  (\w+):", trigger) == ["workflow_dispatch"]
-    assert re.findall(r"(?m)^      (\w+):$", trigger) == ["delivery_id"]
+    assert re.findall(r"(?m)^      (\w+):$", trigger) == ["delivery_id", "stack"]
     assert re.search(
         r'(?m)^      delivery_id:\n        description: "[^"\n]+"\n'
         r"        required: true\n        type: string\n(?!        default:)",
         trigger,
     )
+
+
+def test_the_stack_input_offers_prod_by_default_and_staging() -> None:
+    trigger = _text().split("\n      stack:\n", 1)[1].split("\npermissions:", 1)[0]
+
+    assert re.fullmatch(
+        r'        description: "[^"\n]+"\n        required: false\n        type: choice\n'
+        r"        options:\n          - prod\n          - staging\n        default: prod\n",
+        trigger,
+    )
+
+
+def test_each_stack_is_the_compose_project_its_deploy_creates() -> None:
+    # deploy.sh names the compose project after the app dir and no deploy step overrides it, so
+    # dmc-268-api-<stack> is the project of /opt/dmc-268-api-<stack>.
+    deploy_sh = (REPO_ROOT / "deploy" / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    ci = CI_WORKFLOW.read_text(encoding="utf-8")
+    staging = re.split(r"(?m)^  [\w-]+:\n", ci.split("\n  deploy-staging:\n", 1)[1], maxsplit=1)[0]
+
+    assert 'COMPOSE_PROJECT="${COMPOSE_PROJECT:-$(basename "${APP_DIR}")}"' in deploy_sh
+    assert "            app_dir=/opt/dmc-268-api-staging\n" in staging
+    assert "          app_dir=/opt/dmc-268-api-prod\n" in _workflow_step(TARGET, DEPLOY_PROD)
+    for text in (staging, DEPLOY_PROD.read_text(encoding="utf-8")):
+        assert "COMPOSE_PROJECT" not in text
 
 
 def test_it_only_reads_and_stays_out_of_the_environment_and_the_lock() -> None:
@@ -152,6 +180,7 @@ def test_expressions_reach_the_shell_only_through_env() -> None:
     assert "${{" not in _ssh_script(_step(LOOKUP))
     assert [line.strip() for line in text.splitlines() if "inputs." in line] == [
         "DELIVERY_ID: ${{ inputs.delivery_id }}",
+        "STACK: ${{ inputs.stack }}",
     ] * 3
 
 
@@ -171,20 +200,30 @@ def test_expressions_reach_the_shell_only_through_env() -> None:
     ],
 )
 def test_a_delivery_id_that_is_not_one_guid_is_refused(tmp_path: Path, delivery_id: str) -> None:
-    result, _ = _bash(_script(VALIDATE), tmp_path, {"DELIVERY_ID": delivery_id})
+    result, _ = _bash(_script(VALIDATE), tmp_path, {"DELIVERY_ID": delivery_id, "STACK": "prod"})
 
     assert result.returncode == 1
     assert result.stderr.startswith("::error::delivery_id must be one GUID")
     assert _docker_calls(tmp_path) == []
 
 
-def test_a_guid_is_accepted(tmp_path: Path) -> None:
-    result, _ = _bash(_script(VALIDATE), tmp_path, {"DELIVERY_ID": DELIVERY})
+@pytest.mark.parametrize("stack", STACKS)
+def test_a_guid_and_a_stack_are_accepted(tmp_path: Path, stack: str) -> None:
+    result, _ = _bash(_script(VALIDATE), tmp_path, {"DELIVERY_ID": DELIVERY, "STACK": stack})
 
     assert result.returncode == 0, result.stderr
 
 
-def test_the_ssh_step_logs_in_like_deploy_prod_and_forwards_only_the_id() -> None:
+@pytest.mark.parametrize("stack", NOT_A_STACK)
+def test_a_stack_other_than_prod_or_staging_is_refused(tmp_path: Path, stack: str) -> None:
+    result, _ = _bash(_script(VALIDATE), tmp_path, {"DELIVERY_ID": DELIVERY, "STACK": stack})
+
+    assert result.returncode == 1
+    assert result.stderr.startswith("::error::stack must be prod or staging")
+    assert _docker_calls(tmp_path) == []
+
+
+def test_the_ssh_step_logs_in_like_deploy_prod_and_forwards_only_the_id_and_stack() -> None:
     step = _step(LOOKUP)
     prod = _workflow_step("Prepare host", DEPLOY_PROD)
     uses = re.search(r"(?m)^        (uses: appleboy/ssh-action@.+)$", step)
@@ -194,14 +233,19 @@ def test_the_ssh_step_logs_in_like_deploy_prod_and_forwards_only_the_id() -> Non
     assert VPS_LOGIN in step
     assert "          debug: false\n" in step
     assert "          capture_stdout: true\n" in step
-    assert "          envs: DELIVERY_ID\n" in step
-    assert "        env:\n          DELIVERY_ID: ${{ inputs.delivery_id }}\n" in step
+    assert "          envs: DELIVERY_ID,STACK\n" in step
+    assert (
+        "        env:\n          DELIVERY_ID: ${{ inputs.delivery_id }}\n"
+        "          STACK: ${{ inputs.stack }}\n"
+    ) in step
     assert "        id: lookup\n" in step
     assert _ssh_script(step).startswith("set -euo pipefail\nset +o xtrace\n")
 
 
 def _lookup(tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-    result, _ = _bash(_ssh_script(_step(LOOKUP)), tmp_path, {"DELIVERY_ID": DELIVERY, **env})
+    result, _ = _bash(
+        _ssh_script(_step(LOOKUP)), tmp_path, {"DELIVERY_ID": DELIVERY, "STACK": "prod", **env}
+    )
     return result, _docker_calls(tmp_path)
 
 
@@ -222,6 +266,21 @@ def test_the_lookup_prints_only_the_outcome_line_of_the_delivery(tmp_path: Path)
     assert calls == [
         "ps -aq --no-trunc"
         " --filter label=com.docker.compose.project=dmc-268-api-prod"
+        " --filter label=com.docker.compose.service=webhook-worker",
+        f"logs --since 168h {WORKER}",
+    ]
+
+
+def test_the_staging_stack_reads_the_staging_workers(tmp_path: Path) -> None:
+    result, calls = _lookup(
+        tmp_path, STACK="staging", STUB_PS_OUTPUT=f"{WORKER}\n", STUB_LOG_STDERR=LINE
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"{LINE}\n"
+    assert calls == [
+        "ps -aq --no-trunc"
+        " --filter label=com.docker.compose.project=dmc-268-api-staging"
         " --filter label=com.docker.compose.service=webhook-worker",
         f"logs --since 168h {WORKER}",
     ]
@@ -274,12 +333,13 @@ def test_a_failing_grep_fails_the_lookup_while_no_match_does_not(tmp_path: Path)
     assert f"grep failed (exit 2) on the log of container {WORKER}" in result.stderr
 
 
-def test_the_lookup_fails_when_prod_runs_no_webhook_worker(tmp_path: Path) -> None:
-    result, calls = _lookup(tmp_path, STUB_PS_OUTPUT="")
+@pytest.mark.parametrize("stack", STACKS)
+def test_the_lookup_fails_when_the_stack_runs_no_webhook_worker(tmp_path: Path, stack: str) -> None:
+    result, calls = _lookup(tmp_path, STACK=stack, STUB_PS_OUTPUT="")
 
     assert result.returncode == 1
     assert result.stdout == ""
-    assert "no webhook-worker container" in result.stderr
+    assert f"no webhook-worker container in dmc-268-api-{stack}\n" in result.stderr
     assert len(calls) == 1
 
 
@@ -289,6 +349,26 @@ def test_the_host_refuses_an_id_that_is_not_one_guid(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert result.stdout == ""
     assert calls == []
+
+
+@pytest.mark.parametrize("stack", NOT_A_STACK)
+def test_the_host_refuses_a_stack_other_than_prod_or_staging(tmp_path: Path, stack: str) -> None:
+    result, calls = _lookup(tmp_path, STACK=stack, STUB_PS_OUTPUT=WORKER)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "stack must be prod or staging" in result.stderr
+    assert calls == []
+
+
+def test_the_host_reads_nothing_when_the_stack_did_not_arrive(tmp_path: Path) -> None:
+    script = _ssh_script(_step(LOOKUP))
+
+    result, _ = _bash(script, tmp_path, {"DELIVERY_ID": DELIVERY, "STUB_PS_OUTPUT": WORKER})
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert _docker_calls(tmp_path) == []
 
 
 def test_the_summary_shows_the_outcome_line_without_the_ssh_banner(tmp_path: Path) -> None:
@@ -301,6 +381,47 @@ def test_the_summary_shows_the_outcome_line_without_the_ssh_banner(tmp_path: Pat
     assert result.returncode == 0, result.stderr
     assert LINE in summary
     assert "Successfully executed" not in summary
+
+
+@pytest.mark.parametrize(
+    ("stdout", "body"),
+    [
+        (f"{LINE}\n{DRONE_SSH_BANNER}", f"\n```text\n{LINE}\n```\n"),
+        (
+            DRONE_SSH_BANNER,
+            "- No outcome line in the last 168 h of the webhook-worker log: not processed yet,"
+            " deferred, an unknown delivery id, or the container was recreated by a later deploy"
+            " (its log is gone)\n",
+        ),
+    ],
+)
+def test_the_prod_summary_is_unchanged_by_the_stack_input(
+    tmp_path: Path, stdout: str, body: str
+) -> None:
+    result, summary = _bash(
+        _script(SHOW), tmp_path, {"DELIVERY_ID": DELIVERY, "STACK": "prod", "LOOKUP_STDOUT": stdout}
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert summary == f"### Prod webhook outcome\n\n- Delivery: `{DELIVERY}`\n{body}"
+
+
+def test_the_staging_summary_names_the_staging_stack(tmp_path: Path) -> None:
+    result, summary = _bash(
+        _script(SHOW),
+        tmp_path,
+        {
+            "DELIVERY_ID": DELIVERY,
+            "STACK": "staging",
+            "LOOKUP_STDOUT": f"{LINE}\n{DRONE_SSH_BANNER}",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        summary
+        == f"### Staging webhook outcome\n\n- Delivery: `{DELIVERY}`\n\n```text\n{LINE}\n```\n"
+    )
 
 
 def test_the_summary_says_when_there_is_no_outcome_line(tmp_path: Path) -> None:
