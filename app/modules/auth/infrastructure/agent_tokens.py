@@ -9,7 +9,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
-from app.modules.auth.application.agent_tokens import AgentTokenRecord
+from app.modules.auth.application.agent_tokens import AgentTokenRecord, OwnedAgentToken
 from app.modules.auth.infrastructure.models import AuthAgentToken
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.workspaces.infrastructure.models import (
@@ -84,6 +84,26 @@ class SqlAlchemyAgentTokenStore:
             row.expires_at,
             row.revoked_at,
         )
+
+    async def list_active(self, user_id: int, at: datetime) -> list[OwnedAgentToken]:
+        rows = (
+            await self._session.execute(
+                select(
+                    AuthAgentToken.id,
+                    Repository.full_name,
+                    AuthAgentToken.created_at,
+                    AuthAgentToken.expires_at,
+                )
+                .join(Repository, AuthAgentToken.repository_id == Repository.id)
+                .where(
+                    AuthAgentToken.github_user_id == user_id,
+                    AuthAgentToken.revoked_at.is_(None),
+                    AuthAgentToken.expires_at > at,
+                )
+                .order_by(AuthAgentToken.created_at.desc())
+            )
+        ).all()
+        return [OwnedAgentToken(row[0], row[1], row[2], row[3]) for row in rows]
 
     async def revoke(self, token_id: UUID, user_id: int, at: datetime) -> bool:
         row = await self._session.scalar(

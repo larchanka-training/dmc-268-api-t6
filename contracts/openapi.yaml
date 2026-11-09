@@ -1063,8 +1063,6 @@ paths:
             text/markdown:
               schema:
                 type: string
-        "503":
-          description: Agent instructions are unavailable.
   /api/agent/device/start:
     post:
       operationId: startAgentDeviceAuthorization
@@ -1087,7 +1085,9 @@ paths:
               properties:
                 repository:
                   type: string
+                  minLength: 3
                   maxLength: 512
+                  pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*/[A-Za-z0-9._-]*[A-Za-z0-9_-][A-Za-z0-9._-]*$
                   description: GitHub owner/repository full name.
       responses:
         "200":
@@ -1144,6 +1144,28 @@ paths:
                 type: string
         "502":
           description: GitHub device authorization is unavailable.
+        "503":
+          description: Agent authentication is not configured.
+  /api/agent/tokens:
+    get:
+      operationId: listAgentTokens
+      tags: [agent]
+      summary: List active agent token IDs owned by the signed-in user
+      description: A browser JWT is required; token secrets and hashes are never returned.
+      x-service: portal-api
+      responses:
+        "200":
+          description: Active agent tokens for the owner.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OwnedAgentToken"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: An agent token cannot list tokens.
         "503":
           description: Agent authentication is not configured.
   /api/agent/tokens/{token_id}:
@@ -2436,6 +2458,23 @@ components:
           type: integer
           description: GitHub App installation ID.
       additionalProperties: false
+    OwnedAgentToken:
+      type: object
+      additionalProperties: false
+      required: [id, repository, createdAt, expiresAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        repository:
+          type: string
+          description: Repository full name for the token.
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
     AgentDeviceChallenge:
       type: object
       additionalProperties: false

@@ -11,6 +11,7 @@ from typing import Literal, Protocol
 from app.common.application.unit_of_work import UnitOfWork
 from app.modules.auth.application.agent_tokens import IssuedAgentToken
 from app.modules.auth.application.exchange_github_code import (
+    GitHubProviderUnavailable,
     GitHubUserProfileProvider,
     InstallationLinker,
 )
@@ -143,7 +144,7 @@ class AgentDeviceAccess:
         if result.status in ("denied", "expired"):
             return DeviceOutcome(result.status)
         if result.access_token is None:
-            raise ValueError("GitHub authorized device flow without an access token")
+            raise GitHubProviderUnavailable("GitHub authorized device flow without an access token")
         user = await self._profile.get_user(result.access_token)
         await self._linker.execute(result.access_token, expected_user_id=user.id)
         token = await self._tokens.issue(user.id, flow.repository)

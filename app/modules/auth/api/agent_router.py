@@ -22,8 +22,10 @@ from app.modules.auth.application.agent_device_access import (
     DevicePollTooSoon,
 )
 from app.modules.auth.application.agent_tokens import (
+    AgentTokenListingForbidden,
     AgentTokenRevocationForbidden,
     AgentTokens,
+    OwnedAgentToken,
     RepositoryNotAvailable,
 )
 from app.modules.auth.application.exchange_github_code import GitHubProviderUnavailable
@@ -75,6 +77,15 @@ class DevicePollResponseDto(BaseModel):
     expires_at: UtcDatetime | None = None
 
 
+class OwnedAgentTokenDto(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
+
+    id: UUID
+    repository: str
+    created_at: UtcDatetime
+    expires_at: UtcDatetime
+
+
 @agent_router.post("/device/start", response_model=DeviceChallengeDto)
 async def start_device_authorization(
     body: DeviceStartRequestDto,
@@ -112,7 +123,7 @@ async def poll_device_authorization(
         raise HTTPException(
             status_code=404, detail="repository is not available to this user"
         ) from exc
-    except (GitHubProviderUnavailable, ValueError) as exc:
+    except GitHubProviderUnavailable as exc:
         raise HTTPException(
             status_code=502, detail="GitHub device authorization is unavailable"
         ) from exc
@@ -123,6 +134,17 @@ async def poll_device_authorization(
         token_id=outcome.token.id if outcome.token is not None else None,
         expires_at=outcome.token.expires_at if outcome.token is not None else None,
     )
+
+
+@agent_router.get("/tokens", response_model=list[OwnedAgentTokenDto])
+async def list_agent_tokens(
+    scope: Annotated[AuthScope, Depends(get_auth_scope)],
+    tokens: Annotated[AgentTokens, Depends(get_agent_tokens)],
+) -> list[OwnedAgentToken]:
+    try:
+        return await tokens.list_active(scope)
+    except AgentTokenListingForbidden as exc:
+        raise HTTPException(status_code=403, detail="agent token cannot list tokens") from exc
 
 
 @agent_router.delete("/tokens/{token_id}", status_code=204)

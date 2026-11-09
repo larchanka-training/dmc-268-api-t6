@@ -39,6 +39,9 @@ def test_agent_token_persists_only_hash_and_limits_repository_queries(agent_sche
             assert len(stored.token_hash) == 64
         scope = await tokens.resolve(issued.secret)
         assert scope is not None
+        listed = await tokens.list_active(AuthScope(42, ()))
+        assert [(item.id, item.repository) for item in listed] == [(issued.id, "octo/a")]
+        assert await tokens.list_active(AuthScope(43, ())) == []
         async with factory() as session:
             repos = await SqlAlchemyRepositorySettingsStore(session, scope).list_repositories()
             assert [item.id for item in repos] == [REPO_A]
@@ -52,6 +55,7 @@ def test_agent_token_persists_only_hash_and_limits_repository_queries(agent_sche
             repos = await SqlAlchemyRepositorySettingsStore(session, scope).list_repositories()
             assert repos == []
         assert await tokens.revoke(AuthScope(42, ()), issued.id)
+        assert await tokens.list_active(AuthScope(42, ())) == []
         assert await tokens.resolve(issued.secret) is None
 
     try:

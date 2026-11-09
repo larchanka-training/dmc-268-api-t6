@@ -24,6 +24,18 @@ class AgentTokenRevocationForbidden(Exception):
     """An agent credential cannot revoke credentials."""
 
 
+class AgentTokenListingForbidden(Exception):
+    """An agent credential cannot list credentials."""
+
+
+@dataclass(frozen=True)
+class OwnedAgentToken:
+    id: UUID
+    repository: str
+    created_at: datetime
+    expires_at: datetime
+
+
 @dataclass(frozen=True)
 class AgentTokenRecord:
     id: UUID
@@ -48,6 +60,8 @@ class AgentTokenStore(Protocol):
     async def create(self, record: AgentTokenRecord) -> None: ...
 
     async def find(self, token_hash: str) -> AgentTokenRecord | None: ...
+
+    async def list_active(self, user_id: int, at: datetime) -> list[OwnedAgentToken]: ...
 
     async def revoke(self, token_id: UUID, user_id: int, at: datetime) -> bool: ...
 
@@ -114,3 +128,9 @@ class AgentTokens:
             if revoked:
                 await uow.commit()
             return revoked
+
+    async def list_active(self, scope: AuthScope) -> list[OwnedAgentToken]:
+        if scope.agent_repository_id is not None:
+            raise AgentTokenListingForbidden
+        async with self._uow_factory() as uow:
+            return await uow.tokens.list_active(scope.user_id, self._now())
