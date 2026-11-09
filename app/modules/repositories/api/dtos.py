@@ -12,6 +12,12 @@ from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from app.common.application.branch_patterns import validate_branch_patterns
 from app.modules.code_index.domain.enums import RagIndexStatus
+from app.modules.repositories.application.repository_enums import (
+    RepositoryEngine,
+    ReviewEvent,
+    SeverityThreshold,
+    WaitForCi,
+)
 from app.modules.repositories.application.rules_status import RulesDocumentPath
 from app.modules.reviews.api.dtos import ApiDto, UtcDatetime
 
@@ -35,12 +41,12 @@ class RepositoryDto(ApiDto):
     default_branch: str
     enabled: bool
     # deep (SandboxEngine) is phase 3 (SD §13): it has no worker in the MVP.
-    default_engine: Literal["fast"]
-    wait_for_ci: Literal["auto", "always", "never"]
+    default_engine: RepositoryEngine
+    wait_for_ci: WaitForCi
     max_comments: int
-    review_event: Literal["COMMENT", "REQUEST_CHANGES"]
+    review_event: ReviewEvent
     branch_filter: list[str]
-    severity_threshold: Literal["all", "warning", "critical"]
+    severity_threshold: SeverityThreshold
     # Read-only: ``enabled`` is the stored preference AND this availability (SD §6.9).
     installation_available: bool
     # Like ``enabled``: the stored preference AND ``installation_available`` (#145).
@@ -54,12 +60,12 @@ class RepositoryUpdateDto(ApiDto):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool | None = None
-    default_engine: Literal["fast"] | None = None
-    wait_for_ci: Literal["auto", "always", "never"] | None = None
+    default_engine: RepositoryEngine | None = None
+    wait_for_ci: WaitForCi | None = None
     max_comments: int | None = Field(default=None, ge=1, le=10)
-    review_event: Literal["COMMENT", "REQUEST_CHANGES"] | None = None
+    review_event: ReviewEvent | None = None
     branch_filter: list[str] | None = None
-    severity_threshold: Literal["all", "warning", "critical"] | None = None
+    severity_threshold: SeverityThreshold | None = None
     rag_enabled: bool | None = None
 
     @field_validator("branch_filter")

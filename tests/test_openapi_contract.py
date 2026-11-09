@@ -36,6 +36,8 @@ from app.common.infrastructure.db.enums import (
     FindingSide,
     RunState,
 )
+from app.common.infrastructure.db.enums import SeverityThreshold as StoredSeverityThreshold
+from app.common.infrastructure.db.enums import WaitForCi as StoredWaitForCi
 from app.main import (
     app,
     get_file_blob_cache,
@@ -45,6 +47,12 @@ from app.main import (
 )
 from app.modules.code_index.domain.enums import PurgeReason, RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
+from app.modules.repositories.application.repository_enums import (
+    RepositoryEngine,
+    ReviewEvent,
+    SeverityThreshold,
+    WaitForCi,
+)
 from app.modules.repositories.application.repository_settings import (
     RepositorySettings,
     RepositorySettingsChange,
@@ -80,7 +88,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
     RunInsertCandidate,
 )
-from app.modules.reviews.application.verdict import Verdict
+from app.modules.reviews.application.verdict import SeverityThresholdValue, Verdict
 from tests.openapi_contract import (
     SPEC_PATH,
     _components,
@@ -1276,8 +1284,14 @@ def _schema_values(schema: Mapping[str, Any]) -> list[object]:
     return list(schema["enum"]) if "enum" in schema else [schema["const"]]
 
 
-def _without_notes(schema: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in schema.items() if key not in {"title", "description"}}
+def _named_branch(schema: Mapping[str, Any]) -> tuple[bool, dict[str, Any]]:
+    """Whether ``schema`` admits null, and its other branch with the ``$ref`` name kept."""
+    branches = schema.get("anyOf", [])
+    others = [branch for branch in branches if branch != {"type": "null"}]
+    if len(branches) == 2 and len(others) == 1:
+        return True, others[0]
+    notes = {"title", "description"}
+    return False, {key: value for key, value in schema.items() if key not in notes}
 
 
 # Every runtime field whose spec schema is an enum, with each Python type that holds its values.
@@ -1305,6 +1319,19 @@ _RUNTIME_ENUM_FIELDS: list[tuple[str, str, tuple[object, ...]]] = [
         (f"{kind}RulesStatusDto", "path", (RulesDocumentPath, RULES_DOCUMENT_PATH))
         for kind in ("Present", "Missing", "Invalid", "Unavailable", "Pending")
     ),
+    *(
+        (dto, field, sources)
+        for dto in ("RepositoryDto", "RepositoryUpdateDto")
+        for field, sources in (
+            ("defaultEngine", (RepositoryEngine,)),
+            ("waitForCi", (WaitForCi, StoredWaitForCi)),
+            ("reviewEvent", (ReviewEvent,)),
+            (
+                "severityThreshold",
+                (SeverityThreshold, StoredSeverityThreshold, SeverityThresholdValue),
+            ),
+        )
+    ),
 ]
 
 
@@ -1322,8 +1349,14 @@ def test_runtime_run_dtos_declare_the_enums_of_the_spec(
     runtime_field = runtime[dto]["properties"][field]
     spec_field = _components()[dto.removesuffix("Dto")]["properties"][field]
 
-    # The shape of the spec: a ``$ref`` to the named enum, nullable or not, or an inline enum.
-    assert _without_notes(runtime_field) == _without_notes(spec_field)
+    runtime_nullable, runtime_shape = _named_branch(runtime_field)
+    spec_nullable, spec_shape = _named_branch(spec_field)
+    # The shape of the spec: a ``$ref`` to the named enum, or an inline enum or const.
+    assert runtime_shape == spec_shape
+    # An optional field is a PATCH field: omitted keeps the value, and the DTO rejects an
+    # explicit null itself, so the null branch the schema gives it says nothing about the value.
+    if field in runtime[dto].get("required", []):
+        assert runtime_nullable == spec_nullable
     values = _schema_values(_split_null(runtime_field, runtime)[1])
     assert values == _schema_values(_split_null(spec_field, _components())[1])
     for source in sources:
