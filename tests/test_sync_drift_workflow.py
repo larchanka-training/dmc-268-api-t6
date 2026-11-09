@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
+import importlib.util
 import re
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
@@ -20,6 +22,16 @@ def _workflow() -> dict[Any, Any]:
     return workflow
 
 
+def _script() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "check_sync_drift", REPO_ROOT / "scripts/check_sync_drift.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_runs_on_prs_that_touch_sync_paths_and_on_every_push_to_main() -> None:
     # YAML 1.1 reads the key `on` as True. No schedule (tech lead, 09.11), no pull_request_target.
     triggers = _workflow()[True]
@@ -28,13 +40,21 @@ def test_runs_on_prs_that_touch_sync_paths_and_on_every_push_to_main() -> None:
         "pull_request": {
             "paths": [
                 ".agents/**",
-                ".github/pull_request_template.md",
-                ".github/workflows/sync-drift.yml",
+                ".github/**",
                 "scripts/check_sync_drift.py",
             ]
         },
         "push": {"branches": ["main"]},
     }
+
+
+def test_a_pr_that_changes_any_file_the_script_scans_runs_the_check() -> None:
+    # A new SYNC file anywhere under a scanned directory, e.g. `.github/ISSUE_TEMPLATE/`, must
+    # trigger the check on its PR, not only on the push to `main`. GitHub's `*` stops at `/`.
+    paths = _workflow()[True]["pull_request"]["paths"]
+
+    for directory in _script().SCAN_DIRS:
+        assert f"{directory}/**" in paths, directory
 
 
 def test_compares_this_tree_with_a_checkout_of_ui_main() -> None:

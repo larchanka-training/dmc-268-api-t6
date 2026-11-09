@@ -87,7 +87,7 @@ only then commit the copy. The order in full: `skills/implement-issue/references
 
 CI checks the copies in api: the `SYNC drift vs ui main` check (`.github/workflows/sync-drift.yml`,
 `scripts/check_sync_drift.py`) compares this tree with ui `main` on every pull request that changes
-`.agents/`, the PR template, the workflow or the script, and on every push to `main`. It takes the
+`.agents/`, `.github/` or the script, and on every push to `main`. It takes the
 SYNC files from the markers of both repos (a marker that names another path, like the quoted one
 above, does not count) and the JSON paths from the "JSON files under … carry no marker" sentence
 above, so keep that sentence's form: without it the check fails. It lists every file that differs

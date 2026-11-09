@@ -8,8 +8,7 @@ on:
   pull_request:
     paths:
       - ".agents/**"
-      - ".github/pull_request_template.md"
-      - ".github/workflows/sync-drift.yml"
+      - ".github/**"
       - "scripts/check_sync_drift.py"
   push:
     branches: [main]
