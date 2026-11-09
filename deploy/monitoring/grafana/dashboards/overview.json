@@ -2147,6 +2147,208 @@
         "x": 12,
         "y": 88
       }
+    },
+    {
+      "type": "row",
+      "title": "SLA (prod, calendar month UTC)",
+      "id": 59,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 93
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "SLA availability, month to date",
+      "description": "Share of the month so far (UTC) that each probed prod name was up, from the blackbox probes; the target is 99.5 %. Always prod: the Environment switch does not change it. Not coloured; the allowance panels carry the alert thresholds.",
+      "id": 60,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "expr": "sla:availability_ratio:month{environment=\"prod\"}",
+          "legendFormat": "{{host}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 94
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Downtime budget left",
+      "description": "Seconds of downtime left in the allowance of 0.5 % of the month (223.2 min in a 31-day month) for each probed prod name; negative once it is spent. Always prod: the Environment switch does not change it.",
+      "id": 61,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "expr": "scalar(sla:downtime_budget_seconds:month) - sla:downtime_seconds:month{environment=\"prod\"}",
+          "legendFormat": "{{host}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 94
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Downtime budget spent",
+      "description": "Share of the monthly downtime allowance spent by each probed prod name; the alerts SlaAvailabilityAtRisk and SlaAvailabilityBreached fire above 50 % and at 100 %. Always prod: the Environment switch does not change it.",
+      "id": 62,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "expr": "sla:downtime_budget_spent:ratio{environment=\"prod\"}",
+          "legendFormat": "{{host}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 94
+      }
     }
   ]
 }

@@ -27,7 +27,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATUS_PAGE = REPO_ROOT / "deploy" / "monitoring" / "status" / "status_page.py"
-ALERT_RULES = REPO_ROOT / "deploy" / "monitoring" / "prometheus" / "rules" / "alerts.yml"
+ALERT_RULES_DIR = REPO_ROOT / "deploy" / "monitoring" / "prometheus" / "rules"
 PROMTOOL_TEST = REPO_ROOT / "tests" / "monitoring" / "status.test.yml"
 VALIDATE = REPO_ROOT / "scripts" / "validate_monitoring.sh"
 
@@ -510,11 +510,15 @@ def test_an_unexpected_last_firing_answer_is_an_error(page: ModuleType, payload:
         page.parse_last_firing(payload)
 
 
-# --- S5: the table and alerts.yml -----------------------------------------------------------
+# --- S5: the table and the rules ------------------------------------------------------------
 
 
 def _rule_alerts() -> set[str]:
-    return set(re.findall(r"^\s+- alert: (\w+)$", ALERT_RULES.read_text("utf-8"), re.M))
+    return {
+        name
+        for rules in sorted(ALERT_RULES_DIR.glob("*.yml"))
+        for name in re.findall(r"^\s+- alert: (\w+)$", rules.read_text("utf-8"), re.M)
+    }
 
 
 def test_every_alert_of_the_rules_is_either_shown_or_explicitly_not_shown(

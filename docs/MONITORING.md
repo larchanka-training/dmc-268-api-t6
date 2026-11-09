@@ -65,7 +65,7 @@ flowchart LR
 
 | Сервис | Образ (по digest) | Лимит памяти | Что даёт |
 |---|---|---|---|
-| `prometheus` | `prom/prometheus:v3.15.0` | 512m | сбор каждые 30 с, хранение 15 дней / 2 GB, правила алертов |
+| `prometheus` | `prom/prometheus:v3.15.0` | 512m | сбор каждые 30 с, хранение 65 дней / 6 GB (§12), правила алертов |
 | `alertmanager` | `prom/alertmanager:v0.34.1` | 64m | группировка, повтор раз в 4 ч, сообщение о resolve, доставка в Telegram |
 | `grafana` | `grafana/grafana-oss:13.0.2` | 256m | дашборд `AI Code Reviewer — overview` с переключателем `Environment` (§2), источники Prometheus и PostgreSQL (staging и prod) |
 | `node-exporter` | `prom/node-exporter:v1.12.1` | 64m | CPU, память, диск, load хоста; textfile-метрики хостовых задач |
@@ -110,9 +110,10 @@ Grafana не входит в `prod-metrics`, Prometheus — в `prod-sql`, и н
 | Время каждого шага пайплайна | `Phase duration p95`, `Phases over the range` | `run_actions.tool` + `duration_ms`: `vcs.fetch_diff`, `context.build`, `llm.call`, `review.postprocess`, `github.publish_review`, `gitlab.publish_review`, `bitbucket.publish_review`. `context.build` с #168 ч.6 пишется один раз за попытку (сборка контекста по диффу); попытки до выката, дошедшие до ревью, хранят две записи (ещё чтение входа промпта), поэтому на диапазоне через выкат счёт выше, а длительности смешивают два шага; `llm.call` смешивает conventions и ревью |
 | Трейс прогона и ошибки (#395) | Explore → источник Tempo | span на доставку `review.run` и на каждую строку `run_actions`, поиск по `run_id` (§11) |
 | CPU / RAM серверов и воркеров | `Host CPU`, `Host memory`, `Container CPU`, `Container memory` | node-exporter, cAdvisor (метка `container_label_com_docker_compose_service`) |
+| SLA prod: доступность и время до ревью | строка `SLA (prod, calendar month UTC)`: `SLA availability, month to date`, `Downtime budget left`, `Downtime budget spent` (оранжевый с 50 %, красный со 100 % — пороги алертов); время до ревью — серия `dmc_review_time_1h_p95_seconds` | записанные серии `sla:*` из `probe_success{job="blackbox"}` (§12) и `runs` (§4) |
 | Доступность публичных имён и срок TLS | строка `External probes`: `Public names: probe` (UP/DOWN по имени), `Certificate expires in` (дни, красный < 3, оранжевый < 14 — пороги алертов) | `probe_success{job="blackbox"}`, `probe_ssl_earliest_cert_expiry` (§5). В режиме ports проб нет, обе панели — «No data» |
 
-**Окружение.** Переменная дашборда `Environment` (`staging` по умолчанию, `prod`) переключает все панели сразу: PromQL-панели фильтруются по метке `environment` выбранного окружения, SQL-панели читают источник PostgreSQL этого окружения (`postgres` или `postgres-prod`; значение переменной — uid источника). Не фильтруются панели хоста (`Host CPU`, `Host memory`, `Root filesystem used`) и `LLM spend this month` (бюджет общий); панели контейнеров показывают выбранное окружение и `shared` (контейнеры мониторинга и edge). Панели бэкапов у prod заполняет бэкап prod (§9); без prod-оверлея они пусты. Без prod-оверлея (Terraform-хост, §6) вариант `prod` выбрать можно, но источник не подключается и панели пусты.
+**Окружение.** Переменная дашборда `Environment` (`staging` по умолчанию, `prod`) переключает все панели сразу: PromQL-панели фильтруются по метке `environment` выбранного окружения, SQL-панели читают источник PostgreSQL этого окружения (`postgres` или `postgres-prod`; значение переменной — uid источника). Не фильтруются панели хоста (`Host CPU`, `Host memory`, `Root filesystem used`) и `LLM spend this month` (бюджет общий); панели контейнеров показывают выбранное окружение и `shared` (контейнеры мониторинга и edge). Панели бэкапов у prod заполняет бэкап prod (§9); без prod-оверлея они пусты. Строка `SLA (prod, calendar month UTC)` всегда показывает prod: переключатель её не меняет (§12). Без prod-оверлея (Terraform-хост, §6) вариант `prod` выбрать можно, но источник не подключается и панели пусты.
 
 Ещё на дашборде: прогоны по итоговому состоянию, failed по `error_code`, стоимость и токены LLM в час (`usage_events`), расход LLM за месяц и доля бюджета, доля 5xx и p95 ответа по хосту, соединения PostgreSQL, память и hit ratio Redis.
 
@@ -147,11 +148,12 @@ Grafana не входит в `prod-metrics`, Prometheus — в `prod-sql`, и н
 | `dmc_llm_calls_15m_calls`, `…_p50_seconds`, `…_p95_seconds` | вызовы LLM за 15 мин и их длительность |
 | `dmc_llm_cost_month_usd` | расход LLM в USD по `usage_events` с 1-го числа месяца (UTC) |
 | `dmc_runs_budget_paused_15m_runs` | прогоны, пропущенные с `budget_paused` за 15 мин |
+| `dmc_review_time_1h_runs`, `…_p95_seconds` | успешные прогоны `fast` за час и 95-й перцентиль `finished_at − created_at` в секундах (время до ревью, §12): очередь, движок и публикация; время до создания Run не входит |
 | `dmc_llm_monthly_budget_usd` | не из `queries.yml`: месячный бюджет из `LLM_MONTHLY_BUDGET_USD`, textfile-метрика node-exporter `textfile/llm_budget.prom`, её пишет `deploy.sh` (§6) |
 
 ## 5. Алерты
 
-Правила — `deploy/monitoring/prometheus/rules/alerts.yml`, unit-тесты — `tests/monitoring/alerts.test.yml`. Сообщение: статус, окружение, severity и по строке на алерт с его именем; только числа и имена — без содержимого ревью и секретов.
+Правила — `deploy/monitoring/prometheus/rules/alerts.yml` и `sla.yml` (SLA и его алерты, §12), unit-тесты — `tests/monitoring/alerts.test.yml`. Сообщение: статус, окружение, severity и по строке на алерт с его именем; только числа и имена — без содержимого ревью и секретов.
 
 **Метка `environment`.** У каждой серии и каждого алерта она есть: `staging`, `prod` или `shared`. Её ставит не Prometheus целиком (`external_labels` нет), а цель или серия: хранилища staging — статическая метка job'а, хранилища prod — файлы `prometheus/targets/{postgres,redis,rabbitmq}-prod.json`, которые пишет `deploy.sh`; пробы — `environment` рядом с `host` в `probes.json`; серии cAdvisor — по compose project (`*-prod` → `prod`, `*-staging`, `dmc-268-api` и `dmc-268-ui` → `staging`, остальные — `shared`); серии Caddy — по `host` (`staging.`/`staging-…` → `staging`; `api.`, `ui.`, `webhook.` → `prod`; Grafana, апекс, `www.`, `_other` — `shared`); node-exporter, Prometheus, Alertmanager, Grafana и сам `up` Caddy — `shared`; textfile-серии `dmc_pg_backup_*` несут метку (`staging` или `prod`), которую пишет сам скрипт бэкапа (`BACKUP_ENVIRONMENT` сервиса; без неё или с чужим значением он не стартует), а job `node` с `honor_labels: true` её не трогает; серия без метки (старый файл до перезаписи) стала бы `shared`. Правила агрегируют `by (environment, …)`, поэтому авария в одном окружении не прячется за здоровым другим и приходит с его именем. Алерты бюджета LLM суммируют оба окружения (один ключ провайдера) и несут `environment: shared`. Alertmanager группирует по `alertname` и `environment`, а заголовок Telegram печатает окружение.
 
@@ -174,6 +176,9 @@ Grafana не входит в `prod-metrics`, Prometheus — в `prod-sql`, и н
 | `LlmMonthlyBudgetWarning` | расход LLM за месяц ≥ 80 % и < 100 % бюджета `LLM_MONTHLY_BUDGET_USD`, 5 мин | warning |
 | `LlmMonthlyBudgetExceeded` | расход LLM за месяц ≥ 100 % бюджета, без ожидания | critical |
 | `ReviewRunsBudgetPaused` | хотя бы один прогон `skipped` с `budget_paused` за 15 мин; событие | warning |
+| `SlaAvailabilityAtRisk` | простой имени prod за месяц больше половины и меньше целого допуска 0,5 % месяца, без ожидания; «SLA под угрозой», §12 | warning |
+| `SlaAvailabilityBreached` | простой имени prod за месяц достиг допуска 0,5 %, без ожидания; «SLA нарушен», §12 | critical |
+| `SlaReviewTimeAtRisk` | p95 времени до ревью `fast` за час больше 4 мин при ≥ 5 прогонах, 10 мин; «SLA под угрозой», §12 | warning |
 | `HostMemoryLow` / `HostDiskFull` / `HostCpuHigh` | < 10 % памяти 10 мин / < 15 % диска 10 мин / > 90 % CPU 15 мин | critical / critical / warning |
 | `ContainerOomKilled` | OOM-kill в контейнере compose за 10 мин | warning |
 | `PostgresBackupStale` | последнему проверенному дампу больше 26 ч, по окружению | critical |
@@ -267,7 +272,7 @@ Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись н
 | Сквозной трейсинг, трекинг ошибок, JSON-логи с `run_id` | сделано в #395: OpenTelemetry → Grafana Tempo, §11 |
 | Redis | бэкапить нечего: на staging он без тома и без персистентности (`save ""`, `appendonly no`), это кэш (SD §10) |
 | Метрики приложения (`/metrics` FastAPI, `X-RateLimit-Remaining` GitHub) | нужен код и зависимость; пока RPS и коды — с edge-прокси, пайплайн — из `run_actions` |
-| prod | мониторится так же, как staging: хранилища скрейпят сканеры `*-prod` (§1), роли — §3, алерты и дашборд различают окружения (§5, §2). Бэкап БД prod и его копия вне VPS — §9. Чего нет: SLA и retention (часть 6); апекс и `www.` остаются `shared`, пока нет лендинга prod. Остаточный путь Grafana → `relay-prod:5432` → PostgreSQL prod и то, что `check-isolation.sh` его не видит, — §1 |
+| prod | мониторится так же, как staging: хранилища скрейпят сканеры `*-prod` (§1), роли — §3, алерты и дашборд различают окружения (§5, §2). Бэкап БД prod и его копия вне VPS — §9, SLA и retention — §12. Апекс и `www.` остаются `shared`, пока нет лендинга prod. Остаточный путь Grafana → `relay-prod:5432` → PostgreSQL prod и то, что `check-isolation.sh` его не видит, — §1 |
 | Страница статуса | сервис выкатывает `Deploy monitoring`, маршрут Caddy — `deploy-staging` и `rollback.yml` (job `Deploy monitoring` edge не трогает, [CICD.md](CICD.md) §8.2): до `Deploy monitoring` `status.*` отвечает 502, откат staging на коммит до #309 убирает маршрут. Prod различим по `environment` серий (§1) и по `host` и compose project; без оверлея prod (`PROD_API_DIR` пуст) его компоненты — «нет данных». |
 | Пробы публичных имён | идут с того же VPS: падение VPS целиком или его сети они не видят — вместе с ними молчит весь стек; нужен внешний пробник |
 | cAdvisor | читает состояние Docker через `/var/run` (сокеты Docker и containerd), что равносильно root на хосте; сетей, кроме сети проекта, и портов у него нет |
@@ -493,3 +498,75 @@ docker compose -p dmc-268-api-staging logs worker --no-log-prefix | jq -c 'selec
 - span шага пишется при вставке строки `run_actions`, до commit транзакции. Если транзакция откатится, в Tempo останется шаг, которого нет в `run_actions`.
 - `webhook-worker` даёт span на проход, но не на каждую доставку внутри прохода: application-слой OpenTelemetry не импортирует. Ошибка отдельной доставки видна в JSON-логах и помечает span прохода; при нескольких ошибках за проход в `error.type` остаётся последняя.
 - Значения задаёт выкат, не compose-файл: `OTEL_EXPORTER_OTLP_ENDPOINT` и `DEPLOY_ENVIRONMENT` (`deployment.environment.name`) лежат в `.env` стека. Staging берёт умолчания: `http://tempo:4318` и `staging`. Prod: окружение `prod`, экспорт выключен (пустой endpoint), пока у prod нет своего Tempo; тогда задать endpoint в `deploy-prod.yml`. Откат их не меняет.
+
+## 12. SLA prod
+
+### Цели
+
+| Показатель | Цель | Чем меряем |
+|---|---|---|
+| Доступность каждого пробуемого имени prod | не ниже 99,5 % календарного месяца (UTC) | пробы Prometheus → `blackbox-exporter`, `probe_success{job="blackbox", environment="prod"}` (§5) |
+| Время до ревью, движок `fast` | p95 не больше 4 мин (SD §13) | `dmc_review_time_1h_p95_seconds` из `runs` (§4) |
+
+Сейчас SLA считается по `api.<APP_DOMAIN>`. Имя `ui.` попадёт под него без правок кода, как только его перечислит `PROBE_PROD_HOSTS` и пройдёт `Deploy monitoring` (§6): у не пробуемого имени нет серии, поэтому нет ни алерта, ни плитки на дашборде. Имя, которое пробовали, а потом убрали из `PROBE_PROD_HOSTS`, перестаёт алертить не позже чем через 30 мин после последней пробы, а не к концу месяца.
+
+### Окно и допуск
+
+Окно — календарный месяц по UTC, с 00:00 первого числа. Допуск простоя — 0,5 % месяца в секундах, а не доля прошедшего времени: доля нарушилась бы от одной неудачной пробы первого числа.
+
+| Дней в месяце | Допуск простоя |
+|---|---|
+| 28 | 201,6 мин (12 096 с) |
+| 30 | 216 мин (12 960 с) |
+| 31 | 223,2 мин (13 392 с) |
+
+### Как считается простой
+
+`sla:downtime_seconds:month` — простой имени с начала месяца, в секундах. Правило читает сырые пробы (раз в минуту), а не собственную историю: правило, выкаченное посреди месяца, учтёт дни до себя, а перезапуск или пропуск вычислений не обнулит счётчик.
+
+- Окно — доля неудачных проб: пять проб в 5-минутном окне с одной неудачной дают 60 с. Первое окно имени, которое только что начали пробовать, считается целиком: имя, сразу упавшее после добавления в `PROBE_PROD_HOSTS`, даёт сразу до часа простоя. Пока у имени нет ни одного завершённого часа (его впервые пробуют в середине часа), его считает один член текущего часа: имя появляется на плитках SLA с первого 5-минутного шага после первой пробы, а не со следующего часа.
+- Считаются все пробы prod, в том числе короткие провалы `Deploy prod` и любое плановое обслуживание. Staging в SLA не входит.
+- Нет проб вовсе (Prometheus, `blackbox-exporter` или VPS не работают) — это не простой, а слепота мониторинга: её показывают `TargetDown{job="blackbox"}` и §8. Падение VPS целиком SLA не видит.
+- Месяц до текущего часа считается целыми часами (подзапрос с шагом 1 час по границам часов UTC), текущий час — шагами по 5 минут. Так запрос укладывается в лимит 10 000 сэмплов, с которым `promtool test rules` запускает unit-тесты; разрешение остаётся 5 минут. Группа `sla` считается каждые 5 минут, так что алерт приходит с задержкой до 5 минут.
+- Смена месяца: первое вычисление после 00:00 UTC первого числа может ещё один цикл (до 5 минут) видеть начало прошлого месяца и один раз завысить простой; алерт от этого не возникает, если прошлый месяц не был близок к допуску.
+
+### Время до ревью
+
+Метрика `dmc_review_time_1h_*` (§4) — разность `finished_at − created_at` успешных прогонов `fast` за последний час: очередь, движок и публикация (`finished_at` пишется после публикации, PIPELINE_SPEC §3). Пределы:
+
+- `created_at` — создание Run, а не приход вебхука: время до создания Run не входит;
+- `failed`, `skipped` и `cancelled` — не ревью и не считаются; прогон, который не заканчивается, виден в `ReviewRunsStuckInQueue`, а не здесь;
+- p95 по часу ненадёжен на малом числе прогонов, поэтому алерт молчит при меньше чем 5 прогонах за час;
+- месячного p95 нет: это не бюджет ошибок, у цели нет «нарушена».
+
+### Алерты
+
+| Алерт | Условие | Серьёзность | Смысл |
+|---|---|---|---|
+| `SlaAvailabilityAtRisk` | `sla:downtime_budget_spent:ratio` > 0,5 и < 1 | warning | «SLA под угрозой»: потрачено больше половины допуска |
+| `SlaAvailabilityBreached` | `sla:downtime_budget_spent:ratio` ≥ 1 | critical | «SLA нарушен»: допуск исчерпан |
+| `SlaReviewTimeAtRisk` | p95 > 240 с и ≥ 5 прогонов за час, 10 мин | warning | «SLA под угрозой» по времени до ревью |
+
+Предупреждение о доступности гаснет на 100 %, когда начинает гореть критический алерт (как `LlmMonthlyBudgetWarning`): вместе они не горят. `SlaAvailabilityBreached` остаётся до конца месяца, Alertmanager повторяет его раз в 4 ч. Алерты доступности несут метки `environment: prod` и `host`, в сообщении — имя и доля допуска. `SlaReviewTimeAtRisk` несёт только `environment: prod`, без `host`, в сообщении — p95 за час и цель 4 мин. Содержимого ревью в сообщениях нет. Публичная страница статуса эти алерты не показывает: она о текущем состоянии, а исчерпанный бюджет держал бы строку красной до конца месяца.
+
+Записанные серии (`rules/sla.yml`, группа `sla`, шаг 5 мин):
+
+| Серия | Что |
+|---|---|
+| `sla:month_start_timestamp_seconds` | начало месяца по UTC, секунды; нужна правилу простоя как точка отсчёта |
+| `sla:hour_start_timestamp_seconds` | начало текущего часа; граница между целыми часами и 5-минутными шагами |
+| `sla:downtime_seconds:month` | простой с начала месяца по имени, секунды |
+| `sla:downtime_budget_seconds:month` | допуск месяца: 0,005 × число секунд в месяце |
+| `sla:downtime_budget_spent:ratio` | простой, делённый на допуск; пороги алертов — 0,5 и 1 |
+| `sla:availability_ratio:month` | `1 − простой / прошедшее время месяца` (не меньше 5 мин); только для дашборда |
+
+### Retention и диск
+
+Prometheus хранит данные 65 дней или 6 GB, что наступит раньше (раньше — 15 дней и 2 GB). 65 дней — это 31 день окна, 31 день прошлого месяца для сравнения и запас. Данные лежат в именованном томе Docker `prometheus-data` на том же корневом разделе VPS, где обе БД, дампы (§9) и образы; `HostDiskFull` срабатывает при остатке меньше 15 %.
+
+Ограничивает размер, а не срок: окно SLA цело, пока приём не превышает около 190 MB в сутки (6 GB за 31 день), а все 65 дней — пока не превышает около 92 MB в сутки. 02.11.2026 (staging, до prod) TSDB занимал 505 MB и рос на около 38 MB в сутки при 68 из 105 GB свободных на диске хоста; prod примерно удваивает приём, замер после выката — в чек-листе приёмки. Если размер упрётся в потолок, Prometheus молча отрежет начало месяца и доступность станет оптимистичной без алерта; защитного алерта на покрытие месяца нет — при росте приёма к этим пределам его стоит добавить. Блоки уплотнения при таком сроке крупнее: после выката следим за памятью контейнера Prometheus (лимит 512m, панель `Container memory`).
+
+### Что делать при алерте
+
+- `SlaAvailabilityAtRisk` / `SlaAvailabilityBreached`: открыть строку `SLA (prod, calendar month UTC)` и график `Public names: probe` на `prod`; найти, когда имя падало (провалы `Deploy prod` и плановое обслуживание тоже в счёте). Решение о заморозке некритичных выкатов prod до первого числа принимает техлид. Критический алерт сам не снимается до смены месяца.
+- `SlaReviewTimeAtRisk`: смотреть `Phase duration p95` и очереди (§2): где вырос p95 — в очереди (`ReviewQueueBacklog`, `ReviewQueueWithoutConsumer`), в LLM (`LlmLatencyHigh`) или в публикации.

@@ -1,0 +1,127 @@
+# SLA of prod (docs/MONITORING.md §12): availability of every probed prod name in the calendar month
+# (UTC) against an allowance of 0.5 % of the month. Annotations carry names and percentages only.
+# Unit tests: tests/monitoring/alerts.test.yml (promtool test rules, CI job monitoring-validate).
+#
+# Downtime of the month so far, sla:downtime_seconds:month, is read from the raw probes of the
+# blackbox job (one per minute), so a rule deployed in the middle of the month counts the days
+# before it, and a restart or a gap in the rules cannot reset it. It is the sum of
+#   - the completed hours: a subquery over the last 31 days with a step of one hour, aligned to
+#     whole UTC hours, so every step covers exactly one hour; the mask drops the hours that end
+#     at or before the start of the month (the hour that ends at 00:00 on the 1st belongs to
+#     the previous month); and
+#   - the current hour in steps of 5 minutes: the step at the start of the hour is left to the
+#     hourly term, so nothing is counted twice or dropped at the hour boundary.
+# Each window counts the share of its probes that failed, in seconds (1 - avg of probe_success). A
+# window with a gap counts the probes that exist in it, and the first window of a name that has just
+# joined the probes counts as a whole, so a name that starts failing counts up to an hour at once.
+# A name with no completed hour yet (first probed in the current hour) has no hourly series, and
+# `+` keeps only the pairs that match, so the current-hour term is repeated after `or` and counts
+# it alone: its series and the panels start at the first 5-minute step after its first probe, not
+# at the next whole hour. The parentheses around the `or` are required: `and` binds tighter than
+# `or`, and without them the main term would lose the gate. There is no symmetric fallback to the
+# hourly term: the gate means a probe in the last 30 minutes, and that probe gives the current-hour
+# term a series.
+# Why not a single subquery of 31 days with a 5-minute step: promtool, which runs the unit tests,
+# stops a query at 10 000 samples, and that subquery has 8 928 steps with several values each. Not
+# a rolling [30d] either: the window is the calendar month. Not a counter reset on the 1st: a
+# restart, or a gap longer than the lookback, would reset it to zero exactly when something broke.
+# Samples that are missing (Prometheus, blackbox or the host is down) are not downtime: TargetDown
+# and docs/MONITORING.md §8 cover a blind monitoring. A name that is not probed has no series, so
+# it raises nothing; once it joins PROBE_PROD_HOSTS and the monitoring is deployed, the rules cover
+# it with no change. The gate on last_over_time[30m] stops a name that was probed and then dropped
+# from alerting at most 30 minutes after its last probe, not at the end of the month, and bridges
+# a short gap of the probes without resolving the critical alert.
+#
+# The allowance is absolute seconds, not a ratio of the elapsed time: a ratio would be breached by
+# the first failed probe on the 1st. The warning stops below 100 %, the critical alert starts at
+# 100 % (like LlmMonthlyBudgetWarning); no inhibit rules. The critical alert stays until the month
+# ends, Alertmanager repeats it every 4 hours.
+groups:
+  # interval 5m: the step of the current hour. Rules of a group run in order, so the starts of the
+  # month and of the hour are recorded before the downtime that reads them with @ end().
+  - name: sla
+    interval: 5m
+    rules:
+      - record: sla:month_start_timestamp_seconds
+        expr: time() - ((day_of_month() - 1) * 86400 + hour() * 3600 + minute() * 60 + time() % 60)
+        labels:
+          environment: shared
+
+      - record: sla:hour_start_timestamp_seconds
+        expr: floor(vector(time()) / 3600) * 3600
+        labels:
+          environment: shared
+
+      - record: sla:downtime_seconds:month
+        expr: |
+          (
+            (
+              3600 * sum by (environment, host) (
+                sum_over_time(
+                  ((1 - avg_over_time(probe_success{job="blackbox", environment="prod"}[1h]))
+                    * (time() > bool scalar(sla:month_start_timestamp_seconds @ end())))[31d:1h]
+                )
+              )
+              +
+              300 * sum by (environment, host) (
+                sum_over_time(
+                  ((1 - avg_over_time(probe_success{job="blackbox", environment="prod"}[5m]))
+                    * (time() > bool scalar(sla:hour_start_timestamp_seconds @ end())))[1h:5m]
+                )
+              )
+            )
+            or
+            300 * sum by (environment, host) (
+              sum_over_time(
+                ((1 - avg_over_time(probe_success{job="blackbox", environment="prod"}[5m]))
+                  * (time() > bool scalar(sla:hour_start_timestamp_seconds @ end())))[1h:5m]
+              )
+            )
+          )
+          and on (environment, host) last_over_time(probe_success{job="blackbox", environment="prod"}[30m])
+
+      # 0.5 % of the month: 201.6 / 216 / 223.2 minutes for 28 / 30 / 31 days.
+      - record: sla:downtime_budget_seconds:month
+        expr: 0.005 * 86400 * days_in_month()
+        labels:
+          environment: prod
+
+      - record: sla:downtime_budget_spent:ratio
+        expr: sla:downtime_seconds:month / scalar(sla:downtime_budget_seconds:month)
+
+      # For the dashboard only: the elapsed time is at least 5 minutes, so that the first minutes of
+      # the month do not divide by zero.
+      - record: sla:availability_ratio:month
+        expr: 1 - sla:downtime_seconds:month / scalar(clamp_min(vector(time() - scalar(sla:month_start_timestamp_seconds)), 300))
+
+      # No `for` on the two availability alerts: within a month the downtime only grows.
+      - alert: SlaAvailabilityAtRisk
+        expr: sla:downtime_budget_spent:ratio > 0.5 < 1
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.host }}: {{ $value | humanizePercentage }} of the monthly downtime allowance is spent"
+          description: "Prod downtime of this month so far (failed probes, deploy blips and maintenance included) is more than half of the allowance of 0.5 %; at 100 % SlaAvailabilityBreached takes over and this alert resolves (docs/MONITORING.md §12)."
+
+      - alert: SlaAvailabilityBreached
+        expr: sla:downtime_budget_spent:ratio >= 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.host }}: the monthly downtime allowance is spent ({{ $value | humanizePercentage }})"
+          description: "Prod downtime of this month so far has reached the allowance of 0.5 % (availability 99.5 %); the alert stays until the month ends (docs/MONITORING.md §12)."
+
+      # Time to review of the fast engine (SD §13: p95 up to 4 minutes) from the runs table, see
+      # dmc_review_time_1h in postgres-exporter/queries.yml. The p95 of fewer than 5 runs in the hour
+      # is close to the maximum of a handful of runs, so below 5 the alert stays silent. Prod only,
+      # like the whole SLA. `for: 10m` on the one-hour p95.
+      - alert: SlaReviewTimeAtRisk
+        expr: >
+          max by (environment) (dmc_review_time_1h_p95_seconds{environment="prod"}) > 240
+          and max by (environment) (dmc_review_time_1h_runs{environment="prod"}) >= 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Time to review: p95 {{ $value | humanizeDuration }} over the last hour, the target is 4 minutes"
+          description: "The 95th percentile of the time from the creation of a fast run to its publication, over the runs that succeeded in the last hour (at least 5 of them), is above 4 minutes (docs/MONITORING.md §12)."

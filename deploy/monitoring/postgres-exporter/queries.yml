@@ -95,3 +95,35 @@ dmc_runs_budget_paused_15m:
     - runs:
         usage: GAUGE
         description: Runs skipped with budget_paused in the last 15 minutes
+
+# Time to review of the fast engine over the last hour: finished_at - created_at of the runs that
+# succeeded, so the time covers the queue, the engine and the publication (finished_at is written
+# when the review is published, docs/PIPELINE_SPEC.md §3). created_at is the creation of the Run,
+# not the delivery of the webhook: the time before the Run exists is not counted. Failed, skipped
+# and cancelled runs are not reviews. A one-hour window keeps the p95 on more than a handful of
+# runs. There is no bound on created_at: a retry may wait up to a day on Retry-After
+# (docs/PIPELINE_SPEC.md §4.2), and the whole time counts. The window is on finished_at alone, as
+# in dmc_runs_finished_15m and dmc_runs_budget_paused_15m, so this adds no new kind of scan. Both
+# columns, state and engine are already granted to metrics_exporter. No index bounds finished_at,
+# so every scrape reads the whole runs table in a parallel sequential scan (about 40 ms per
+# 200 000 rows, about 210 ms per 2 000 000 rows, measured on a developer machine; the same
+# for dmc_runs_finished_15m). At about 100 PR a day that is some 36 500 runs a year; the scrape
+# timeout is 20 s. Once the table grows, add an index on finished_at by a separate migration.
+dmc_review_time_1h:
+  query: |
+    SELECT
+      count(*)::float8 AS runs,
+      coalesce(
+        percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM finished_at - created_at)::float8),
+        0
+      ) AS p95_seconds
+    FROM runs
+    WHERE state = 'succeeded' AND engine = 'fast'
+      AND finished_at > now() - interval '1 hour'
+  metrics:
+    - runs:
+        usage: GAUGE
+        description: Fast runs that succeeded in the last hour
+    - p95_seconds:
+        usage: GAUGE
+        description: 95th percentile of finished_at - created_at of those runs, in seconds

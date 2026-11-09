@@ -7,7 +7,6 @@ disposable PostgreSQL database.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -19,27 +18,20 @@ from sqlalchemy import Connection, create_engine, text
 from sqlalchemy.pool import NullPool
 
 from tests.monitoring_deploy_host import MONITORING, _grants, _query, _read
-from tests.portal_postgres import PR_OPEN, PROMPT, RULE_A, RUN_DONE, WS_A, Env, portal_schema
+from tests.portal_postgres import PR_OPEN, PROMPT, RULE_A, RUN_DONE, WS_A, Env
+
+pytest_plugins = ("tests.portal_schema_postgres",)
 
 # UTC+14 all year: its calendar month starts 14 hours before the UTC one.
 FAR_EAST = "Pacific/Kiritimati"
 
 
 @pytest.fixture
-def env() -> Iterator[Env]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    with portal_schema(database_url, None) as schema:
-        yield schema
-
-
-@pytest.fixture
-def connection(env: Env) -> Iterator[Connection]:
+def connection(portal_env: Env) -> Iterator[Connection]:
     """One transaction per test, rolled back: now() is the same for the rows and the query."""
     engine = create_engine(
-        env.database_url,
-        connect_args={"options": f"-csearch_path={env.schema}"},
+        portal_env.database_url,
+        connect_args={"options": f"-csearch_path={portal_env.schema}"},
         poolclass=NullPool,
     )
     try:
@@ -86,6 +78,35 @@ def _run(connection: Connection, state: str, error_code: str, finished_at: datet
             "prompt": PROMPT,
             "at": finished_at,
             "error_code": error_code,
+        },
+    )
+
+
+def _review_run(
+    connection: Connection,
+    state: str,
+    engine: str,
+    created_at: datetime,
+    finished_at: datetime,
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO runs (id, code_change_id, base_sha, base_ref, head_sha, state, trigger, "
+            "idempotency_key, engine, rule_version_id, prompt_version_id, available_at, attempt, "
+            "created_at, finished_at) VALUES (:id, :pr, :sha, 'main', :sha, :state, 'manual', "
+            ":key, :engine, :rule, :prompt, :created_at, 1, :created_at, :finished_at)"
+        ),
+        {
+            "id": uuid4(),
+            "pr": PR_OPEN,
+            "sha": "c" * 40,
+            "state": state,
+            "key": uuid4().hex * 2,
+            "engine": engine,
+            "rule": RULE_A,
+            "prompt": PROMPT,
+            "created_at": created_at,
+            "finished_at": finished_at,
         },
     )
 
@@ -165,3 +186,50 @@ def test_budget_paused_counts_runs_skipped_by_the_budget_in_the_last_15_minutes(
     # The columns deploy.sh already grants to metrics_exporter are enough for the query.
     _as_exporter(connection)
     assert _metric(connection, "dmc_runs_budget_paused_15m") == [{"runs": 2.0}]
+
+
+@pytest.mark.integration
+def test_review_time_counts_succeeded_fast_runs_of_the_last_hour(connection: Connection) -> None:
+    now = connection.execute(text("SELECT now()")).scalar_one()
+    hour = timedelta(hours=1)
+
+    assert _metric(connection, "dmc_review_time_1h") == [{"runs": 0.0, "p95_seconds": 0.0}]
+
+    # Five reviews that took 60, 120, 180, 240 and 300 seconds: the 95th percentile lies 0.8 of the
+    # way from 240 to 300 seconds (rank 0.95 * 4 = 3.8), that is 288.
+    for seconds in (60, 120, 180, 240, 300):
+        finished = now - timedelta(minutes=10)
+        _review_run(
+            connection, "succeeded", "fast", finished - timedelta(seconds=seconds), finished
+        )
+    # Out: a finished hour ago exactly (the window is open at its start) and two hours ago.
+    _review_run(connection, "succeeded", "fast", now - hour - timedelta(minutes=5), now - hour)
+    _review_run(
+        connection,
+        "succeeded",
+        "fast",
+        now - 2 * hour,
+        now - 2 * hour + timedelta(hours=1, minutes=-1),
+    )
+    # Out: not a review that was delivered, or not the fast engine.
+    for state in ("failed", "skipped", "cancelled"):
+        _review_run(connection, state, "fast", now - timedelta(hours=2), now - timedelta(minutes=5))
+    _review_run(
+        connection, "succeeded", "deep", now - timedelta(hours=1), now - timedelta(minutes=5)
+    )
+
+    assert _metric(connection, "dmc_review_time_1h") == [{"runs": 5.0, "p95_seconds": 288.0}]
+    # The columns deploy.sh already grants to metrics_exporter are enough for the query.
+    _as_exporter(connection)
+    assert _metric(connection, "dmc_review_time_1h") == [{"runs": 5.0, "p95_seconds": 288.0}]
+
+
+@pytest.mark.integration
+def test_review_time_counts_a_run_created_days_before_it_finished(connection: Connection) -> None:
+    now = connection.execute(text("SELECT now()")).scalar_one()
+    # A retry may wait up to a day on Retry-After (docs/PIPELINE_SPEC.md §4.2): all of it counts.
+    _review_run(
+        connection, "succeeded", "fast", now - timedelta(days=2), now - timedelta(minutes=5)
+    )
+
+    assert _metric(connection, "dmc_review_time_1h") == [{"runs": 1.0, "p95_seconds": 172500.0}]

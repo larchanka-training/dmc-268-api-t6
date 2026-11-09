@@ -181,7 +181,7 @@ COMPONENTS = (
     ),
 )
 
-# The last firing sample of the shown alerts within a week (Prometheus keeps 15 days). The series
+# The last firing sample of the shown alerts within a week (Prometheus keeps 65 days). The series
 # are rare, so the subquery is cheap; tests/monitoring/status.test.yml runs this very text.
 LAST_FIRING_QUERY = (
     'max_over_time(timestamp(ALERTS{alertstate="firing",alertname=~"'
@@ -189,7 +189,7 @@ LAST_FIRING_QUERY = (
     + '"})[7d:1m])'
 )
 
-# Alerts of alerts.yml the page deliberately does not show; a test pins this list and the table
+# Alerts of the rule files the page deliberately does not show; a test pins this list and the table
 # against the rules, so a new alert needs a decision in one of them.
 NOT_SHOWN = (
     "RedisDown",
@@ -211,6 +211,11 @@ NOT_SHOWN = (
     "PostgresBackupFailed",
     "PostgresBackupOffsiteStale",
     "PostgresBackupOffsiteFailing",
+    # The SLA alerts are about a monthly budget, not the current state: a spent budget would keep
+    # a row red until the month ends.
+    "SlaAvailabilityAtRisk",
+    "SlaAvailabilityBreached",
+    "SlaReviewTimeAtRisk",
 )
 
 
