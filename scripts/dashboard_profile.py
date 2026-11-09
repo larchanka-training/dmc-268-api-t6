@@ -49,7 +49,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 import httpx
@@ -70,7 +70,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alembic import command
 from app.modules.auth.application.scope import AuthScope
-from app.modules.reviews.application.get_metrics_summary import GetMetricsSummary
+from app.modules.reviews.application.get_metrics_summary import GetMetricsSummary, MetricsRange
 from app.modules.reviews.application.list_runs import ListRuns, RunCursor
 from app.modules.reviews.application.run_coverage import CoverageStatus, RunCoverage
 from app.modules.reviews.application.verdict import coverage_verdict, severity_counts
@@ -926,7 +926,9 @@ async def capture_statements(
     async def call(scenario: Scenario) -> None:
         if scenario.endpoint == "summary":
             await summary.execute(
-                scope, range=scenario.params["range"], repo=scenario.params.get("repo")
+                scope,
+                range=cast(MetricsRange, scenario.params["range"]),
+                repo=scenario.params.get("repo"),
             )
         else:
             await runs.execute(
