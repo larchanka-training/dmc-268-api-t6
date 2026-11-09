@@ -52,6 +52,7 @@ from app.modules.repositories.application.repository_settings import (
 from app.modules.repositories.application.rules_status import (
     GetRulesStatus,
     RulesDiagnostic,
+    RulesDocumentPath,
     RulesStatus,
     RulesStatusKind,
     StoredRulesStatus,
@@ -69,6 +70,7 @@ from app.modules.reviews.application.get_run_file_lines import (
 )
 from app.modules.reviews.application.list_pulls import LatestRunRow, PullRequestRow
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
+from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH
 from app.modules.reviews.application.rerun_run import RerunFacts
 from app.modules.reviews.application.review_output import Category, Effort, Severity
 from app.modules.reviews.application.run_events import RunUpdated
@@ -1299,6 +1301,10 @@ _RUNTIME_ENUM_FIELDS: list[tuple[str, str, tuple[object, ...]]] = [
     ("FindingViewDto", "side", (Side, FindingSide, DiffSide)),
     ("ReviewSummaryDto", "effort", (Effort,)),
     ("MetricsSummaryDto", "range", (MetricsRange,)),
+    *(
+        (f"{kind}RulesStatusDto", "path", (RulesDocumentPath, RULES_DOCUMENT_PATH))
+        for kind in ("Present", "Missing", "Invalid", "Unavailable", "Pending")
+    ),
 ]
 
 

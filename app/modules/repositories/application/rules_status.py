@@ -39,6 +39,10 @@ from app.modules.reviews.application.review_ignore import parse_review_ignore
 
 _LOGGER = logging.getLogger(__name__)
 
+# ``RULES_DOCUMENT_PATH`` as a type: the spec declares ``path`` as an inline const, so this is a
+# plain alias; a ``type`` alias would become a schema of its own in ``GET /openapi.json``.
+RulesDocumentPath = Literal[".review/rules.md"]
+
 # A stored result older than this is read again on the next GET.
 RULES_STATUS_STALE_AFTER = timedelta(minutes=10)
 # A retryable failure is read again on a GET only after this pause, or after the

@@ -12,6 +12,7 @@ from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from app.common.application.branch_patterns import validate_branch_patterns
 from app.modules.code_index.domain.enums import RagIndexStatus
+from app.modules.repositories.application.rules_status import RulesDocumentPath
 from app.modules.reviews.api.dtos import ApiDto, UtcDatetime
 
 
@@ -115,7 +116,7 @@ class PresentRulesStatusDto(ApiDto):
 
     status: Literal["present"]
     branch: str
-    path: str
+    path: RulesDocumentPath
     sha: CommitSha
     checked_at: UtcDatetime
     text: str
@@ -129,7 +130,7 @@ class MissingRulesStatusDto(ApiDto):
 
     status: Literal["missing"]
     branch: str
-    path: str
+    path: RulesDocumentPath
     sha: CommitSha
     checked_at: UtcDatetime
     defaults_version: str
@@ -140,7 +141,7 @@ class InvalidRulesStatusDto(ApiDto):
 
     status: Literal["invalid"]
     branch: str
-    path: str
+    path: RulesDocumentPath
     sha: CommitSha
     checked_at: UtcDatetime
     text: str | None
@@ -152,7 +153,7 @@ class UnavailableRulesStatusDto(ApiDto):
 
     status: Literal["unavailable"]
     branch: str
-    path: str
+    path: RulesDocumentPath
     sha: CommitSha | None
     checked_at: UtcDatetime
     diagnostics: list[RulesDiagnosticDto] = Field(min_length=1)
@@ -163,7 +164,7 @@ class PendingRulesStatusDto(ApiDto):
 
     status: Literal["pending"]
     branch: str
-    path: str
+    path: RulesDocumentPath
     sha: None
     checked_at: None
 
