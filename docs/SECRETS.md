@@ -599,6 +599,31 @@ intake (401 вместо 202), отсутствие новых Runs/публик
 `false` и выполните deploy, сохранив keyring. Это не заменяет revoke отдельной установки
 и не отменяет её уже запущенные Runs. Удаление ключей не является способом отключения.
 
+**`revoke-workspace` отзывает все GitLab-подключения одного workspace.** Команда
+принимает только `--workspace-id` и одной транзакцией, под блокировкой workspace,
+отзывает каждую GitLab-установку этого workspace:
+
+```bash
+"${operator[@]}" run --rm --no-deps -T gitlab-admin revoke-workspace \
+  --workspace-id "${workspace_id:?set the workspace UUID}"
+```
+
+С каждой установкой происходит то же, что при `revoke-installation`: stored credential
+очищается, при первом revoke задаётся `revoked_at` и растёт generation, intake
+выключается, родительская `provider_installations` получает `deleted_at`, привязки
+проектов удаляются (проект можно привязать заново), репозитории получают
+`installation_available=false`, активные Runs отменяются с `installation_revoked`.
+Ответ — `{"connections": [...]}`, по записи на установку; без GitLab-подключений список
+пуст, неизвестный workspace даёт `workspace_not_found`. Повтор безопасен; как и
+`revoke-installation`, команде нужен только `DATABASE_URL`. GitHub- и Bitbucket-установки
+того же workspace, подключения других workspace, общий API flag и project hooks в GitLab
+команда не трогает: hooks удаляют вручную, как описано выше.
+
+Отличие от `revoke-installation` — радиус: одна установка по UUID против всех
+GitLab-установок workspace. Для тестовой установки и при живых соседних подключениях
+того же workspace нужен `revoke-installation`; `revoke-workspace` — когда отзывают все
+GitLab-подключения workspace сразу.
+
 При утрате keyring inspect/revoke требуют только `DATABASE_URL`, без PAT, GitLab HTTP,
 decryption или CA. Compose всё равно требует присутствия env-файлов до запуска CLI.
 Если файл отсутствует, `ensure_app_env_files "$PWD"` из уже загруженного helper создаёт
