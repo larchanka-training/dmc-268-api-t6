@@ -208,10 +208,11 @@ class SqlAlchemyMetricsSummary:
                 head[3].append(severity)
         results = await load_review_results(
             session,
+            # run_verdict ignores the saved result of a summary-only head: not read at all.
             {
                 run_id: item[1]
                 for run_id, item in grouped.items()
-                if item[0] == RunState.SUCCEEDED.value
+                if item[0] == RunState.SUCCEEDED.value and not item[2]
             },
             {run_id: item[3] for run_id, item in grouped.items()},
         )

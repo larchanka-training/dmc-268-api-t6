@@ -346,6 +346,103 @@ def test_a_day_counts_each_category_across_severities(portal_env: Env) -> None:
     )
 
 
+def test_a_summary_only_head_has_no_verdict_and_its_result_is_not_read(portal_env: Env) -> None:
+    async def exercise() -> None:
+        engine = portal_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        scope = AuthScope(42, (WS_A,))
+        clean, stopped = uuid4(), uuid4()
+        try:
+            async with factory.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE runs SET created_at = '2020-01-01T00:00:00Z', "
+                        "finished_at = '2020-01-01T00:00:00Z'"
+                    )
+                )
+                for run_id, pr, key in ((clean, PR_OPEN, "l"), (stopped, PR_NEW, "m")):
+                    await _insert_run(
+                        session,
+                        run_id,
+                        pr,
+                        "succeeded",
+                        datetime(2026, 10, 26, 10, tzinfo=UTC),
+                        datetime(2026, 10, 26, 11, tzinfo=UTC),
+                        key * 64,
+                    )
+                await session.execute(
+                    text(
+                        "INSERT INTO run_actions (id, run_id, index, tool, request, response, "
+                        "started_at, duration_ms) VALUES (:id, :run, 0, 'review.postprocess', "
+                        "'{}'::jsonb, CAST(:body AS jsonb), :at, 1)"
+                    ),
+                    {
+                        "id": uuid4(),
+                        "run": clean,
+                        "body": clean_review_result(HEAD),
+                        "at": datetime(2026, 10, 26, 11, tzinfo=UTC),
+                    },
+                )
+                # The stage stopped before the model: no saved result, no diff rows.
+                await session.execute(
+                    text(
+                        "INSERT INTO context_payloads (id, run_id, schema_version, summary) "
+                        'VALUES (:id, :run, 1, \'{"status": "summary_only"}\')'
+                    ),
+                    {"id": uuid4(), "run": stopped},
+                )
+            statements: list[str] = []
+
+            def record(
+                conn: object,
+                cursor: object,
+                statement: str,
+                parameters: object,
+                context: object,
+                executemany: bool,
+            ) -> None:
+                del conn, cursor, parameters, context, executemany
+                if statement.lstrip().lower().startswith("select"):
+                    statements.append(statement)
+
+            event.listen(engine.sync_engine, "before_cursor_execute", record)
+            try:
+                summary = await GetMetricsSummary(
+                    SqlAlchemyMetricsSummary(factory, scope), now=lambda: _NOW
+                ).execute(scope, range="7d", repo=None)
+            finally:
+                event.remove(engine.sync_engine, "before_cursor_execute", record)
+            page = await ListRepositoryPulls(SqlAlchemyPullRequestQueries(factory, scope)).execute(
+                REPO_A, state="all", limit=20
+            )
+        finally:
+            await engine.dispose()
+
+        buckets = summary.totals.pulls_by_verdict
+        assert (buckets.clean, buckets.no_verdict, buckets.attention, buckets.blocking) == (
+            1,
+            1,
+            0,
+            0,
+        )
+        # The pull list derives the same verdicts on its own path.
+        assert page is not None
+        verdicts = {
+            item.number: None if item.latest_run is None else item.latest_run.verdict
+            for item in page.items
+        }
+        # PR_OPEN is #1, PR_NEW is #3 (tests.portal_postgres).
+        assert (verdicts[1], verdicts[3]) == ("clean", None)
+        # Runs, heads, the one saved result, findings, workspaces: the summary-only head
+        # needs no saved result, so the diff fallback for a missing one is never read.
+        assert len(statements) == 5
+
+    asyncio.run(
+        exercise(),
+        loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
+    )
+
+
 def test_metrics_summary_matches_pull_verdicts_and_published_findings(
     portal_env: Env,
 ) -> None:
