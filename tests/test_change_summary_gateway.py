@@ -27,6 +27,7 @@ from app.modules.reviews.application.change_summary import (
 )
 from app.modules.reviews.application.llm import LlmCallFailed, LlmErrorCode, RunCallContext
 from app.modules.reviews.application.prompt_builder import ChangedFile, DiffLine
+from app.modules.reviews.infrastructure.llm.answers import change_summary_output_schema
 from app.modules.reviews.infrastructure.llm.gateway import HeuristicTokenCounter
 from app.modules.reviews.infrastructure.llm.models import GatewayChangeSummaryModel
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelPrice, ModelProfile
@@ -108,7 +109,11 @@ def test_change_summary_example_answer_passes_the_gateway_parse_path() -> None:
     assert "$schema" not in schema and "$id" not in schema
     assert schema["required"] == ["sentences"]
     assert schema["additionalProperties"] is False
-    assert schema["properties"]["sentences"]["items"]["pattern"] == "^[^\\r\\n]*\\S[^\\r\\n]*$"
+    local = change_summary_output_schema()["properties"]["sentences"]["items"]["pattern"]
+    assert local.endswith("(?![\\s\\S])")
+    assert schema["properties"]["sentences"]["items"]["pattern"] == (
+        local.removesuffix("(?![\\s\\S])") + "$"
+    )
 
 
 def test_change_summary_call_writes_its_own_operation_without_the_review_prompt() -> None:

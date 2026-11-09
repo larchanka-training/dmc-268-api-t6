@@ -14,10 +14,10 @@
       "maxItems": 3,
       "items": {
         "type": "string",
-        "description": "One sentence on one line, with at least one non-blank character.",
+        "description": "One sentence on one line, with at least one non-blank character: only its last word may end with '.', '!' or '?', also before a closing quote or bracket.",
         "minLength": 1,
         "maxLength": 200,
-        "pattern": "^[^\\r\\n]*\\S[^\\r\\n]*(?![\\s\\S])"
+        "pattern": "^[^\\S\\r\\n]*(?:\\S*[^\\s.!?\"')\\]’”][\"')\\]’”]*[^\\S\\r\\n]+)*\\S+[^\\S\\r\\n]*(?![\\s\\S])"
       }
     }
   }

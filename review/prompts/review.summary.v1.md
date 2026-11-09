@@ -31,7 +31,8 @@ docstrings.
 ## 3. What to write
 
 - 1 to 3 sentences in English, one complete sentence per item, each on one line and at most
-  200 characters.
+  200 characters. Only the last word of an item may end with `.`, `!` or `?`: write "for
+  example", not "e.g.".
 - Say what the change does: the behaviour, module, interface or data it adds, changes or
   removes. Lead with the main change and group small related edits.
 - Describe only what the visible diff shows. When part of the change is cut or not shown,

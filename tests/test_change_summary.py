@@ -21,6 +21,8 @@ from app.modules.reviews.application.prompt_budget import EstimatedTokenCounter
 from app.modules.reviews.application.prompt_builder import ChangedFile, DiffLine
 from app.modules.reviews.infrastructure.llm.answers import (
     InvalidAnswer,
+    change_summary_output_schema,
+    provider_schema,
     validate_change_summary_answer,
 )
 
@@ -65,7 +67,23 @@ def test_change_summary_example_answer_passes_the_validator() -> None:
             ["sentences/0: '' should be non-empty", "sentences/0: does not match"],
         ),
         ('{"sentences": ["Adds a job.\\nAnd more."]}', ["sentences/0: does not match"]),
+        ('{"sentences": ["Adds a job.\\n"]}', ["sentences/0: does not match"]),
         ('{"sentences": ["   "]}', ["sentences/0: does not match"]),
+        (
+            '{"sentences": ["One. Two.", "Three. Four.", "Five. Six."]}',
+            [
+                "sentences/0: does not match",
+                "sentences/1: does not match",
+                "sentences/2: does not match",
+            ],
+        ),
+        ('{"sentences": ["Adds a job! Removes another?"]}', ["sentences/0: does not match"]),
+        ('{"sentences": ["Adds a job.\\tRemoves another."]}', ["sentences/0: does not match"]),
+        (
+            json.dumps({"sentences": ['Adds "a job." Removes another.']}),
+            ["sentences/0: does not match"],
+        ),
+        ('{"sentences": ["Adds a job, e.g. a purge."]}', ["sentences/0: does not match"]),
         (
             json.dumps({"sentences": ["x" * 201]}),
             ["sentences/0: is too long"],
@@ -80,7 +98,13 @@ def test_change_summary_example_answer_passes_the_validator() -> None:
         "other-field",
         "empty-sentence",
         "line-break",
+        "trailing-line-break",
         "blank-sentence",
+        "two-sentences-per-item",
+        "inner-mark",
+        "inner-mark-before-tab",
+        "inner-mark-before-quote",
+        "abbreviation",
         "too-long",
         "prose-around",
         "not-an-object",
@@ -97,6 +121,31 @@ def test_change_summary_answer_outside_the_schema_is_invalid(
         location, _, verdict = expected.partition(": ")
         assert message.startswith(location)
         assert verdict in message
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Renames app/main.py to app/entry.py and bumps httpx to 0.28.1.",
+        ".gitignore now ignores the cache directory!",
+        'Adds a "dry run" flag to purge() in version 1.2 of the job?',
+        "Ends with a period and a trailing space. ",
+    ],
+    ids=["dotted-names", "leading-dot", "quotes-and-calls", "trailing-space"],
+)
+def test_change_summary_one_sentence_with_dots_inside_its_words_is_valid(sentence: str) -> None:
+    answer = json.dumps({"sentences": [sentence]})
+
+    assert validate_change_summary_answer(answer) == {"sentences": [sentence]}
+
+
+def test_change_summary_provider_pattern_has_no_lookaround() -> None:
+    # #130: a provider may reject a lookaround; only the final end anchor is rewritten to "$".
+    schema = provider_schema(change_summary_output_schema())
+    pattern = schema["properties"]["sentences"]["items"]["pattern"]
+
+    assert pattern.endswith("$")
+    assert not any(token in pattern for token in ("(?=", "(?!", "(?<"))
 
 
 # ---------- the port: what the agent sees ----------
