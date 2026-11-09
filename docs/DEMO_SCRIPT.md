@@ -19,7 +19,7 @@
 | Настройки репозитория | Automatic review — включён; CI waiting — `Auto`; Verdict — `Comment`; Comment limit — `10`; Branch filter — пусто; Severity threshold — `All`; RAG — `Ready` | staging UI → Repositories → Settings песочницы |
 | Бюджет | у workspace `GitHub: axyi` нет надписи «The daily budget is used up, reviews are paused until 00:00 UTC» | staging UI → Analytics → Budget today |
 | Демо-PR | открыт заранее, CI зелёный, лейбла `ai-review` нет | вкладка 2 |
-| Запасной PR | открыт не раньше чем за 7 дней до показа, лейбл поставлен, ревью опубликовано, в Checks `AI Review` — «AI-ревью: …» | вкладка 5 |
+| Запасной PR | подготовлен за 1–2 дня до показа: окно `7 days` в Analytics скользящее, и прогон старше 7 суток из него выпадет. Лейбл поставлен, ревью опубликовано, в Checks `AI Review` — «AI-ревью: …» | вкладка 5 |
 | Вкладки | 1 — `.review/rules.md` в `main`; 2 — демо-PR; 3 — staging UI, Settings песочницы; 4 — staging UI, Analytics; 5 — запасной PR | — |
 
 На 09.11.2026 Automatic review на staging выключен во всех подключённых репозиториях. Тот, кто
