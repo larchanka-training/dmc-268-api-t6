@@ -11,9 +11,11 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.modules.auth.application.agent_tokens import (
+    AgentTokenListingForbidden,
     AgentTokenRecord,
     AgentTokenRevocationForbidden,
     AgentTokens,
+    OwnedAgentToken,
     RepositoryNotAvailable,
 )
 from app.modules.auth.application.scope import AuthScope
@@ -60,6 +62,13 @@ class FakeTokenStore:
 
     async def find(self, token_hash: str) -> AgentTokenRecord | None:
         return self.saved.get(token_hash)
+
+    async def list_active(self, user_id: int, at: datetime) -> list[OwnedAgentToken]:
+        return [
+            OwnedAgentToken(record.id, "octo/repo", at, record.expires_at)
+            for record in self.saved.values()
+            if record.user_id == user_id and record.revoked_at is None and record.expires_at > at
+        ]
 
     async def revoke(self, token_id: UUID, user_id: int, at: datetime) -> bool:
         for record in self.saved.values():
@@ -123,3 +132,21 @@ def test_agent_credential_cannot_revoke_a_token() -> None:
     with pytest.raises(AgentTokenRevocationForbidden):
         asyncio.run(tokens.revoke(scope, uuid4()))
     assert store.commits == 0
+
+
+def test_owner_can_discover_active_token_ids_without_secrets() -> None:
+    now = datetime(2026, 11, 5, tzinfo=UTC)
+    store = FakeTokenStore(uuid4(), uuid4())
+    tokens = AgentTokens(store.uow, now=lambda: now, new_secret=lambda: "private")
+    issued = asyncio.run(tokens.issue(42, "octo/repo"))
+
+    listed = asyncio.run(tokens.list_active(AuthScope(42, ())))
+    assert [token.id for token in listed] == [issued.id]
+    assert listed[0].repository == "octo/repo"
+    assert "private" not in repr(listed)
+    assert asyncio.run(tokens.list_active(AuthScope(43, ()))) == []
+    with pytest.raises(AgentTokenListingForbidden):
+        asyncio.run(tokens.list_active(AuthScope(42, (), agent_repository_id=store.repo_id)))
+
+    assert asyncio.run(tokens.revoke(AuthScope(42, ()), issued.id))
+    assert asyncio.run(tokens.list_active(AuthScope(42, ()))) == []

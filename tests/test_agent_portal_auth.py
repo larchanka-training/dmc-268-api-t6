@@ -62,3 +62,20 @@ def test_revoked_agent_token_is_rejected_before_portal_handler(
         TestClient(app).get("/api/runs", headers={"Authorization": "Bearer acr_test"}).status_code
         == 401
     )
+
+
+def test_agent_route_allowlist_contains_only_repository_settings_and_review_reads() -> None:
+    assert {
+        ("GET", "/api/repos"),
+        ("GET", "/api/repos/{repo_id}"),
+        ("PATCH", "/api/repos/{repo_id}"),
+        ("GET", "/api/repos/{repo_id}/pulls"),
+        ("GET", "/api/repos/{repo_id}/rules-status"),
+        ("GET", "/api/runs"),
+        ("GET", "/api/runs/{run_id}"),
+        ("GET", "/api/runs/{run_id}/comments"),
+        ("GET", "/api/runs/{run_id}/actions"),
+        ("GET", "/api/runs/{run_id}/actions/{index}/response"),
+        ("GET", "/api/runs/{run_id}/diff"),
+        ("GET", "/api/runs/{run_id}/files"),
+    } == portal_auth._AGENT_OPERATIONS
