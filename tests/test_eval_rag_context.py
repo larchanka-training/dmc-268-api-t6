@@ -212,6 +212,23 @@ def test_a_renamed_export_gives_a_broken_reference_with_its_left_definition() ->
     assert 'path="pkg/view.py"' not in arm_a.prompt.user
 
 
+def test_a_package_reimport_at_base_does_not_create_a_broken_reference(tmp_path: Path) -> None:
+    case = _copy_case(tmp_path, _RENAMED)
+    package = case / "base/pkg"
+    (package / "__init__.py").write_text("from .other import store\n", encoding="utf-8")
+    (package / "other.py").write_text("def store():\n    return 1\n", encoding="utf-8")
+    (package / "view.py").write_text(
+        "from pkg import store\n\n\ndef show(key: str) -> str:\n    return str(store.load(key))\n",
+        encoding="utf-8",
+    )
+
+    arm = asyncio.run(build_arm_input(case, "B", review_model=_MODEL))
+
+    assert arm.payload.retrieved == ()
+    assert arm.payload.rag is not None
+    assert arm.payload.rag.confirmed == 0
+
+
 def _copy_case(tmp_path: Path, source: Path, name: str | None = None) -> Path:
     target = tmp_path / (name or source.name)
     shutil.copytree(source, target)

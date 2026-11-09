@@ -12,6 +12,8 @@ import time
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 
+import pytest
+
 from app.modules.code_index.application.index_resolution import (
     INDEX_RESOLVER_VERSION,
     IndexedImport,
@@ -124,7 +126,7 @@ def _unresolved(
 
 
 def test_resolver_version() -> None:
-    assert INDEX_RESOLVER_VERSION == "resolver/v1+index/v1"
+    assert INDEX_RESOLVER_VERSION == "resolver/v2+index/v1"
 
 
 # --- Python ----------------------------------------------------------------------------
@@ -279,6 +281,74 @@ def test_python_package_binding_prefers_a_symbol_of_init_then_the_submodule() ->
         excluded={"pkg/helpers.py": "ignored"},
     )
     assert excluded[0].edges == (_imports(_APP, init),)
+
+
+@pytest.mark.parametrize(
+    "init",
+    [
+        "from .other import helpers\n",
+        "from .other import x as helpers\n",
+        "from . import helpers\nfrom .other import helpers\n",
+        "def helpers():\n    pass\n",
+        "helpers = object()\n",
+    ],
+    ids=["reimport", "alias", "last-reimport", "definition", "assignment"],
+)
+def test_python_package_rebinding_indexes_the_init_instead_of_the_submodule(init: str) -> None:
+    item = _one(
+        _APP,
+        _PACKAGE_APP,
+        paths=["pkg/helpers.py", "pkg/other.py"],
+        sources={"pkg/__init__.py": init},
+    )
+
+    assert item.edges == (
+        _imports(_APP, "pkg/__init__.py"),
+        _uses(_APP, "pkg/__init__.py", "helpers"),
+    )
+
+
+@pytest.mark.parametrize(
+    "init",
+    [
+        "from . import helpers\n",
+        "from . import helpers as helpers\n",
+        "import pkg.helpers as helpers\n",
+        "from .other import helpers\nfrom . import helpers\n",
+        "helpers = object()\nfrom . import helpers\n",
+    ],
+    ids=["relative", "relative-alias", "module-alias", "last-binding", "last-import"],
+)
+def test_python_package_own_submodule_import_keeps_submodule_edges(init: str) -> None:
+    item = _one(
+        _APP,
+        _PACKAGE_APP,
+        paths=["pkg/helpers.py", "pkg/other.py"],
+        sources={"pkg/__init__.py": init},
+    )
+
+    assert item.edges == (
+        _imports(_APP, "pkg/__init__.py"),
+        _imports(_APP, "pkg/helpers.py"),
+        _uses(_APP, "pkg/helpers.py", "load"),
+    )
+
+
+@pytest.mark.parametrize("init", ["from app import routes\n", "import app.routes as routes\n"])
+def test_python_package_own_absolute_import_in_monorepo_indexes_submodule(init: str) -> None:
+    importer = "backend/app/view.py"
+    item = _one(
+        importer,
+        "from . import routes\n\ndef run():\n    return routes.load()\n",
+        paths=["backend/app/routes.py"],
+        sources={"backend/app/__init__.py": init},
+    )
+
+    assert item.edges == (
+        _imports(importer, "backend/app/__init__.py"),
+        _imports(importer, "backend/app/routes.py"),
+        _uses(importer, "backend/app/routes.py", "load"),
+    )
 
 
 def test_python_unused_submodule_binding_still_imports_the_submodule() -> None:

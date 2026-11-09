@@ -30,7 +30,7 @@ from app.modules.reviews.application.ast_symbols import (
 from app.modules.reviews.application.context_provenance import LineRange
 from app.modules.reviews.application.diff_map import DiffFile, RowKind
 
-RESOLVER_VERSION = "resolver/v1"
+RESOLVER_VERSION = "resolver/v2"
 MAX_IMPORTED_FILES = 20
 # Why a file is unavailable when its content is binary: an exclusion, not a failure.
 BINARY_SOURCE = "binary"
@@ -493,6 +493,64 @@ def exported_symbols(facts: AstFacts, name: str) -> tuple[AstSymbol, ...]:
     return () if index is None else (facts.symbols[index],)
 
 
+def binds_python_submodule(
+    binding: AstImportName, target: ModuleTarget, submodule: str, tree: RevisionTree
+) -> bool:
+    """Whether ``from package import name`` binds ``submodule`` itself."""
+    return (
+        binding.kind is ImportKind.NAMED
+        and binding.name is not None
+        and target.files[0].endswith("__init__.py")
+        and python_submodule_files(target.files[0], binding.name, tree) == [submodule]
+    )
+
+
+def python_package_binds(
+    package_init: str, facts: AstFacts, name: str, submodule: str, tree: RevisionTree
+) -> bool:
+    """Whether a package binds ``name`` to something other than its own submodule."""
+    last_line = max(
+        (
+            item.declaration_range.start_line
+            for item in facts.symbols
+            if item.enclosing is None and item.name == name
+        ),
+        default=-1,
+    )
+    binds_other = last_line != -1
+    package_parts = tuple(posixpath.dirname(package_init).split("/"))
+    for item in facts.imports:
+        if item.line < last_line:
+            continue
+        for binding in item.names:
+            if binding.alias != name:
+                continue
+            target = module_target(package_init, item.module, facts.language, tree, None)
+            own_module = target.resolution is ImportResolution.RESOLVED and (
+                (binding.kind is ImportKind.MODULE and submodule in target.files)
+                or binds_python_submodule(binding, target, submodule, tree)
+            )
+            if (
+                target.resolution is ImportResolution.EXTERNAL
+                and binding.kind in {ImportKind.NAMED, ImportKind.MODULE}
+                and not item.module.startswith(".")
+            ):
+                module_parts = tuple(item.module.split("."))
+                parent_parts = (
+                    module_parts if binding.kind is ImportKind.NAMED else module_parts[:-1]
+                )
+                own_name = binding.name if binding.kind is ImportKind.NAMED else module_parts[-1]
+                own_module = own_module or (
+                    bool(parent_parts)
+                    and package_parts[-len(parent_parts) :] == parent_parts
+                    and own_name == name
+                    and python_submodule_files(package_init, name, tree) == [submodule]
+                )
+            last_line = item.line
+            binds_other = not own_module
+    return binds_other
+
+
 def _uses_wildcard(facts: AstFacts, symbol: AstSymbol) -> bool:
     """Whether ``symbol`` names something a wildcard or dot import of its file may bind.
 
@@ -731,7 +789,8 @@ class ImportResolver:
         outcome = await self._lookup(list(target.files), wanted)
         package_init = target.files[0].endswith("__init__.py")
         if (
-            outcome[0] is ImportResolution.MISSING
+            outcome[0]
+            in {ImportResolution.MISSING, ImportResolution.RESOLVED, ImportResolution.AMBIGUOUS}
             and language is AstLanguage.PYTHON
             and binding.kind is ImportKind.NAMED
             and binding.name is not None
@@ -740,6 +799,13 @@ class ImportResolver:
             # ``from package import name`` can bind a submodule instead of a symbol.
             submodule = python_submodule_files(target.files[0], binding.name, self._tree)
             if len(submodule) == 1:
+                init = await self._provider.facts_for(target.files[0])
+                if isinstance(init, FileUnavailable):
+                    return ImportResolution.UNSUPPORTED, init.reason, ()
+                if python_package_binds(
+                    target.files[0], init, binding.name, submodule[0], self._tree
+                ):
+                    return outcome
                 if not members:
                     return ImportResolution.UNSUPPORTED, "submodule_binding", ()
                 return await self._lookup(submodule, members)

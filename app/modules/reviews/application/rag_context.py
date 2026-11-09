@@ -39,9 +39,10 @@ from app.modules.reviews.application.ast_resolution import (
     RevisionTree,
     SymbolRef,
     affected_symbols,
+    binds_python_submodule,
     exported_symbols,
     module_target,
-    python_submodule_files,
+    python_package_binds,
     symbol_ref,
 )
 from app.modules.reviews.application.ast_symbols import (
@@ -901,8 +902,9 @@ class _Selection:
             if target.resolution is not ImportResolution.RESOLVED:
                 continue
             for binding in item.names:
-                if changed_path in target.files or _binds_submodule(
-                    facts.language, binding, target, changed_path, tree
+                if changed_path in target.files or (
+                    facts.language is AstLanguage.PYTHON
+                    and binds_python_submodule(binding, target, changed_path, tree)
                 ):
                     yield item, binding, target
 
@@ -919,18 +921,8 @@ class _Selection:
             # this is its outcome. An ignored package, one past the read limit or one
             # that cannot be read cannot show that the name is the submodule.
             return True
-        if any(item.enclosing is None and item.name == binding.name for item in facts.symbols):
-            return True
-        for item in facts.imports:
-            target = module_target(
-                package_init, item.module, facts.language, self._tree, self._go_module
-            )
-            for name in item.names:
-                if name.alias == binding.name and not _imports_module(
-                    facts.language, name, target, submodule, self._tree
-                ):
-                    return True
-        return False
+        assert binding.name is not None
+        return python_package_binds(package_init, facts, binding.name, submodule, self._tree)
 
     async def _definition(self, base: _Base, ref: SymbolRef) -> RetrievedPlace | None:
         """The signature of a removed definition, read at the base."""
@@ -1049,24 +1041,6 @@ def _breaks(after: ImportRef | None, tree: RevisionTree) -> bool:
     )
 
 
-def _binds_submodule(
-    language: AstLanguage,
-    binding: AstImportName,
-    target: ModuleTarget,
-    head_path: str,
-    tree: RevisionTree,
-) -> bool:
-    """``from package import name`` can bind the submodule at ``head_path``, as the
-    resolver reads it."""
-    return (
-        language is AstLanguage.PYTHON
-        and binding.kind is ImportKind.NAMED
-        and binding.name is not None
-        and target.files[0].endswith("__init__.py")
-        and python_submodule_files(target.files[0], binding.name, tree) == [head_path]
-    )
-
-
 def _joined(items: tuple[AstImport, ...], more: Iterable[AstImport]) -> tuple[AstImport, ...]:
     """``items`` and then each import of ``more`` it lacks, once."""
     joined = list(items)
@@ -1074,22 +1048,6 @@ def _joined(items: tuple[AstImport, ...], more: Iterable[AstImport]) -> tuple[As
         if item not in joined:
             joined.append(item)
     return tuple(joined)
-
-
-def _imports_module(
-    language: AstLanguage,
-    binding: AstImportName,
-    target: ModuleTarget,
-    path: str,
-    tree: RevisionTree,
-) -> bool:
-    """Whether an import binds the module at ``path`` itself: ``import pkg.sub as sub``,
-    or ``from pkg import sub`` as the resolver reads it."""
-    if target.resolution is not ImportResolution.RESOLVED:
-        return False
-    if binding.kind is ImportKind.MODULE:
-        return path in target.files
-    return _binds_submodule(language, binding, target, path, tree)
 
 
 def _innermost(facts: AstFacts, readers: Mapping[int, bool]) -> list[int]:
