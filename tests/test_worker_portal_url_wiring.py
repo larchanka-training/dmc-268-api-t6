@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -326,24 +327,30 @@ def compose(
     )
 
 
+LINKED_URL = "https://portal.test/runs/11111111-2222-3333-4444-555555555555"
+
+
+def ends_with_run_link(summary: str) -> bool:
+    return summary.endswith("\n\n" + LINKED_URL)
+
+
+def has_no_run_link(summary: str) -> bool:
+    return "/runs/" not in summary
+
+
 _PORTAL_CASES = [
-    pytest.param(
-        "https://portal.test///",
-        "https://portal.test/runs/11111111-2222-3333-4444-555555555555",
-        "\n\nhttps://portal.test/runs/11111111-2222-3333-4444-555555555555",
-        id="linked",
-    ),
-    pytest.param(None, None, None, id="unset"),
-    pytest.param("", None, None, id="empty"),
+    pytest.param("https://portal.test///", LINKED_URL, ends_with_run_link, id="linked"),
+    pytest.param(None, None, has_no_run_link, id="unset"),
+    pytest.param("", None, has_no_run_link, id="empty"),
 ]
 
 
-@pytest.mark.parametrize(("portal_url", "expected_url", "expected_summary_suffix"), _PORTAL_CASES)
+@pytest.mark.parametrize(("portal_url", "expected_url", "summary_tail"), _PORTAL_CASES)
 def test_composed_handle_run_recovery_publishes_portal_link(
     monkeypatch: pytest.MonkeyPatch,
     portal_url: str | None,
     expected_url: str | None,
-    expected_summary_suffix: str | None,
+    summary_tail: Callable[[str], bool],
 ) -> None:
     store = Store("failed")
     process = compose(monkeypatch, store, portal_url)
@@ -356,20 +363,17 @@ def test_composed_handle_run_recovery_publishes_portal_link(
     assert target.run_id == UUID("11111111-2222-3333-4444-555555555555")
     assert view.status == "completed"
     assert view.details_url == expected_url
-    if expected_summary_suffix is None:
-        assert "/runs/" not in view.summary
-    else:
-        assert view.summary.endswith(expected_summary_suffix)
+    assert summary_tail(view.summary)
     assert store.open_units == 0
     assert store.submissions == []
 
 
-@pytest.mark.parametrize(("portal_url", "expected_url", "expected_summary_suffix"), _PORTAL_CASES)
+@pytest.mark.parametrize(("portal_url", "expected_url", "summary_tail"), _PORTAL_CASES)
 def test_composed_publish_review_success_publishes_portal_link(
     monkeypatch: pytest.MonkeyPatch,
     portal_url: str | None,
     expected_url: str | None,
-    expected_summary_suffix: str | None,
+    summary_tail: Callable[[str], bool],
 ) -> None:
     store = Store("publishing")
     process = compose(monkeypatch, store, portal_url)
@@ -390,8 +394,5 @@ def test_composed_publish_review_success_publishes_portal_link(
     assert target.run_id == UUID("11111111-2222-3333-4444-555555555555")
     assert view.status == "completed"
     assert view.details_url == expected_url
-    if expected_summary_suffix is None:
-        assert "/runs/" not in view.summary
-    else:
-        assert view.summary.endswith(expected_summary_suffix)
+    assert summary_tail(view.summary)
     assert store.open_units == 0
