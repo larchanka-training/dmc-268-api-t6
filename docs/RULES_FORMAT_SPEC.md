@@ -344,6 +344,10 @@ case-folding и URL-decoding не выполняются ни для пути, �
 имя такого источника не допускаются ни в один вход LLM. Невозможность изоляции или ошибка целостности
 snapshot останавливает run; полная семантика определена в
 [CONTEXT_AND_VERIFICATION_SPEC §9.1](CONTEXT_AND_VERIFICATION_SPEC.md#91-идентичность-снимка-и-файлов).
+Источник нельзя надёжно изолировать, если run не может сохранить его имя от провайдера
+без потерь: NUL или больше 1024 символов в новом либо старом имени. Такой run на пути
+snapshot завершается `policy_snapshot_integrity_error` на первой попытке, до записи
+diff и любого LLM-вызова.
 
 Matcher должен использовать ограниченный автомат/динамическое программирование,
 а не regex с неограниченным backtracking. Состояние segment matching — пара
@@ -1119,7 +1123,7 @@ SHA-256) и сверяется с запрошенным; расхождение
 | `policy_revision_unavailable` | `failed` | Нет автоматической смены SHA; закреплённая ревизия недоступна либо её листинг дерева усечён (у GitLab также страница листинга больше своего предела 1 MiB, как усечённый листинг GitHub) или неоднозначен (запись без mode или с mode не своего типа, имя с `/`, `.`/`..`, повтор имени): нерекурсивный листинг одного SHA всегда одинаков, повтор его не исправит |
 | `policy_fetch_transient` | Ограниченный retry, затем `failed` | Timeout/reset/5xx/нечитаемый ответ (не JSON или иная форма) либо blob другого Git id: его повторяют, потому что искажение мог внести сбой транспорта, в отличие от корректно разобранного усечённого или неоднозначного листинга; пауза после 5xx с `Retry-After` — по правилу лимита ([PIPELINE_SPEC §4.2](PIPELINE_SPEC.md#42-задержки)) |
 | `policy_rate_limited` | Ограниченный retry, затем `failed` | 429 или подтверждённый rate-limit 403. У GitHub признак лимита — `Retry-After` (целые секунды или HTTP-date), `X-RateLimit-Remaining: 0` либо, без них, вторичный лимит: `message` JSON-тела 403/429 (учитываются первые 4 KiB) содержит «secondary rate limit» в любом регистре — GitHub документирует такое сообщение, но не его точный текст; задержка тогда 60 с. Соблюсти Retry-After, не дольше суток ([PIPELINE_SPEC §4.2](PIPELINE_SPEC.md#42-задержки)) |
-| `policy_snapshot_integrity_error` | `failed` | Нет; checksum/версии недоступны или противоречат snapshot |
+| `policy_snapshot_integrity_error` | `failed` | Нет; checksum/версии недоступны или противоречат snapshot; имя изменённого файла нельзя сохранить без потерь (§5.1) |
 | `policy_context_violation` | `failed` до отправки | Нет; final payload содержит запрещённый source |
 | `all_changes_ignored` | `skipped` | Не retry; все изменения доказанно исключены по политике, технических пропусков нет |
 
@@ -1319,7 +1323,7 @@ snapshot (§5, итог дефолтов и файла для прогона) в
 | Доказанный pure rename/mode-only рядом с кодом | T препятствует clean: partial/null с соответствующим полным текстом ([PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions)); raw metadata-only без proof — incomplete (CVS §2.2) |
 | Достоверный ignored anchor без manifest; неизвестный mask-matching путь; allowed anchor с ignored evidence | ignored_file до видимости без самостоятельного partial; unknown_path/identity error с partial; evidence_source_disallowed с partial; guards сохраняются |
 | Rename/copy с одной недопустимой стороной и допустимым новым alias | Всё изменение и новый alias изолированы, в том числе от импортов/AST/conventions/repair/fallback/метаданных |
-| Нельзя доказать изоляцию источника; нарушена целостность snapshot; запрещённый источник дошёл до guard | Failed; в последнем случае policy_context_violation до отправки, без продолжения с утечкой |
+| Нельзя доказать изоляцию источника (имя изменённого файла с NUL или длиннее 1024 символов, §5.1); нарушена целостность snapshot; запрещённый источник дошёл до guard | Failed; при недоказуемой изоляции — policy_snapshot_integrity_error на первой попытке, до записи diff и любого LLM-вызова; в последнем случае policy_context_violation до отправки, без продолжения с утечкой |
 | Rename/copy generated/client.py → src/client.py | Diff/full file/imported AST исключены согласованно |
 | `**/*.md` и изменённые rules/AGENTS | Base policy передана; head и diff Markdown исключены |
 | Изменились active prompts/defaults между попытками | Retry использует snapshot; rerun имеет собственные pins |
