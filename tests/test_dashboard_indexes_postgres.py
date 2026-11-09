@@ -17,7 +17,7 @@ from tests.portal_postgres import Env
 pytest_plugins = ("tests.portal_postgres",)
 pytestmark = pytest.mark.integration
 
-_REVISION = "20261109_0061"
+_REVISION = "20261109_0064"
 
 _INDEXES = {
     "ix_findings_published_run_id": (

@@ -3,8 +3,8 @@
 Each index builds in well under a second on a year of history at 100 PRs a day
 (docs/test-plan/db-profile-456.md), so a plain CREATE INDEX holds writes only that long.
 
-Revision ID: 20261109_0061
-Revises: 20261106_0060
+Revision ID: 20261109_0064
+Revises: 20261106_0061
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "20261109_0061"
-down_revision = "20261106_0060"
+revision = "20261109_0064"
+down_revision = "20261106_0061"
 branch_labels = None
 depends_on = None
 
