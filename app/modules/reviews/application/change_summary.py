@@ -111,12 +111,15 @@ def build_change_summary_prompt(
 
 
 def _longest_fitting_prefix(file: ChangedFile, room: int, counter: TokenCounter) -> str | None:
-    """The file's block cut to its longest prefix of at least one line that fits ``room``."""
+    """The file's block cut to its longest prefix of at least one line that fits ``room``.
+
+    A file the review's budget already cut keeps its ``total_lines``: the trailer counts
+    the whole file, not the part the review showed.
+    """
+    total_lines = file.total_lines or len(file.lines)
 
     def block(shown: int) -> str:
-        return render_changed_file(
-            replace(file, lines=file.lines[:shown], total_lines=len(file.lines))
-        )
+        return render_changed_file(replace(file, lines=file.lines[:shown], total_lines=total_lines))
 
     best: str | None = None
     low, high = 1, len(file.lines) - 1

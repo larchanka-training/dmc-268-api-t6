@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 
 import pytest
@@ -270,6 +270,19 @@ def test_change_summary_input_over_its_budget_cuts_the_diff_and_counts_the_rest(
     assert "app/c.py" not in prompt.user
     assert prompt.user.endswith('</changed_files>\n<files_not_shown count="1" />')
     assert build_change_summary_prompt(request, max_input_tokens=budget, counter=COUNTER) == prompt
+
+
+def test_change_summary_input_cut_again_keeps_the_full_size_of_the_file() -> None:
+    # The review's budget already cut this file to 100 of its 500 lines.
+    cut_by_review = replace(_file("app/a.py", 100), total_lines=500)
+    request = ChangeSummaryRequest(title="One large file", changed_files=(cut_by_review,))
+    budget = COUNTER.count(change_summary_system_prompt()) + 1_500
+
+    prompt = build_change_summary_prompt(request, max_input_tokens=budget, counter=COUNTER)
+
+    cut = re.search(r"\[Showing lines 1-(\d+) of 500 total\.", prompt.user)
+    assert cut is not None and 1 <= int(cut.group(1)) < 100
+    assert "of 100 total." not in prompt.user
 
 
 def test_change_summary_input_without_room_for_a_line_shows_no_file_and_does_not_fail() -> None:
