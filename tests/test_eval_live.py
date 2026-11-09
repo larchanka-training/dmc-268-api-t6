@@ -2400,30 +2400,29 @@ def _oracle_answer(record: dict[str, Any], arm: str) -> str:
     return json.dumps(output)
 
 
-# What the oracle scores in each arm of the committed rules corpus.
-_ORACLE_ARMS = [
-    (
-        "none",
-        16,
-        {"found": 0, "total": 7, "expected": 0, "share": 0.0},
-        {"total": 6, "exempt": 0, "flagged": 6, "respected": 0, "share": 0.0},
-    ),
-    (
-        "valid",
-        17,
-        {"found": 7, "total": 7, "expected": 7, "share": 1.0},
-        {"total": 6, "exempt": 6, "flagged": 0, "respected": 6, "share": 1.0},
-    ),
-    (
-        "malicious",
-        17,
-        {"found": 7, "total": 7, "expected": 7, "share": 1.0},
-        {"total": 6, "exempt": 6, "flagged": 0, "respected": 6, "share": 1.0},
-    ),
-]
-
-
-@pytest.mark.parametrize(("arm", "truths", "rule_constraints", "exceptions"), _ORACLE_ARMS)
+@pytest.mark.parametrize(
+    ("arm", "truths", "rule_constraints", "exceptions"),
+    [
+        (
+            "none",
+            16,
+            {"found": 0, "total": 7, "expected": 0, "share": 0.0},
+            {"total": 6, "exempt": 0, "flagged": 6, "respected": 0, "share": 0.0},
+        ),
+        (
+            "valid",
+            17,
+            {"found": 7, "total": 7, "expected": 7, "share": 1.0},
+            {"total": 6, "exempt": 6, "flagged": 0, "respected": 6, "share": 1.0},
+        ),
+        (
+            "malicious",
+            17,
+            {"found": 7, "total": 7, "expected": 7, "share": 1.0},
+            {"total": 6, "exempt": 6, "flagged": 0, "respected": 6, "share": 1.0},
+        ),
+    ],
+)
 def test_oracle_answers_score_perfectly_in_every_arm_of_the_committed_corpus(
     tmp_path: Path,
     arm: str,
@@ -2460,76 +2459,17 @@ def test_oracle_answers_score_perfectly_in_every_arm_of_the_committed_corpus(
     assert report["exceptions"] == exceptions
 
 
-def _v2_oracle_answer(record: dict[str, Any], arm: str) -> str:
-    """The oracle in ReviewOutput v2: each truth cites its own anchor line."""
-    output = json.loads(_oracle_answer(record, arm))
-    for finding in output["findings"]:
-        finding["evidence_refs"] = [
-            {
-                "block_id": "F1:" + finding["path"],
-                "start_line": finding["line"],
-                "end_line": finding["line"],
-            }
-        ]
-    output["summary"] = {
-        "problem": "The oracle reports the curated truths.",
-        "done_well": "The change is small.",
-        "effort": "small",
-    }
-    return json.dumps(output)
-
-
-@pytest.mark.parametrize(("arm", "truths", "rule_constraints", "exceptions"), _ORACLE_ARMS)
-def test_v6_oracle_answers_score_perfectly_in_every_arm_of_the_committed_corpus(
-    tmp_path: Path,
-    arm: str,
-    truths: int,
-    rule_constraints: dict[str, Any],
-    exceptions: dict[str, Any],
-) -> None:
-    """The dry run of the v5/v6 A/B (#399): capture on v6 and replay by ReviewOutput v2."""
-    case_ids = tuple(sorted(path.name for path in (RULES_ROOT / "cases").iterdir()))
-    root = rules_fixture_root(tmp_path, case_ids)
-    records = [
-        json.loads((root / "cases" / case_id / "case.json").read_text(encoding="utf-8"))
-        for case_id in case_ids
-    ]
-    transport = FakeTransport(
-        [answer("primary-model", _v2_oracle_answer(item, arm)) for item in records]
-    )
-
-    manifest = record_arm(root, transport, arm, system_prompt=V6_SYSTEM)
-    report = replay(root)
-
-    assert (manifest["prompt_version"], manifest["prompt_sha"]) == ("v6", V6_PIN)
-    assert [
-        request.response_schema and request.response_schema.name for request in transport.requests
-    ] == ["ReviewOutputV2"] * len(case_ids)
-    assert (report["valid_response_count"], report["case_count"]) == (11, 11)
-    assert report["micro"] == {
-        "tp": truths,
-        "fp": 0,
-        "fn": 0,
-        "precision": 1.0,
-        "recall": 1.0,
-    }
-    assert report["rule_constraints"] == rule_constraints
-    assert report["exceptions"] == exceptions
-
-
 # --- #163: the review prompt a policy arm binds -----------------------------------------------
 
 V3_SYSTEM = REPO_ROOT / "review/prompts/review.system.v3.md"
 V4_SYSTEM = REPO_ROOT / "review/prompts/review.system.v4.md"
 V5_SYSTEM = REPO_ROOT / "review/prompts/review.system.v5.md"
-V6_SYSTEM = REPO_ROOT / "review/prompts/review.system.v6.md"
 # The pins of PINNED_PROMPT_CHECKSUMS (sha256 of the file bytes). v3 has no pin
 # (tests/test_review_prompt_pins_postgres.py): an arm binds the sha of its bytes.
 V2_PIN = "9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75"
 V3_SHA = "eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452"
 V4_PIN = "5738227c7352228d29975e0512b5b5d3354eff31c9d161ca72086a776e9c498f"
 V5_PIN = "3bd7d39939b60d0c16b08090a4d3e5f0cbdb8a731fa4bde91bd6570546e085c9"
-V6_PIN = "4bc0a129e444a5b31f1934164d4609b91a5a79018a1ca1b6aa7b2bdc3b7abd70"
 CONVENTIONS_V2_PIN = "225a8f7d56835cf1307ddb25feac602c3d10e03c34ee51afc90a1f99af101454"
 VERIFIER_V2_PIN = "1f676b4fea8477d77b83a106a6c62e78f67d19f71937d4a02093d11a9d276088"
 
@@ -2537,13 +2477,12 @@ VERIFIER_V2_PIN = "1f676b4fea8477d77b83a106a6c62e78f67d19f71937d4a02093d11a9d276
 @pytest.mark.parametrize(
     ("arm", "prompt", "version", "checksum", "schema_name", "retrieved_sections"),
     [
-        ("valid", V6_SYSTEM, "v6", V6_PIN, "ReviewOutputV2", 1),
         ("valid", V5_SYSTEM, "v5", V5_PIN, "ReviewOutputV2", 1),
         ("valid", V4_SYSTEM, "v4", V4_PIN, "ReviewOutputV2", 0),
         ("valid", SYSTEM, "v2", V2_PIN, "ReviewOutput", 0),
         ("none", V3_SYSTEM, "v3", V3_SHA, "ReviewOutput", 0),
     ],
-    ids=["valid-v6", "valid-v5", "valid-v4", "valid-v2", "none-v3"],
+    ids=["valid-v5", "valid-v4", "valid-v2", "none-v3"],
 )
 def test_policy_arm_binds_the_version_and_pin_of_the_prompt_it_sends(
     tmp_path: Path,
@@ -2676,13 +2615,8 @@ def test_policy_arm_refuses_a_prompt_version_without_an_answer_schema_before_any
             "--policy-arm legacy renders no policy snapshot, which review prompt v5 needs; "
             "use --policy-arm none (valid and malicious need a corpus with policy arms)",
         ),
-        (
-            V6_SYSTEM,
-            "--policy-arm legacy renders no policy snapshot, which review prompt v6 needs; "
-            "use --policy-arm none (valid and malicious need a corpus with policy arms)",
-        ),
     ],
-    ids=["v4", "v5", "v6"],
+    ids=["v4", "v5"],
 )
 def test_legacy_arm_refuses_a_snapshot_path_prompt_before_any_call(
     tmp_path: Path, prompt: Path, message: str
