@@ -294,7 +294,6 @@ def test_python_package_binding_prefers_a_symbol_of_init_then_the_submodule() ->
     assert excluded[0].edges == (_imports(_APP, init),)
 
 
-@pytest.mark.parametrize("submodule", [True, False], ids=["with-submodule", "no-submodule"])
 @pytest.mark.parametrize(
     "init",
     [
@@ -363,6 +362,7 @@ def test_python_package_own_absolute_import_in_monorepo_indexes_submodule(init: 
     )
 
 
+@pytest.mark.parametrize("submodule", [True, False], ids=["with-submodule", "no-submodule"])
 @pytest.mark.parametrize(
     "init_source",
     [

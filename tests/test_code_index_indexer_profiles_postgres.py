@@ -199,7 +199,7 @@ def test_hidden_policy_failure_keeps_previous_published_rows(
 @pytest.mark.integration
 def test_old_index_resolver_version_forces_same_commit_full_rebuild(database: _Database) -> None:
     async def scenario(indexer: Indexer) -> None:
-        indexer.source_versions = replace(_VERSIONS, resolver_version="resolver/v1+index/v1")
+        indexer.source_versions = replace(_VERSIONS, resolver_version="resolver/v2+index/v1")
         await indexer.start({"lib.py": b"def target():\n    return 1\n", "user.py": _USER})
         before = await indexer.state(database.a)
         assert before.profile is not None
@@ -217,7 +217,7 @@ def test_old_index_resolver_version_forces_same_commit_full_rebuild(database: _D
         assert indexer.jobs[-1].compares == 0
         after = await indexer.state(database.a)
         assert after.profile is not None
-        assert after.profile.resolver_version == "resolver/v1+index/v2"
+        assert after.profile.resolver_version == "resolver/v2+index/v2"
         assert after.published_publication > before.published_publication
 
     _run(database, scenario)
