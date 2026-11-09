@@ -6,7 +6,8 @@ from collections.abc import Mapping, Sequence
 from typing import cast as type_cast
 from uuid import UUID
 
-from sqlalchemy import String, and_, cast, func, select
+from sqlalchemy import String, Uuid, and_, any_, bindparam, cast, func, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
@@ -40,7 +41,12 @@ async def load_review_results(
                     cast(RunActionResponseBody.id, String) == RunAction.response_ref,
                 ),
             )
-            .where(RunAction.run_id.in_(heads), RunAction.tool == "review.postprocess")
+            # One array parameter: a 30-day summary passes thousands of heads, and an IN
+            # list renders, binds and parses each one on every request (#456).
+            .where(
+                RunAction.run_id == any_(bindparam("run_ids", list(heads), type_=ARRAY(Uuid()))),
+                RunAction.tool == "review.postprocess",
+            )
             .order_by(RunAction.run_id, RunAction.index.desc())
             .distinct(RunAction.run_id)
         )
