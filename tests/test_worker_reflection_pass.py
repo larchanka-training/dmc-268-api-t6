@@ -36,7 +36,10 @@ from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
-from app.modules.reviews.infrastructure.llm.models import GatewayVerifierModel
+from app.modules.reviews.infrastructure.llm.models import (
+    GatewayChangeSummaryModel,
+    GatewayVerifierModel,
+)
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
 from app.modules.reviews.infrastructure.llm.transport import ChatRequest, ChatResponse
 from tests.llm_fakes import FakeClock, context_checkpoint
@@ -128,6 +131,27 @@ def test_a_worker_without_llm_settings_builds_no_reflection_pass() -> None:
     assert provider.reflection_pass is None
 
 
+def test_the_production_factory_gives_each_attempt_a_change_summary_model_bound_to_it() -> None:
+    gateway = cast(LlmGateway, object())
+
+    provider = worker.attempt_provider_factory(gateway, _github())(CLAIMED)
+
+    assert isinstance(provider, worker.AttemptReviewProvider)
+    model = provider.change_summary
+    assert isinstance(model, GatewayChangeSummaryModel)
+    assert model._gateway is gateway
+    assert model._run.run_id == CLAIMED.run_id
+    assert model._run.attempt == 2
+    assert model._run.deadline == DEADLINE
+
+
+def test_a_worker_without_llm_settings_builds_no_change_summary_model() -> None:
+    provider = worker.attempt_provider_factory(None, _github())(CLAIMED)
+
+    assert isinstance(provider, worker.AttemptReviewProvider)
+    assert provider.change_summary is None
+
+
 def _settings() -> worker.WorkerSettings:
     return worker.WorkerSettings(
         database_url="unused",
@@ -206,8 +230,33 @@ def test_an_injected_provider_runs_without_a_reflection_pass(
     assert kwargs["reflection_pass"] is None
 
 
+def test_the_queue_pipeline_hands_the_attempt_change_summary_model_to_the_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = cast(LlmGateway, object())
+
+    kwargs = _pipeline_kwargs(monkeypatch, gateway=gateway)
+
+    model = kwargs["change_summary"]
+    assert isinstance(model, GatewayChangeSummaryModel)
+    assert model._gateway is gateway
+    assert model._run.attempt == CLAIMED.attempt
+
+
+def test_an_injected_provider_runs_without_a_change_summary_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kwargs = _pipeline_kwargs(
+        monkeypatch,
+        gateway=cast(LlmGateway, object()),
+        provider_factory=lambda claimed: cast(Any, object()),
+    )
+
+    assert kwargs["change_summary"] is None
+
+
 @pytest.mark.parametrize("with_stage", [False, True], ids=["no-stage", "stage"])
-def test_process_review_run_gives_the_reflection_pass_to_the_review(
+def test_process_review_run_gives_the_reflection_pass_and_the_change_summary_to_the_review(
     monkeypatch: pytest.MonkeyPatch, with_stage: bool
 ) -> None:
     captured: list[dict[str, Any]] = []
@@ -221,6 +270,7 @@ def test_process_review_run_gives_the_reflection_pass_to_the_review(
 
     monkeypatch.setattr(worker, "ExecuteReviewRun", RecordingRun)
     reflection = ReflectionPass(cast(Any, object()))
+    change_summary = cast(Any, object())
     stage = SimpleNamespace(excluded=lambda path: False) if with_stage else None
 
     assert asyncio.run(
@@ -231,11 +281,13 @@ def test_process_review_run_gives_the_reflection_pass_to_the_review(
             cast(Any, object()),
             context_stage=cast(Any, stage),
             reflection_pass=reflection,
+            change_summary=change_summary,
         )
     )
 
     assert len(captured) == 1
     assert captured[0]["reflection_pass"] is reflection
+    assert captured[0]["change_summary"] is change_summary
 
 
 # ---------- a v4-bound review through the gateway ----------
