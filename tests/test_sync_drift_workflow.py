@@ -47,6 +47,14 @@ def test_compares_this_tree_with_a_checkout_of_ui_main() -> None:
     assert workflow["permissions"] == {"contents": "read"}
     # The job name is the check name: never one of the required contexts of ruleset `main`.
     assert job["name"] == "SYNC drift vs ui main"
+    # uv is set up before the steps that run through it.
+    assert [step["name"] for step in steps] == [
+        "Checkout",
+        "Checkout ui main",
+        "Setup uv",
+        "Compare files with a SYNC marker",
+        "Compare the marker-less JSON paths of the sync map",
+    ]
     refs = [step["uses"] for step in steps if "uses" in step]
     assert all(re.fullmatch(r"[\w-]+/[\w-]+@[0-9a-f]{40}", ref) for ref in refs), refs
     actions = [(step["uses"].split("@")[0], step.get("with")) for step in steps if "uses" in step]
