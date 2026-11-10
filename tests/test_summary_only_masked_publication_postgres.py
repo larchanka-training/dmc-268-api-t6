@@ -21,6 +21,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.modules.auth.application.scope import AuthScope
+from app.modules.reviews.application.check_runs import check_run_view
 from app.modules.reviews.application.get_run_diff import DiffSnapshot, StoreDiffSnapshot
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.review_context import (
@@ -139,15 +140,17 @@ _CASES = (
     ),
 )
 # Per case and version: the stage's signal, ``context.build`` status and reason, the
-# summary-only flag of the rows, the check-run report and the API, and the report's reason.
-# A v5 run of the residual set is no-text partial (CVS §2.2, #497); legacy v2 is not.
-_EXPECTED: dict[tuple[str, int], tuple[type[Exception], str, str, bool, str | None]] = {
+# summary-only flag of the rows, the check-run report and the API, the report's reason and
+# the check-run title (neutral either way). A v5 run of the residual set is no-text partial
+# (CVS §2.2, #497); legacy v2 is not.
+_EXPECTED: dict[tuple[str, int], tuple[type[Exception], str, str, bool, str | None, str]] = {
     ("diff_too_large", 2): (
         SummaryOnlyReview,
         "summary_only",
         "diff_too_large",
         True,
         "diff_too_large",
+        "AI-ревью: только сводка",
     ),
     ("diff_too_large", 5): (
         SummaryOnlyReview,
@@ -155,6 +158,7 @@ _EXPECTED: dict[tuple[str, int], tuple[type[Exception], str, str, bool, str | No
         "diff_too_large",
         True,
         "diff_too_large",
+        "AI-ревью: только сводка",
     ),
     ("diff_inventory_incomplete", 2): (
         SummaryOnlyReview,
@@ -162,6 +166,7 @@ _EXPECTED: dict[tuple[str, int], tuple[type[Exception], str, str, bool, str | No
         "diff_inventory_incomplete",
         True,
         "diff_inventory_incomplete",
+        "AI-ревью: только сводка",
     ),
     ("diff_inventory_incomplete", 5): (
         SummaryOnlyReview,
@@ -169,6 +174,7 @@ _EXPECTED: dict[tuple[str, int], tuple[type[Exception], str, str, bool, str | No
         "diff_inventory_incomplete",
         True,
         "diff_inventory_incomplete",
+        "AI-ревью: только сводка",
     ),
     ("no_reviewable_files", 2): (
         SummaryOnlyReview,
@@ -176,6 +182,7 @@ _EXPECTED: dict[tuple[str, int], tuple[type[Exception], str, str, bool, str | No
         "no_reviewable_files",
         True,
         "no_reviewable_files",
+        "AI-ревью: только сводка",
     ),
     ("no_reviewable_files", 5): (
         NoReviewableText,
@@ -183,6 +190,7 @@ _EXPECTED: dict[tuple[str, int], tuple[type[Exception], str, str, bool, str | No
         "no_reviewable_text",
         False,
         None,
+        "AI-ревью: проверка неполная",
     ),
 }
 
@@ -209,7 +217,7 @@ def test_masked_file_and_lock_keep_published_coverage(env: Env, version: int) ->
             await _seed(factory, _packaged())
             for index, (reason, files, files_changed, reasons) in enumerate(_CASES):
                 head = f"{index + 1:040x}"
-                signal, status, build_reason, summary_only, report_reason = _EXPECTED[
+                signal, status, build_reason, summary_only, report_reason, title = _EXPECTED[
                     (reason, version)
                 ]
                 async with factory.begin() as session:
@@ -315,6 +323,12 @@ def test_masked_file_and_lock_keep_published_coverage(env: Env, version: int) ->
                 assert report.summary_only is summary_only
                 assert report.summary_reason == report_reason
                 assert report.coverage_status == "partial"
+                view = check_run_view(report)
+                assert (view.status, view.conclusion, view.title) == (
+                    "completed",
+                    "neutral",
+                    title,
+                )
                 published.append((run_id, summary_only))
         finally:
             await engine.dispose()
