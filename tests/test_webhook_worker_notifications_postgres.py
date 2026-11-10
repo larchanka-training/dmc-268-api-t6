@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
@@ -36,6 +35,7 @@ from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts im
 )
 from app.modules.workspaces.application.link_github_installations import LinkGitHubInstallations
 from app.webhook_worker import sweep_forever
+from tests.template_database import MigratedDatabase
 from tests.test_webhook_work_notifications_postgres import (
     DEFERRED_AT,
     RETRY_AT,
@@ -43,22 +43,18 @@ from tests.test_webhook_work_notifications_postgres import (
     Database,
     LinkedInstallationGitHub,
     ReconciliationControl,
-    migrated_database,
     receipt_retry_state,
     recorded_backends,
     seed_deferred_receipt,
 )
 
+pytest_plugins = ("tests.migrated_postgres",)
 pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-def database() -> Iterator[Database]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    with migrated_database(database_url) as isolated_database:
-        yield isolated_database
+def database(migrated_db: MigratedDatabase) -> Database:
+    return Database(migrated_db.url, migrated_db.schema)
 
 
 class OwnHintsConnection:
