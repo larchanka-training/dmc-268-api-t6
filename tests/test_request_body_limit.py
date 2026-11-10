@@ -29,13 +29,13 @@ from app.bootstrap.bitbucket import (
 from app.bootstrap.gitlab import GitLabWebhookResources, get_gitlab_webhook_resources
 from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import (
+    get_create_rules_simulation,
     get_github_webhook_receipt_uow_factory,
     get_repository_settings,
 )
 from app.common.infrastructure.request_body_limit import (
     RequestBodyLimitMiddleware,
     allow_request_body,
-    request_body_limit,
 )
 from app.main import app, get_github_webhook_secret
 from app.modules.auth.application.scope import AuthScope
@@ -54,6 +54,9 @@ GITHUB_CALLBACK = "/api/auth/github/callback"
 DISCOVERY = f"{BITBUCKET}/discovery"
 CONNECT = f"{BITBUCKET}/connections"
 CREDENTIAL = f"{BITBUCKET}/connections/{REPOSITORY_ID}/credential"
+RULES_SIMULATIONS = f"/api/repos/{REPOSITORY_ID}/rules-simulations"
+# Routes with their own body limit (#311); every other route keeps 64 KiB (#530).
+OWN_LIMITS = {("POST", "/api/repos/{repo_id}/rules-simulations"): 512 * 1024}
 
 ROUTES_REPORTING_INPUT = [
     pytest.param("PATCH", REPOSITORY_UPDATE, id="repository-update"),
@@ -148,6 +151,7 @@ def _install_token_and_use_cases() -> None:
     # Without a configured code exchange the callback answers 503 before validation.
     app.dependency_overrides[auth_api.get_exchange_github_code] = _UseCase
     app.dependency_overrides[get_bitbucket_management] = _UseCase
+    app.dependency_overrides[get_create_rules_simulation] = _UseCase
 
 
 @pytest.fixture
@@ -253,14 +257,17 @@ def test_bitbucket_body_at_the_limit_keeps_its_redacted_error(method: str, path:
 
 
 @pytest.mark.parametrize(
-    ("method", "path", "payload"),
+    ("method", "path", "payload", "size"),
     [
-        pytest.param("PATCH", REPOSITORY_UPDATE, b'{"enabled": true}', id="repository-update"),
-        pytest.param("POST", GITHUB_CALLBACK, b'{"code": "abc"}', id="github-callback"),
+        pytest.param(
+            "PATCH", REPOSITORY_UPDATE, b'{"enabled": true}', 65536, id="repository-update"
+        ),
+        pytest.param("POST", GITHUB_CALLBACK, b'{"code": "abc"}', 65536, id="github-callback"),
         pytest.param(
             "POST",
             DISCOVERY,
             b'{"apiToken": "token", "bitbucketWorkspace": "acme"}',
+            65536,
             id="discovery",
         ),
         pytest.param(
@@ -268,24 +275,32 @@ def test_bitbucket_body_at_the_limit_keeps_its_redacted_error(method: str, path:
             CONNECT,
             b'{"apiToken": "token", "bitbucketWorkspace": "acme", "repositorySlug": "repo",'
             b' "repositoryUuid": "00000000-0000-4000-8000-0000000000a2"}',
+            65536,
             id="connect",
         ),
-        pytest.param("PUT", CREDENTIAL, b'{"apiToken": "token"}', id="credential"),
+        pytest.param("PUT", CREDENTIAL, b'{"apiToken": "token"}', 65536, id="credential"),
+        pytest.param(
+            "POST",
+            RULES_SIMULATIONS,
+            b'{"mode": "code", "path": "a.py", "content": "x", "rulesMd": ""}',
+            524288,
+            id="rules-simulation-512-kib",
+        ),
     ],
 )
 @pytest.mark.usefixtures("token")
-def test_valid_json_of_exactly_64_kib_reaches_the_use_case(
-    method: str, path: str, payload: bytes
+def test_valid_json_at_the_route_limit_reaches_the_use_case(
+    method: str, path: str, payload: bytes, size: int
 ) -> None:
-    body = payload.ljust(65536)
-    assert len(body) == 65536
+    body = payload.ljust(size)
+    assert len(body) == size
 
     with pytest.raises(_ReachedUseCase):
         _call(
             method,
             path,
             [body[:THIRTY_TWO_KIB], body[THIRTY_TWO_KIB:]],
-            {"content-type": "application/json", "content-length": "65536"},
+            {"content-type": "application/json", "content-length": str(size)},
         )
 
 
@@ -356,17 +371,6 @@ def _routes_with_a_parsed_body() -> list[tuple[str, str]]:
     )
 
 
-def _body_limit(method: str, path: str) -> int:
-    [limit] = [
-        request_body_limit(route.original_route)
-        for route in iter_route_contexts(app.routes)
-        if isinstance(route.original_route, APIRoute)
-        and route.path_format == path
-        and method in (route.methods or ())
-    ]
-    return limit
-
-
 ROUTES_WITH_A_PARSED_BODY = _routes_with_a_parsed_body()
 
 
@@ -387,7 +391,9 @@ def test_the_route_walk_finds_the_five_routes_with_a_body() -> None:
 def test_every_route_with_a_parsed_body_answers_the_contract_413(method: str, path: str) -> None:
     url = re.sub(r"\{[^}]+\}", str(REPOSITORY_ID), path)
 
-    answer = _call(method, url, [b"x" * (_body_limit(method, path) + 1), b"x"])
+    limit = OWN_LIMITS.get((method, path), 65536)
+
+    answer = _call(method, url, [b"x" * (limit + 1), b"x"])
 
     assert (answer.status, answer.reads) == (413, 1)
     _validator_for(method.lower(), path, "413").validate(answer.json())
