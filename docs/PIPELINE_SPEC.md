@@ -245,7 +245,9 @@ Summary-only с нулём вызовов модели — текущий жиз
 Summary-only определяется после ignore: **более 3 000 добавленных и удалённых
 разрешённых строк**; ровно 3 000 допускает обычное review. Неполный список
 файлов — `diff_inventory_incomplete`, остаток без проверяемых файлов —
-`no_reviewable_files`. Стадия останавливается до RAG, conventions, ревью и
+`no_reviewable_files` (на snapshot path, v4+, — только truncated patch с сохранившимися
+строками; остальной такой остаток — no-text partial выше, #497 ч.3). Стадия
+останавливается до RAG, conventions, ревью и
 verifier. Trace: `policy.load` → `vcs.fetch_diff` → `context.build` →
 `review.postprocess` → `github.publish_review…` или `gitlab.publish_review…`.
 Записей `llm.call` нет. Итог succeeded,
