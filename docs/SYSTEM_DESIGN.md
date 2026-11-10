@@ -1809,7 +1809,8 @@ Workspace.
 без текста, а `context_payloads` со статусом `summary_only` остаются целиком: на них держатся
 `summaryOnly`, его причина в check-run и запасной вердикт, текста кода в них нет.
 `final_review_results`, вердикт, находки и счётчики серьёзности не меняются;
-`/diff` отвечает 200, файлы с `patch: null`.
+`/diff` отвечает 200, файлы с `patch: null`, а Run detail отдаёт `dataPurged: true`
+(PIPELINE_SPEC §1.2).
 Блоб не принадлежит прогону, один блоб делят многие: задача затирает его текст по его
 собственному `expires_at`, после которого читатель всё равно получает `EXPIRED`. Строка блоба
 остаётся, чтобы `/files` отвечал 410, а не 404; новая запись того же блоба возвращает текст.
@@ -2100,7 +2101,7 @@ raw модельная похвала/неподтверждённые дефе�
 
 | Группа | Операции | Сервис | Главное |
 |---|---|---|---|
-| Прогоны | `GET /api/runs`, `GET /api/runs/{id}`, `…/diff`, `…/files`, `…/comments`, `…/actions`, `…/actions/{index}/response` | `portal-api` | `RunListPage {items,nextCursor}`, семь состояний Р-14; detail = RunSession + verdict/summary/severityCounts/findings/budget и планируемые поля coverage/version выше. `/diff` сохраняет исходный доступный UI patch при ignored/summary-only; `patch=null` означает отсутствие исходного patch, не отсутствие AI-проверки. `/files` старше TTL → `404`/`410`; большие action bodies — через response endpoint |
+| Прогоны | `GET /api/runs`, `GET /api/runs/{id}`, `…/diff`, `…/files`, `…/comments`, `…/actions`, `…/actions/{index}/response` | `portal-api` | `RunListPage {items,nextCursor}`, семь состояний Р-14; detail = RunSession + verdict/summary/severityCounts/findings/budget/dataPurged и планируемые поля coverage/version выше. `/diff` сохраняет исходный доступный UI patch при ignored/summary-only; `patch=null` означает отсутствие исходного patch или его текст, стёртый по умолчанию через 90 дней после завершения (`RUN_DATA_RETENTION_DAYS`, §10; тогда у detail `dataPurged: true`), но не отсутствие AI-проверки. `/files` старше TTL → `404`/`410`; большие action bodies — через response endpoint |
 | Действия с прогоном | `POST /api/runs/{id}/rerun`, `POST /api/runs/{id}/cancel` | `portal-api` | rerun — новый Run `queued`, `202`; отказы `409`/`422` — [§6.7](#67-перезапуск) и [PIPELINE_SPEC §6.1](PIPELINE_SPEC.md#61-http-отказы-rerun); cancel идемпотентен |
 | Поток | `GET /api/stream` | `portal-api` | SSE `run.updated {runId, status}` (кадр с `id:`, повтор по `Last-Event-ID`) и `run.step {runId, tool, index, ok, startedAt, durationMs, attempt, llmOperation?}` (`llmOperation` только для `tool=llm.call` с operation `conventions` или `review`; без `id:`, шаги не переигрываются); один поток на вкладку, `fetch` с Bearer; между процессами — PG `LISTEN/NOTIFY` каналов `run_updated` и `run_step` (D12 — дефолт по #20, §6.6, PIPELINE_SPEC §1) |
 | Репозитории | `GET /api/repos`, `GET/PATCH /api/repos/{id}`, `GET /api/repos/{id}/pulls` | `portal-api` | подключение — установкой App (§6.9): `POST /api/repos` и PATCH коллекции нет (D10); `GET /api/repos` → `Repository[]`; PATCH — `enabled`, `defaultEngine`, `waitForCi` (`auto\|always\|never`), `maxComments` (1..10), `reviewEvent` (`COMMENT\|REQUEST_CHANGES`), `branchFilter` (до 20 шаблонов по 1–255 символов, `[]` очищает), `severityThreshold` (`all\|warning\|critical`), `ragEnabled`; `Repository` дополнительно отдаёт только для чтения `installationAvailable` (§6.9) и `ragIndex` (§11), в теле PATCH они → `422`; pulls → `{items: PullRequestSummary[], nextCursor}` с `latestRun {id, status, verdict}` (D11 — дефолт по #20) |
