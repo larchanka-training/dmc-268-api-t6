@@ -22,7 +22,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from tests import test_snapshot_path_e2e_postgres as e2e
 from tests.portal_postgres import Env
 from tests.test_github_vcs_provider import _pull_payload
-from tests.test_snapshot_path_e2e_postgres import env as env
+
+pytest_plugins = ("tests.portal_postgres",)
 
 _NAME = "a\\b.txt"
 _SHA = "7" * 40
@@ -82,10 +83,10 @@ def _observe(env: Env, monkeypatch: pytest.MonkeyPatch, *, v4: bool) -> tuple[e2
 
 @pytest.mark.integration
 def test_a_technical_only_v4_run_is_published_without_any_model_call(
-    env: Env, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    portal_env: Env, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.WARNING):
-        observed, usage_events = _observe(env, monkeypatch, v4=True)
+        observed, usage_events = _observe(portal_env, monkeypatch, v4=True)
 
     assert observed.outcomes == ["ack"]
     assert observed.state == ("publishing", None, 1)
@@ -122,9 +123,9 @@ def test_a_technical_only_v4_run_is_published_without_any_model_call(
 
 @pytest.mark.integration
 def test_the_same_change_on_a_v3_run_still_calls_conventions_and_the_review(
-    env: Env, monkeypatch: pytest.MonkeyPatch
+    portal_env: Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    observed, usage_events = _observe(env, monkeypatch, v4=False)
+    observed, usage_events = _observe(portal_env, monkeypatch, v4=False)
 
     assert observed.outcomes == ["ack"]
     assert observed.state == ("publishing", None, 1)

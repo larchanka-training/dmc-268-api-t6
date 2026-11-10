@@ -9,7 +9,9 @@ fit, a manifest per call, the review citing the diff and the L3 excerpt, the ver
 that excerpt, ``llm.verify`` and the publication input. A v3 run in the same composition
 stays on the legacy path. A retried v4 attempt keeps the snapshot and every pinned prompt
 while newer rows go live, and a provider failure after a model call sends the review to the
-fallback on a manifest row of its own. The v4 prompt shows no retrieved section. A run bound
+fallback on a manifest row of its own. A v4 or v5 run publishes with the threshold and cap
+the Repository had when the run was created, on its first attempt and on a retry, though the
+Repository changes both in between (#387). The v4 prompt shows no retrieved section. A run bound
 to the packaged ``review.system.v5.md`` (#144) always shows one: empty with RAG off; with a
 ready graph index the review shows and records the caller of the changed function, the
 verifier shows it again with the same index commit, and a retry before the accepted answer
@@ -28,9 +30,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import os
 import re
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -64,7 +64,8 @@ from app.worker import (
     review_context_stage_factory,
 )
 from tests.code_index_postgres import C1, C2, _build, _enable, _Index
-from tests.portal_postgres import REPO_A, REPO_B, Env, portal_schema
+from tests.portal_postgres import REPO_A, REPO_B, Env
+from tests.publication_settings_postgres import _settings
 from tests.test_github_vcs_provider import _pull_payload
 from tests.test_llm_gateway import FALLBACK, PRIMARY, completion
 from tests.test_prompt_seeding import _up_to
@@ -76,6 +77,8 @@ from tests.test_run_prompt_pins_postgres import _packaged, _seed
 from tests.test_run_publication_settings_postgres import _insert, _ready
 from tests.test_snapshot_path_live_pin import _live_assets
 from tests.worker_queue_postgres import SETTINGS, GitHub
+
+pytest_plugins = ("tests.portal_postgres",)
 
 _HEAD = "f" * 40  # the head of PR_NEW after ``_ready``
 _REVIEW_TREE = "1" * 40
@@ -118,15 +121,6 @@ _EVIDENCE = [{"block_id": file_block_id(_PATH), "start_line": _ADDED_LINE, "end_
 _ROTATED = "---\nkey: review.conventions\nversion: 99\n---\nA rotated conventions prompt.\n"
 _ROTATED_REVIEW = "---\nkey: review.system\nversion: 98\n---\nA rotated review prompt.\n"
 _ROTATED_VERIFIER = "---\nkey: review.verifier\nversion: 97\n---\nA rotated verifier prompt.\n"
-
-
-@pytest.fixture
-def env() -> Iterator[Env]:
-    url = os.environ.get("TEST_DATABASE_URL")
-    if url is None:
-        pytest.skip("set TEST_DATABASE_URL to run the snapshot path end to end")
-    with portal_schema(url, None) as schema:
-        yield schema
 
 
 @dataclass
@@ -367,15 +361,26 @@ async def _scenario(
     verifier_kinds: tuple[str, ...] = ("verifier",),
     files: tuple[dict[str, Any], ...] | None = None,
     redeliveries: int = 0,
+    settings: tuple[tuple[str, int], ...] = (),
 ) -> Observed:
     """``version``: the review.system version the run is bound to; v3 is the seeded live row.
     ``v5_seeded``: the run is created under the seeded live v4 row, then the v5 seed makes v5
     live before the worker takes the run. ``llm``: the models of the composition;
     ``review_kind`` and ``verifier_kinds``: how the review and the verifier calls answer;
     ``files``: the changed files GitHub lists, the service and its test when ``None``;
-    ``redeliveries``: how many more times the worker takes the run once it is due again."""
+    ``redeliveries``: how many more times the worker takes the run once it is due again;
+    ``settings``: the Repository's publication pair (threshold, cap) before the run is created,
+    then one before each time the worker takes the run."""
+    pairs = iter(settings)
+
+    async def next_pair() -> None:
+        pair = next(pairs, None)
+        if pair is not None:
+            await _settings(factory, *pair)
+
     await _ready(factory)
     await _seed(factory, _up_to(_packaged(), 4) if v5_seeded else _live_assets())
+    await next_pair()
     async with factory.begin() as session:
         run_id = await _insert(session)
         await session.execute(
@@ -469,6 +474,7 @@ async def _scenario(
             gateway=build_gateway(llm, llm_client, factory),
             attempt_deadline=timedelta(minutes=10),
         )
+        await next_pair()
         outcomes.append(await process.handle_run.execute(run_id))
         if retry:
             if rag:
@@ -503,10 +509,12 @@ async def _scenario(
                             },
                         )
                 await _make_due(session, run_id)
+            await next_pair()
             outcomes.append(await process.handle_run.execute(run_id))
         for _ in range(redeliveries):
             async with factory.begin() as session:
                 await _make_due(session, run_id)
+            await next_pair()
             outcomes.append(await process.handle_run.execute(run_id))
     actions: dict[str, list[tuple[Any, Any]]] = {}
     tools: list[str] = []
@@ -599,6 +607,7 @@ def _observe(
     verifier_kinds: tuple[str, ...] = ("verifier",),
     files: tuple[dict[str, Any], ...] | None = None,
     redeliveries: int = 0,
+    settings: tuple[tuple[str, int], ...] = (),
 ) -> Observed:
     async def scenario() -> Observed:
         engine = env.engine()
@@ -614,6 +623,7 @@ def _observe(
                 verifier_kinds=verifier_kinds,
                 files=files,
                 redeliveries=redeliveries,
+                settings=settings,
             )
         finally:
             await engine.dispose()
@@ -788,8 +798,8 @@ def _assert_snapshot_path(
 
 
 @pytest.mark.integration
-def test_a_v4_run_takes_the_snapshot_path_through_the_worker_composition(env: Env) -> None:
-    observed = _observe(env, version=4)
+def test_a_v4_run_takes_the_snapshot_path_through_the_worker_composition(portal_env: Env) -> None:
+    observed = _observe(portal_env, version=4)
 
     assert observed.outcomes == ["ack"]
     assert observed.queue.retries == []
@@ -797,12 +807,12 @@ def test_a_v4_run_takes_the_snapshot_path_through_the_worker_composition(env: En
 
 
 @pytest.mark.integration
-def test_a_retried_v4_attempt_keeps_the_snapshot_and_the_pins(env: Env) -> None:
+def test_a_retried_v4_attempt_keeps_the_snapshot_and_the_pins(portal_env: Env) -> None:
     # The first attempt stores the snapshot, then the diff read fails and the run is retried.
     # Newer conventions, review and verifier rows go live in between: the second attempt keeps
     # the stored snapshot and the run's pinned prompts. Its review call fails once at the
     # provider, after the conventions call, and the fallback answers.
-    observed = _observe(env, version=4, retry=True)
+    observed = _observe(portal_env, version=4, retry=True)
 
     assert observed.outcomes == ["ack", "ack"]
     assert len(observed.queue.retries) == 1
@@ -818,8 +828,8 @@ def test_a_retried_v4_attempt_keeps_the_snapshot_and_the_pins(env: Env) -> None:
 
 
 @pytest.mark.integration
-def test_a_v3_run_stays_on_the_legacy_path_in_the_same_composition(env: Env) -> None:
-    observed = _observe(env, version=3)
+def test_a_v3_run_stays_on_the_legacy_path_in_the_same_composition(portal_env: Env) -> None:
+    observed = _observe(portal_env, version=3)
 
     assert observed.outcomes == ["ack"]
     assert observed.state == ("publishing", None, 1)
@@ -845,10 +855,10 @@ def test_a_v3_run_stays_on_the_legacy_path_in_the_same_composition(env: Env) -> 
 
 
 @pytest.mark.integration
-def test_a_v5_run_without_rag_shows_an_empty_retrieved_section(env: Env) -> None:
+def test_a_v5_run_without_rag_shows_an_empty_retrieved_section(portal_env: Env) -> None:
     # RAG is off for the repository: no ``context.rag`` step, and the bound v5 prompt still
     # shows its retrieved section, empty.
-    observed = _observe(env, version=5)
+    observed = _observe(portal_env, version=5)
 
     assert observed.outcomes == ["ack"]
     assert observed.queue.retries == []
@@ -856,11 +866,11 @@ def test_a_v5_run_without_rag_shows_an_empty_retrieved_section(env: Env) -> None
 
 
 @pytest.mark.integration
-def test_a_v4_run_in_flight_when_v5_is_seeded_keeps_the_v4_prompt(env: Env) -> None:
+def test_a_v4_run_in_flight_when_v5_is_seeded_keeps_the_v4_prompt(portal_env: Env) -> None:
     # The run is created under the live v4 row; the v5 seed makes v5 live before the worker
     # takes it. RAG is on with a ready index: the run keeps its v4 pin and body, shows no
     # retrieved section, and ``context.rag`` records the usable index as not used.
-    observed = _observe(env, version=4, rag=True, v5_seeded=True)
+    observed = _observe(portal_env, version=4, rag=True, v5_seeded=True)
 
     assert observed.outcomes == ["ack"]
     assert observed.queue.retries == []
@@ -868,6 +878,36 @@ def test_a_v4_run_in_flight_when_v5_is_seeded_keeps_the_v4_prompt(env: Env) -> N
     assert (rag_request["index_status"], rag_request["indexed_commit_sha"]) == ("ready", C1)
     assert rag_response == {"outcome": "not_ready", "reason": "prompt_version"}
     _assert_snapshot_path(observed, attempt=1, rag=True)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("version", [4, 5])
+def test_a_snapshot_path_run_publishes_with_the_pair_of_its_creation(
+    portal_env: Env, version: int, retry: bool
+) -> None:
+    # The run is created under warning/1, not the defaults all/10. The Repository moves to
+    # critical/3 before the first attempt, which prepares the snapshot, and to all/2 before
+    # the retry. review.postprocess takes the run's pair on the attempt that publishes: the
+    # threshold through the review prompt input, the cap through the post-processing input.
+    observed = _observe(
+        portal_env,
+        version=version,
+        retry=retry,
+        settings=(("warning", 1), ("critical", 3), ("all", 2)),
+    )
+
+    [(postprocess, _)] = observed.actions["review.postprocess"]
+    assert (postprocess["severity_threshold"], postprocess["max_inline"]) == ("warning", 1)
+    assert observed.outcomes == ["ack"] * (2 if retry else 1)
+    assert len(observed.queue.retries) == (1 if retry else 0)
+    _assert_snapshot_path(
+        observed,
+        attempt=2 if retry else 1,
+        earlier=("policy.load", "vcs.fetch_diff") if retry else (),
+        review_fallback=retry,
+        version=version,
+    )
 
 
 @dataclass(frozen=True)
@@ -974,8 +1014,10 @@ def _assert_retrieved_and_shown_again(
 
 
 @pytest.mark.integration
-def test_a_v5_run_shows_the_retrieved_section_through_the_worker_composition(env: Env) -> None:
-    observed = _observe(env, version=5, rag=True)
+def test_a_v5_run_shows_the_retrieved_section_through_the_worker_composition(
+    portal_env: Env,
+) -> None:
+    observed = _observe(portal_env, version=5, rag=True)
 
     assert observed.outcomes == ["ack"]
     assert observed.queue.retries == []
@@ -1006,12 +1048,12 @@ def test_a_v5_run_shows_the_retrieved_section_through_the_worker_composition(env
 
 
 @pytest.mark.integration
-def test_a_retry_before_the_accepted_answer_retrieves_from_the_newer_index(env: Env) -> None:
+def test_a_retry_before_the_accepted_answer_retrieves_from_the_newer_index(portal_env: Env) -> None:
     # D8: the candidate checkpoint is the stored manifest. The first attempt retrieves at C1,
     # then its review call fails on both models before any answer is accepted. A newer
     # publication of the index (C2) lands, and the retry retrieves again: its review and
     # its verifier show the same block, recorded with C2.
-    observed = _observe(env, version=5, retry=True, rag=True)
+    observed = _observe(portal_env, version=5, retry=True, rag=True)
 
     assert observed.outcomes == ["ack", "ack"]
     assert len(observed.queue.retries) == 1
@@ -1077,7 +1119,7 @@ _NO_FALLBACK = LlmSettings(primary=PRIMARY, fallback=None)
     ids=["unshown-range", "rule-without-requirement"],
 )
 def test_an_invalid_verifier_reference_earns_the_bounded_recovery(
-    env: Env,
+    portal_env: Env,
     llm: LlmSettings,
     recovery: str,
     recovery_model: str,
@@ -1090,7 +1132,7 @@ def test_an_invalid_verifier_reference_earns_the_bounded_recovery(
     # citing what its manifest does not show earns the bounded repair/fallback of §4.5 within
     # the attempt's slots before verification_invalid_output; the accepted answer publishes.
     observed = _observe(
-        env, version=4, llm=llm, review_kind=review_kind, verifier_kinds=(invalid, valid)
+        portal_env, version=4, llm=llm, review_kind=review_kind, verifier_kinds=(invalid, valid)
     )
 
     assert observed.state == ("publishing", None, 1)
@@ -1182,13 +1224,13 @@ def _stored(env: Env, run_id: UUID) -> tuple[Any, ...]:
     ids=["nul-new-name", "nul-old-name", "long-new-name", "long-old-name"],
 )
 def test_a_name_the_run_cannot_store_fails_the_v4_run_before_any_model_call(
-    env: Env, change: dict[str, str], name: str
+    portal_env: Env, change: dict[str, str], name: str
 ) -> None:
     # Next to the allowed service file, a change under a name with a NUL or over the 1024
     # characters a stored name holds: the source has no stored identity to withhold.
-    observed = _observe(env, version=4, files=_next_to_the_service(change))
+    observed = _observe(portal_env, version=4, files=_next_to_the_service(change))
 
-    usage_events, diff_rows, error_message = _stored(env, observed.run_id)
+    usage_events, diff_rows, error_message = _stored(portal_env, observed.run_id)
     # The first attempt ends the run: the code is not retried.
     assert observed.outcomes == ["ack"]
     assert observed.state == ("failed", "policy_snapshot_integrity_error", 1)
@@ -1206,18 +1248,18 @@ def test_a_name_the_run_cannot_store_fails_the_v4_run_before_any_model_call(
 
 
 @pytest.mark.integration
-def test_a_long_name_keeps_the_v3_run_on_the_retried_internal_error(env: Env) -> None:
+def test_a_long_name_keeps_the_v3_run_on_the_retried_internal_error(portal_env: Env) -> None:
     # The legacy path withholds no file by its stored names: a new name over the 1024
     # characters a stored name holds still fails the diff write, a retried internal error,
     # until the attempts run out. No attempt reaches a model.
     observed = _observe(
-        env,
+        portal_env,
         version=3,
         files=_next_to_the_service({"filename": _LONG_NAME, "status": "added"}),
         redeliveries=2,
     )
 
-    usage_events, diff_rows, error_message = _stored(env, observed.run_id)
+    usage_events, diff_rows, error_message = _stored(portal_env, observed.run_id)
     assert observed.outcomes == ["ack", "ack", "dead_letter"]
     assert observed.state == ("failed", "internal_error", 3)
     assert observed.tools == ["policy.load", "vcs.fetch_diff"] * 3
