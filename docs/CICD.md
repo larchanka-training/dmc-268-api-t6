@@ -84,7 +84,7 @@ flowchart TD
 
 **Prod webhook outcome** — ручной workflow `prod-webhook-outcome.yml` (#308, staging — #574), только чтение: `workflow_dispatch` с `main`, обязательный `delivery_id` (GUID `X-GitHub-Delivery` из Recent Deliveries prod или staging App), `stack` — `prod` (по умолчанию) или `staging`, права `contents: read`, без Environment и без lock `staging-deploy`. Нужен, пока у команды нет SSH на курсовой VPS: по SSH (цель — тот же шаг **Resolve prod target**: staging работает на том же VPS, пока не задан `STAGING_HOST`) читает логи контейнеров `webhook-worker` проекта `dmc-268-api-prod` или `dmc-268-api-staging` за 168 часов и показывает в job summary только строки `GitHub webhook delivery <id> event=… status=…` этой доставки ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md)); пустой результат — доставка ещё не обработана, отложена, id неизвестен, либо контейнер пересоздан более поздним выкатом (его лог пропал). Ничего на хосте не меняет.
 
-**Live corpus evaluation** — ручной платный workflow `eval-live.yml` (`workflow_dispatch`, `contents: read`), не job `ci-cd.yml` и не required check: ключ — organization secret `AI_DMC268_T6` ([SECRETS.md](SECRETS.md)), группа concurrency `eval-live-eurouter` без отмены идущего прогона. Входы: `model`, `export_raw_responses`, `corpus` (`main`, `rules`, `rag`), `rag_arm` (`none` по умолчанию, `graph`), `policy_arm`, `review_prompt`. Для `corpus=rag` ([TEST_PLAN §3.5.1](TEST_PLAN.md#351-запись-replay-и-гейт-146)) шаг `Validate corpus` требует `policy_arm=none`, `review_prompt` с секцией retrieved (`v5` или `v7`, #498) и `rag_arm` `none` или `graph` и до платных шагов запускает `validate_dataset.py --final --profile rag`; `rag_arm=graph` при `main` и `rules` отказывает. Артефакты: `eval-live-<corpus>-<arm>-<run id>-<attempt>` и при `export_raw_responses` `eval-live-raw-…`; `<arm>` — `policy_arm`, для `rag` — `<policy_arm>-<rag_arm>` (`none-none` — плечо A, `none-graph` — B).
+**Live corpus evaluation** — ручной платный workflow `eval-live.yml` (`workflow_dispatch`, `contents: read`), не job `ci-cd.yml` и не required check: ключ — organization secret `AI_DMC268_T6` ([SECRETS.md](SECRETS.md)), группа concurrency `eval-live-eurouter` без отмены идущего прогона. Входы: `model`, `export_raw_responses`, `corpus` (`main`, `rules`, `rag`), `rag_arm` (`none` по умолчанию, `graph`), `policy_arm`, `review_prompt`. Для `corpus=rag` ([TEST_PLAN §3.5.1](TEST_PLAN.md#351-запись-replay-и-гейт-146)) шаг `Validate corpus` требует `policy_arm=none`, `review_prompt` с секцией retrieved (`v5`, `v7` или `v8`; #498, #318) и `rag_arm` `none` или `graph` и до платных шагов запускает `validate_dataset.py --final --profile rag`; `rag_arm=graph` при `main` и `rules` отказывает. Артефакты: `eval-live-<corpus>-<arm>-<run id>-<attempt>` и при `export_raw_responses` `eval-live-raw-…`; `<arm>` — `policy_arm`, для `rag` — `<policy_arm>-<rag_arm>` (`none-none` — плечо A, `none-graph` — B).
 
 ---
 
@@ -747,7 +747,7 @@ Checker печатает ровно один контролируемый verdic
 вывод или код безопасно отклоняется без печати сырых сообщений.
 
 Нижняя граница F1. Seed промптов любого образа оставляет активной старшую версию из БД,
-поэтому откат после F2 не снимает активность `review.system:v4` (с #350 — v5, с #498 — v7). Образ
+поэтому откат после F2 не снимает активность `review.system:v4` (с #350 — v5, с #498 — v7, с #318 — v8). Образ
 старше F1 (#328) не знает snapshot-пути и провёл бы runs с закреплённым v4 или v5 по
 legacy-пути с валидатором v1. Допуск по ревизии отклоняет такой образ, пока БД на
 `20261025_0040` или выше: эту ревизию образ не знает.
@@ -755,6 +755,10 @@ legacy-пути с валидатором v1. Допуск по ревизии �
 Нижняя граница #498 Ч.2. Образ старше неё не знает `review.system` v7 и так же провёл бы runs
 с закреплённым v7 по legacy-пути с валидатором v1. Допуск по ревизии такой откат не
 отклоняет: миграции у #498 Ч.2 нет.
+
+Нижняя граница #318. Образ старше неё не знает `review.system` v8 и так же провёл бы runs
+с закреплённым v8 по legacy-пути с валидатором v1. Допуск по ревизии такой откат не
+отклоняет: миграции у #318 нет.
 
 После успешного `up --wait` скрипт сразу сохраняет current/previous по manual/auto правилам,
 затем получает только имена env из работающих `api`, `worker` и

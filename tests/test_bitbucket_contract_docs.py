@@ -107,7 +107,10 @@ def test_pipeline_trace_table_keeps_upstream_manifest_and_bitbucket_rows() -> No
     assert all(line.startswith("|") for line in trace_table.splitlines()[1:])
     assert "`retrieved_excerpt`" in trace_table
     assert "| `context.rag` |" in trace_table
-    assert "| `context.manifest` — только snapshot-путь с закреплённым v4, v5 или v7" in trace_table
+    assert (
+        "| `context.manifest` — только snapshot-путь с закреплённым v4, v5, v7 или v8"
+        in trace_table
+    )
     assert "| `bitbucket.publish_review`" in trace_table
     assert "на `main` — `{outcome: not_ready" not in trace_table
 
