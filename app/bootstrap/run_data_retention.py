@@ -10,7 +10,11 @@ from functools import partial
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bootstrap.environment import positive_integer
-from app.modules.reviews.application.run_data_retention import PurgeExpiredRunData
+from app.common.application.leader_tasks import ScheduledTask
+from app.modules.reviews.application.run_data_retention import (
+    INTERVAL_SECONDS,
+    PurgeExpiredRunData,
+)
 from app.modules.reviews.infrastructure.run_data_retention import (
     SqlAlchemyRunDataRetentionUnitOfWork,
 )
@@ -45,4 +49,14 @@ def run_data_retention_task(
     return PurgeExpiredRunData(
         uow=partial(SqlAlchemyRunDataRetentionUnitOfWork, session_factory),
         retention=timedelta(days=settings.days),
+    )
+
+
+def run_data_retention_scheduled_task(
+    settings: RunDataRetentionSettings, session_factory: async_sessionmaker[AsyncSession]
+) -> ScheduledTask:
+    return ScheduledTask(
+        "run_data_retention",
+        run_data_retention_task(settings, session_factory),
+        INTERVAL_SECONDS,
     )

@@ -11,9 +11,10 @@ from typing import Any, Self, cast
 
 import pytest
 
+import app.common.application.leader_tasks as common_leader_tasks
 from app.bootstrap.run_data_retention import RunDataRetentionSettings
-from app.modules.reviews.application import run_data_retention
-from app.modules.reviews.application.run_data_retention import PurgeExpiredRunData
+from app.common.application.leader_tasks import LeaderTasks, ScheduledTask
+from app.modules.reviews.application.run_data_retention import INTERVAL_SECONDS, PurgeExpiredRunData
 from app.worker import WorkerProcess, WorkerSettings
 
 _WORKER_ENV = {
@@ -140,6 +141,13 @@ def _task(store: _Store, clock: _Clock) -> PurgeExpiredRunData:
     )
 
 
+def _leader(store: _Store, clock: _Clock) -> LeaderTasks:
+    return LeaderTasks(
+        [ScheduledTask("run_data_retention", _task(store, clock), INTERVAL_SECONDS)],
+        clock=clock,
+    )
+
+
 def test_a_pass_drains_the_runs_then_the_blobs_one_transaction_per_batch() -> None:
     clock = _Clock()
     store = _Store(clock, runs=(100, 100, 3), blobs=(1_000, 7))
@@ -173,7 +181,7 @@ def test_a_pass_reports_the_work_its_budget_cut_off(
 def test_a_tick_runs_at_once_and_then_once_per_interval() -> None:
     clock = _Clock()
     store = _Store(clock)
-    task = _task(store, clock)
+    task = _leader(store, clock)
 
     async def ticks() -> None:
         await task.tick()
@@ -192,7 +200,7 @@ def test_a_tick_runs_at_once_and_then_once_per_interval() -> None:
 def test_a_tick_cut_off_by_its_budget_goes_on_at_the_next_tick() -> None:
     clock = _Clock()
     store = _Store(clock, runs=(100, 100), cost=_DAY)
-    task = _task(store, clock)
+    task = _leader(store, clock)
 
     async def ticks() -> None:
         await task.tick()
@@ -209,7 +217,7 @@ def test_a_failed_pass_stays_inside_the_tick_and_waits_for_the_interval(
 ) -> None:
     clock = _Clock()
     store = _Store(clock, runs=(RuntimeError("database"), 0))
-    task = _task(store, clock)
+    task = _leader(store, clock)
 
     async def ticks() -> None:
         await task.tick()
@@ -223,17 +231,17 @@ def test_a_failed_pass_stays_inside_the_tick_and_waits_for_the_interval(
 
     assert store.calls == ["runs", "runs", "blobs"]
     assert store.commits == 2
-    assert "Run data retention pass failed" in caplog.text
+    assert "Leader task run_data_retention failed" in caplog.text
 
 
 def test_a_hung_pass_times_out_inside_the_tick_and_waits_for_the_interval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(run_data_retention, "TICK_BUDGET_SECONDS", 0.01)
-    monkeypatch.setattr(run_data_retention, "TICK_TIMEOUT_MARGIN_SECONDS", 0.01)
+    monkeypatch.setattr(common_leader_tasks, "TICK_BUDGET_SECONDS", 0.01)
+    monkeypatch.setattr(common_leader_tasks, "TASK_TIMEOUT_MARGIN_SECONDS", 0.01)
     clock = _Clock()
     store = _Store(clock)
-    task = _task(store, clock)
+    task = _leader(store, clock)
     calls = 0
 
     async def hang(before: datetime, now: datetime, limit: int) -> int:
@@ -258,7 +266,7 @@ def test_a_cancelled_pass_cancels_the_tick() -> None:
     store = _Store(clock, runs=(asyncio.CancelledError(),))
 
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(_task(store, clock).tick())
+        asyncio.run(_leader(store, clock).tick())
 
 
 class _Leader:
@@ -287,7 +295,7 @@ class _Leader:
             publish_review=cast(Any, None),
             enqueue=cast(Any, self),
             sweep=cast(Any, self),
-            run_data_retention=cast(Any, self),
+            leader_tasks=cast(Any, self),
         )
 
 

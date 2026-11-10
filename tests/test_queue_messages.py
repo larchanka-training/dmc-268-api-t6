@@ -24,10 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import app.modules.reviews.infrastructure.amqp as amqp
 import app.worker as worker_module
 from app.bootstrap.llm_gateway import build_gateway as original_build_gateway
-from app.modules.code_index.application.leader_tasks import (
-    CodeIndexLeaderTasks,
-    ScheduledTask,
-)
+from app.common.application.leader_tasks import LeaderTasks, ScheduledTask
 from app.modules.reviews.application.handle_review_run import ClaimedAttempt, DeliveryOutcome
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, StoredRunMessage
 from app.modules.reviews.application.run_delivery import (
@@ -701,7 +698,7 @@ class _LeaderCalls:
             publish_review=cast(Any, None),
             enqueue=cast(Any, self),
             sweep=cast(Any, self),
-            index_tasks=CodeIndexLeaderTasks([self.task("ttl"), self.task("gc")]),
+            leader_tasks=LeaderTasks([self.task("ttl"), self.task("gc")]),
         )
 
 
@@ -722,7 +719,7 @@ def test_a_failing_index_task_neither_skips_the_replay_nor_fails_the_leader_tick
         asyncio.run(leader.process().leader_tick())
 
     assert leader.calls == ["sweep", "replay", "ttl", "gc"]
-    assert "Code index leader task ttl failed" in caplog.text
+    assert "Leader task ttl failed" in caplog.text
 
 
 def test_the_index_tasks_run_even_when_the_replay_fails() -> None:
@@ -793,10 +790,12 @@ def test_run_worker_hands_the_index_leader_tasks_to_the_worker_process(
         asyncio.run(run_worker(settings))
 
     assert (composed["github"] is None) == (not app)
-    leader = composed["index_tasks"]
-    assert isinstance(leader, CodeIndexLeaderTasks)
-    assert [task.name for task in leader.tasks] == names
-    assert {task.name: task.interval_seconds for task in leader.tasks}["gc"] == 120
+    leader = composed["leader_tasks"]
+    assert isinstance(leader, LeaderTasks)
+    assert [task.name for task in leader.tasks] == [*names, "run_data_retention"]
+    intervals = {task.name: task.interval_seconds for task in leader.tasks}
+    assert intervals["gc"] == 120
+    assert intervals["run_data_retention"] == 3_600
 
 
 LLM_ENV = {
