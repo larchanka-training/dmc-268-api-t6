@@ -153,6 +153,56 @@ def test_change_summary_follows_the_verifier_and_its_text_is_signed_in_the_store
     assert entered["postprocess_response"]["verdict"] == "blocking"
 
 
+def test_change_summary_follows_the_review_when_it_has_no_candidate() -> None:
+    agent = _ChangeSummaryModel(ChangeSummary(("Adds a lookup by id.",)))
+
+    reviews = _run(agent, findings=[])
+
+    assert agent.verifier_prompts_before == [0]
+    assert agent.verifier.prompts == []
+    [processed] = reviews.stored
+    assert f"{SIGNED}Adds a lookup by id." in processed.review_body
+    [entered] = reviews.entered
+    assert entered["postprocess_response"]["change_summary"] == {
+        "status": "shown",
+        "received": 1,
+        "shown": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("sentences", "trace", "kept"),
+    [
+        (
+            (f"Adds {'a' * 1500}.",),
+            {"status": "no_room", "received": 1, "shown": 0},
+            None,
+        ),
+        (
+            (f"Adds {'a' * 700}.", f"Reads {'b' * 700}.", f"Moves {'c' * 700}."),
+            {"status": "shown", "received": 3, "shown": 1},
+            f"{SIGNED}Adds {'a' * 700}.",
+        ),
+    ],
+    ids=["no-room", "first-sentence-only"],
+)
+def test_change_summary_text_over_the_block_limit_is_cut_and_traced(
+    sentences: tuple[str, ...], trace: dict[str, object], kept: str | None
+) -> None:
+    # The adapter caps a sentence at 200 characters; longer ones fill the 1 500 characters of
+    # the block here without a long checklist (the post-processor tests show that one).
+    reviews = _run(_ChangeSummaryModel(ChangeSummary(sentences)))
+
+    [processed] = reviews.stored
+    [entered] = reviews.entered
+    assert entered["postprocess_response"]["change_summary"] == trace
+    if kept is None:
+        assert "**What changed**" not in processed.review_body
+    else:
+        assert f"{kept}\n" in processed.review_body
+        assert sentences[1] not in processed.review_body
+
+
 @pytest.mark.parametrize(
     ("error", "error_code"),
     [
