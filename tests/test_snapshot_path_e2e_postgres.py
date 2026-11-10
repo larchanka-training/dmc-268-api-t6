@@ -17,7 +17,10 @@ retrieves from a newer index publication (D8). A v4 run in flight when the v5 se
 live keeps its v4 prompt: no retrieved section, and a ready index is recorded as not used.
 A verifier answer citing a range the diff block does not show, or a rule finding without a
 requirement of its rule, earns the attempt's one free slot: the fallback, or a bounded repair
-without a fallback model; the recovered answer publishes.
+without a fallback model; the recovered answer publishes. A changed-file name the run cannot
+store unchanged leaves its source unisolable: the v4 run fails on its first attempt before the
+diff is written and before any model call (RFS §11, #497); a v3 run with such a name keeps the
+retried internal error.
 """
 
 from __future__ import annotations
@@ -157,6 +160,8 @@ class GitHubHttp:
     files_unavailable: int = 0
     # The head tree also holds ``pkg/app.py``, the caller the graph index retrieves.
     rag: bool = False
+    # The changed files as GitHub lists them; ``None``: the service and its test.
+    files: tuple[dict[str, Any], ...] | None = None
     calls: list[str] = field(default_factory=list)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
@@ -200,7 +205,8 @@ class GitHubHttp:
                 return httpx.Response(200, content=raw)
             return _blob(sha, raw)
         if path.endswith("/pulls/3"):
-            payload = _pull_payload(changed_files=2, head_sha=_HEAD)
+            changed = 2 if self.files is None else len(self.files)
+            payload = _pull_payload(changed_files=changed, head_sha=_HEAD)
             payload["number"] = 3
             return httpx.Response(200, json=payload)
         if path.endswith("/pulls/3/commits"):
@@ -209,6 +215,8 @@ class GitHubHttp:
             if self.files_unavailable:
                 self.files_unavailable -= 1
                 return httpx.Response(503, json={"message": "unavailable"})
+            if self.files is not None:
+                return httpx.Response(200, json=list(self.files))
             files = [
                 {
                     "filename": path,
@@ -339,6 +347,14 @@ async def _rows(
         return [tuple(row) for row in await session.execute(text(sql), {"id": run_id})]
 
 
+async def _make_due(session: AsyncSession, run_id: UUID) -> None:
+    # The retry backoff has passed: the worker may take the run again.
+    await session.execute(
+        text("UPDATE runs SET available_at=clock_timestamp()-interval '1 minute' WHERE id=:id"),
+        {"id": run_id},
+    )
+
+
 async def _scenario(
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -349,11 +365,15 @@ async def _scenario(
     llm: LlmSettings = _LLM,
     review_kind: str | None = None,
     verifier_kinds: tuple[str, ...] = ("verifier",),
+    files: tuple[dict[str, Any], ...] | None = None,
+    redeliveries: int = 0,
 ) -> Observed:
     """``version``: the review.system version the run is bound to; v3 is the seeded live row.
     ``v5_seeded``: the run is created under the seeded live v4 row, then the v5 seed makes v5
     live before the worker takes the run. ``llm``: the models of the composition;
-    ``review_kind`` and ``verifier_kinds``: how the review and the verifier calls answer."""
+    ``review_kind`` and ``verifier_kinds``: how the review and the verifier calls answer;
+    ``files``: the changed files GitHub lists, the service and its test when ``None``;
+    ``redeliveries``: how many more times the worker takes the run once it is due again."""
     await _ready(factory)
     await _seed(factory, _up_to(_packaged(), 4) if v5_seeded else _live_assets())
     async with factory.begin() as session:
@@ -386,7 +406,7 @@ async def _scenario(
         await _bind_v5(factory, run_id)
     snapshot_path = version >= 4
     queue = Queue()
-    github_http = GitHubHttp(files_unavailable=1 if retry and not rag else 0, rag=rag)
+    github_http = GitHubHttp(files_unavailable=1 if retry and not rag else 0, rag=rag, files=files)
     if review_kind is None:
         review_kind = "review-v2" if snapshot_path else "review-v1"
     if retry and rag:
@@ -482,13 +502,11 @@ async def _scenario(
                                 "sum": sha256(content.encode()).hexdigest(),
                             },
                         )
-                await session.execute(
-                    text(
-                        "UPDATE runs SET available_at=clock_timestamp()-interval '1 minute' "
-                        "WHERE id=:id"
-                    ),
-                    {"id": run_id},
-                )
+                await _make_due(session, run_id)
+            outcomes.append(await process.handle_run.execute(run_id))
+        for _ in range(redeliveries):
+            async with factory.begin() as session:
+                await _make_due(session, run_id)
             outcomes.append(await process.handle_run.execute(run_id))
     actions: dict[str, list[tuple[Any, Any]]] = {}
     tools: list[str] = []
@@ -579,6 +597,8 @@ def _observe(
     llm: LlmSettings = _LLM,
     review_kind: str | None = None,
     verifier_kinds: tuple[str, ...] = ("verifier",),
+    files: tuple[dict[str, Any], ...] | None = None,
+    redeliveries: int = 0,
 ) -> Observed:
     async def scenario() -> Observed:
         engine = env.engine()
@@ -592,6 +612,8 @@ def _observe(
                 llm=llm,
                 review_kind=review_kind,
                 verifier_kinds=verifier_kinds,
+                files=files,
+                redeliveries=redeliveries,
             )
         finally:
             await engine.dispose()
@@ -1109,3 +1131,99 @@ def test_an_invalid_verifier_reference_earns_the_bounded_recovery(
     [(_, postprocess)] = observed.actions["review.postprocess"]
     assert postprocess["inline"] == 1
     assert [pointer.run_id for pointer in observed.queue.published] == [observed.run_id]
+
+
+_LONG_NAME = "d/" * 549 + "x.py"
+
+
+def _next_to_the_service(change: dict[str, str]) -> tuple[dict[str, Any], ...]:
+    """The allowed service file, then a one-line change under the names of ``change``."""
+    allowed = {"filename": _PATH, "status": "modified", "sha": _SERVICE_SHA, "patch": _GREET_PATCH}
+    other = {"sha": _TEST_SHA, "patch": "@@ -0,0 +1 @@\n+x", **change}
+    counts = {"additions": 1, "deletions": 0, "changes": 1}
+    return ({**counts, **allowed}, {**counts, **other})
+
+
+def _stored(env: Env, run_id: UUID) -> tuple[Any, ...]:
+    """The run's usage events and stored diff rows, counted, and its error message."""
+
+    async def stored() -> tuple[Any, ...]:
+        engine = env.engine()
+        try:
+            [row] = await _rows(
+                async_sessionmaker(engine),
+                "SELECT (SELECT count(*) FROM usage_events WHERE run_id=:id), "
+                "(SELECT count(*) FROM code_change_diffs WHERE run_id=:id), error_message "
+                "FROM runs WHERE id=:id",
+                run_id,
+            )
+            return row
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(stored())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("change", "name"),
+    [
+        ({"filename": "a\x00b.py", "status": "added"}, "a\x00b.py"),
+        (
+            {"filename": "src/new.py", "status": "renamed", "previous_filename": "a\x00b.py"},
+            "a\x00b.py",
+        ),
+        ({"filename": _LONG_NAME, "status": "added"}, _LONG_NAME),
+        (
+            {"filename": "src/new.py", "status": "renamed", "previous_filename": _LONG_NAME},
+            _LONG_NAME,
+        ),
+    ],
+    ids=["nul-new-name", "nul-old-name", "long-new-name", "long-old-name"],
+)
+def test_a_name_the_run_cannot_store_fails_the_v4_run_before_any_model_call(
+    env: Env, change: dict[str, str], name: str
+) -> None:
+    # Next to the allowed service file, a change under a name with a NUL or over the 1024
+    # characters a stored name holds: the source has no stored identity to withhold.
+    observed = _observe(env, version=4, files=_next_to_the_service(change))
+
+    usage_events, diff_rows, error_message = _stored(env, observed.run_id)
+    # The first attempt ends the run: the code is not retried.
+    assert observed.outcomes == ["ack"]
+    assert observed.state == ("failed", "policy_snapshot_integrity_error", 1)
+    assert observed.tools == ["policy.load", "vcs.fetch_diff"]
+    assert observed.manifests == []
+    assert observed.bodies == []
+    assert usage_events == 0
+    # Nothing of the diff is written, the allowed file neither; the message names no path.
+    assert diff_rows == 0
+    assert error_message == (
+        "A changed file name cannot be stored unchanged, "
+        "so the isolation of its source cannot be proven"
+    )
+    assert name not in error_message
+
+
+@pytest.mark.integration
+def test_a_long_name_keeps_the_v3_run_on_the_retried_internal_error(env: Env) -> None:
+    # The legacy path withholds no file by its stored names: a new name over the 1024
+    # characters a stored name holds still fails the diff write, a retried internal error,
+    # until the attempts run out. No attempt reaches a model.
+    observed = _observe(
+        env,
+        version=3,
+        files=_next_to_the_service({"filename": _LONG_NAME, "status": "added"}),
+        redeliveries=2,
+    )
+
+    usage_events, diff_rows, error_message = _stored(env, observed.run_id)
+    assert observed.outcomes == ["ack", "ack", "dead_letter"]
+    assert observed.state == ("failed", "internal_error", 3)
+    assert observed.tools == ["policy.load", "vcs.fetch_diff"] * 3
+    assert observed.manifests == []
+    assert observed.bodies == []
+    assert usage_events == 0
+    # The diff write refuses the name, not the GitHub answer: nothing of the diff is stored.
+    assert diff_rows == 0
+    assert error_message.startswith("DataError: ")
