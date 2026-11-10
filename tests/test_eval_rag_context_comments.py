@@ -7,6 +7,9 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
+from app.modules.reviews.application import rag_index
 from review.scripts.eval_rag_context import build_arm_input
 
 # RAG-21 retrieves its unchanged caller, whose lines 11-13 are a comment addressed to
@@ -34,3 +37,14 @@ def test_the_recorded_v5_prompt_still_sends_the_comments() -> None:
 
     assert all(lines[n].startswith("    # ") for n in _BAIT_LINES)
     assert not any("[comment removed]" in line for line in lines.values())
+
+
+def test_the_build_asks_the_review_gate_not_the_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With the gate's set swapped to v5, v5 hides the bait and v7 sends it: the build follows
+    # the set, as the review does, and no version check of its own.
+    monkeypatch.setattr(
+        rag_index, "COMMENT_FREE_PROMPT_VERSIONS", frozenset({("review.system", "v5")})
+    )
+
+    assert [_caller_lines("v5")[n] for n in _BAIT_LINES] == ["    # [comment removed]"] * 3
+    assert not any("[comment removed]" in line for line in _caller_lines("v7").values())
