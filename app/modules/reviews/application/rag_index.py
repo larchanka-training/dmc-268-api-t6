@@ -14,7 +14,7 @@ from app.modules.code_index.domain.rag_index import RagIndex
 # pinned to another version records a usable index as `not_ready` / `prompt_version`. There
 # is no v6: its A/B drafts (#399) keep the number.
 RETRIEVED_PROMPT_VERSIONS: frozenset[tuple[str, str]] = frozenset(
-    {("review.system", "v5"), ("review.system", "v7")}
+    {("review.system", "v5"), ("review.system", "v7"), ("review.system", "v8")}
 )
 
 
@@ -25,8 +25,10 @@ def has_retrieved_section(review_system_key: str, review_system_version: str) ->
 
 # The pinned review prompts, as `(key, version)`, whose retrieved blocks show every comment
 # as a marker (#498): text in a comment of unchanged code never reaches the model. v5 keeps
-# the blocks as they are.
-COMMENT_FREE_PROMPT_VERSIONS: frozenset[tuple[str, str]] = frozenset({("review.system", "v7")})
+# the blocks as they are; v8 (#318) is v7 in fewer tokens.
+COMMENT_FREE_PROMPT_VERSIONS: frozenset[tuple[str, str]] = frozenset(
+    {("review.system", "v7"), ("review.system", "v8")}
+)
 
 
 def hides_retrieved_comments(review_system_key: str, review_system_version: str) -> bool:
