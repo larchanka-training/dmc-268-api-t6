@@ -34,7 +34,7 @@ class DiffSnapshot:
     summary_only: bool = False
 
 
-def holds_without_loss(snapshot: DiffSnapshot) -> bool:
+def has_storable_provider_names(snapshot: DiffSnapshot) -> bool:
     """Whether the run can store every provider name of the change unchanged (CVS §9.1).
 
     An omitted file is withheld by those names; one with a NUL, a lone surrogate or more

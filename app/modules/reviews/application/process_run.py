@@ -19,7 +19,7 @@ from app.modules.reviews.application.get_run_diff import (
     DiffSnapshot,
     DiffSnapshotRepository,
     StoreDiffSnapshot,
-    holds_without_loss,
+    has_storable_provider_names,
     is_proven_empty_snapshot,
     review_files_from_snapshots,
 )
@@ -268,7 +268,9 @@ class ReviewRunProcessor:
                         )
                         for file in fetched.files
                     ]
-                    if snapshot_path and not all(holds_without_loss(file) for file in files):
+                    if snapshot_path and not all(
+                        has_storable_provider_names(file) for file in files
+                    ):
                         # Not stored, the name leaves its source no identity to withhold it
                         # by: the run fails before any model call (RFS §11). The message
                         # names no path; nothing of this diff is written.
