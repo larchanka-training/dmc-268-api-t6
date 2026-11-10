@@ -21,7 +21,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -72,45 +72,38 @@ def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
     database_url = migrated_db.url
     schema = migrated_db.schema
     workspace, installation, repository = uuid4(), uuid4(), uuid4()
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            for statement, values in (
-                (
-                    "INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'W', 0)",
-                    {"id": workspace},
-                ),
-                (
-                    "INSERT INTO provider_installations "
-                    "(id, workspace_id, provider, external_id, metadata) "
-                    "VALUES (:id, :ws, 'github', 17, '{}'::jsonb)",
-                    {"id": installation, "ws": workspace},
-                ),
-                (
-                    "INSERT INTO repositories (id, provider_installation_id, external_id, "
-                    "full_name, default_branch, web_url) VALUES (:id, :installation, 101, "
-                    "'octo/repo', 'main', 'https://github.test/octo/repo')",
-                    {"id": repository, "installation": installation},
-                ),
-                (
-                    "INSERT INTO rule_versions (id, repository_id, version, rules, checksum, "
-                    "is_active) VALUES (:id, :repo, 1, '[]'::jsonb, :checksum, true)",
-                    {"id": uuid4(), "repo": repository, "checksum": "a" * 64},
-                ),
-                (
-                    "INSERT INTO prompt_versions (id, key, version, content, checksum, "
-                    "is_active) VALUES (:id, 'review.system', 1, 'system', :checksum, true)",
-                    {"id": uuid4(), "checksum": "c" * 64},
-                ),
-            ):
-                connection.execute(text(statement), values)
-            connection.commit()
-            yield Database(database_url, schema)
-            connection.rollback()
-    finally:
-        engine.dispose()
+    with migrated_db.connect() as connection:
+        for statement, values in (
+            (
+                "INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'W', 0)",
+                {"id": workspace},
+            ),
+            (
+                "INSERT INTO provider_installations "
+                "(id, workspace_id, provider, external_id, metadata) "
+                "VALUES (:id, :ws, 'github', 17, '{}'::jsonb)",
+                {"id": installation, "ws": workspace},
+            ),
+            (
+                "INSERT INTO repositories (id, provider_installation_id, external_id, "
+                "full_name, default_branch, web_url) VALUES (:id, :installation, 101, "
+                "'octo/repo', 'main', 'https://github.test/octo/repo')",
+                {"id": repository, "installation": installation},
+            ),
+            (
+                "INSERT INTO rule_versions (id, repository_id, version, rules, checksum, "
+                "is_active) VALUES (:id, :repo, 1, '[]'::jsonb, :checksum, true)",
+                {"id": uuid4(), "repo": repository, "checksum": "a" * 64},
+            ),
+            (
+                "INSERT INTO prompt_versions (id, key, version, content, checksum, "
+                "is_active) VALUES (:id, 'review.system', 1, 'system', :checksum, true)",
+                {"id": uuid4(), "checksum": "c" * 64},
+            ),
+        ):
+            connection.execute(text(statement), values)
+        connection.commit()
+        yield Database(database_url, schema)
 
 
 @dataclass

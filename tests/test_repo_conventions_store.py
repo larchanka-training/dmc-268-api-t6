@@ -10,7 +10,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.common.infrastructure.db.enums import CodeChangeState, Engine, RunState
@@ -50,15 +50,7 @@ def migrated_conventions_database(migrated_db: MigratedDatabase) -> Iterator[tup
     """Provide a disposable migrated PostgreSQL schema when explicitly configured."""
     database_url = migrated_db.url
     schema = migrated_db.schema
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            yield database_url, schema
-            connection.rollback()
-    finally:
-        engine.dispose()
+    yield database_url, schema
 
 
 async def _seed_repository_with_two_runs(

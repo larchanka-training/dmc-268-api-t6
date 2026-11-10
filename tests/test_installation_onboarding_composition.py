@@ -17,7 +17,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -124,15 +124,7 @@ def migrated_onboarding_database(migrated_db: MigratedDatabase) -> Iterator[tupl
     """Provide an isolated migrated PostgreSQL schema when configured."""
     database_url = migrated_db.url
     schema = migrated_db.schema
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            yield database_url, schema
-            connection.rollback()
-    finally:
-        engine.dispose()
+    yield database_url, schema
 
 
 def test_composition_accepts_typed_event_and_internal_installation_id(

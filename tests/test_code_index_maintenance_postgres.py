@@ -31,7 +31,7 @@ from functools import partial
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -95,33 +95,24 @@ class _Fleet:
 def fleet(migrated_db: MigratedDatabase) -> Iterator[_Fleet]:
     database_url = migrated_db.url
     schema = migrated_db.schema
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                ids = tuple(
-                    sorted(
-                        UUID(_repository(connection, installation_external_id=17 + number))
-                        for number in range(5)
-                    )
-                )
-                connection.commit()
-                async_engine = create_async_engine(
-                    database_url,
-                    connect_args={"options": f"-csearch_path={schema}"},
-                    poolclass=NullPool,
-                )
-                try:
-                    factory = async_sessionmaker(async_engine, expire_on_commit=False)
-                    yield _Fleet(_Index(factory, ids[0], ids[1]), ids)
-                finally:
-                    asyncio.run(async_engine.dispose())
-            finally:
-                connection.rollback()
-    finally:
-        engine.dispose()
+    with migrated_db.connect() as connection:
+        ids = tuple(
+            sorted(
+                UUID(_repository(connection, installation_external_id=17 + number))
+                for number in range(5)
+            )
+        )
+        connection.commit()
+        async_engine = create_async_engine(
+            database_url,
+            connect_args={"options": f"-csearch_path={schema}"},
+            poolclass=NullPool,
+        )
+        try:
+            factory = async_sessionmaker(async_engine, expire_on_commit=False)
+            yield _Fleet(_Index(factory, ids[0], ids[1]), ids)
+        finally:
+            asyncio.run(async_engine.dispose())
 
 
 async def _with_garbage(index: _Index, after: UUID | None = None, limit: int = 10) -> list[UUID]:

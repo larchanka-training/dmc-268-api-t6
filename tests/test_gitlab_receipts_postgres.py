@@ -13,7 +13,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -73,68 +73,60 @@ class Database:
 def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
     url = migrated_db.url
     schema = migrated_db.schema
-    engine = create_engine(url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            for number, origin in enumerate((ORIGIN, OTHER), 99):
-                workspace = uuid4()
-                connection.execute(
-                    text(
-                        "INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'T6b', 7)"
-                    ),
-                    {"id": workspace},
-                )
-                connection.execute(
-                    text(
-                        "INSERT INTO provider_installations "
-                        "(id, workspace_id, provider, external_id, metadata) "
-                        "VALUES (:id, :workspace, 'gitlab', :number, '{}')"
-                    ),
-                    {"id": origin, "workspace": workspace, "number": number},
-                )
-                instance = f"https://gitlab{number}.example"
-                connection.execute(
-                    text(
-                        "INSERT INTO gitlab_connections "
-                        "(provider_installation_id, workspace_id, instance_origin, "
-                        "token_ciphertext, credential_key_id, webhook_secret_digest, "
-                        "intake_enabled) "
-                        "VALUES (:id, :workspace, :instance, :envelope, 'test', :digest, true)"
-                    ),
-                    {
-                        "id": origin,
-                        "workspace": workspace,
-                        "instance": instance,
-                        "envelope": b"synthetic-envelope",
-                        "digest": "a" * 64,
-                    },
-                )
-                repository = uuid4()
-                connection.execute(
-                    text(
-                        "INSERT INTO repositories (id, provider_installation_id, external_id, "
-                        "full_name, default_branch, web_url) "
-                        "VALUES (:id, :origin, 17, 'team/repo', 'main', :url)"
-                    ),
-                    {"id": repository, "origin": origin, "url": instance + "/team/repo"},
-                )
-                connection.execute(
-                    text(
-                        "INSERT INTO gitlab_project_bindings (repository_id, "
-                        "provider_installation_id, instance_origin, project_external_id) "
-                        "VALUES (:id, :origin, :instance, 17)"
-                    ),
-                    {"id": repository, "origin": origin, "instance": instance},
-                )
-            connection.commit()
-            try:
-                yield Database(url, schema)
-            finally:
-                connection.rollback()
-    finally:
-        engine.dispose()
+    with migrated_db.connect() as connection:
+        for number, origin in enumerate((ORIGIN, OTHER), 99):
+            workspace = uuid4()
+            connection.execute(
+                text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'T6b', 7)"),
+                {"id": workspace},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO provider_installations "
+                    "(id, workspace_id, provider, external_id, metadata) "
+                    "VALUES (:id, :workspace, 'gitlab', :number, '{}')"
+                ),
+                {"id": origin, "workspace": workspace, "number": number},
+            )
+            instance = f"https://gitlab{number}.example"
+            connection.execute(
+                text(
+                    "INSERT INTO gitlab_connections "
+                    "(provider_installation_id, workspace_id, instance_origin, "
+                    "token_ciphertext, credential_key_id, webhook_secret_digest, "
+                    "intake_enabled) "
+                    "VALUES (:id, :workspace, :instance, :envelope, 'test', :digest, true)"
+                ),
+                {
+                    "id": origin,
+                    "workspace": workspace,
+                    "instance": instance,
+                    "envelope": b"synthetic-envelope",
+                    "digest": "a" * 64,
+                },
+            )
+            repository = uuid4()
+            connection.execute(
+                text(
+                    "INSERT INTO repositories (id, provider_installation_id, external_id, "
+                    "full_name, default_branch, web_url) "
+                    "VALUES (:id, :origin, 17, 'team/repo', 'main', :url)"
+                ),
+                {"id": repository, "origin": origin, "url": instance + "/team/repo"},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO gitlab_project_bindings (repository_id, "
+                    "provider_installation_id, instance_origin, project_external_id) "
+                    "VALUES (:id, :origin, :instance, 17)"
+                ),
+                {"id": repository, "origin": origin, "instance": instance},
+            )
+        connection.commit()
+        try:
+            yield Database(url, schema)
+        finally:
+            connection.rollback()
 
 
 def receipt(

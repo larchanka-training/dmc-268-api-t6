@@ -11,7 +11,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -57,50 +57,42 @@ class Database:
 def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
     url = migrated_db.url
     schema = migrated_db.schema
-    engine = create_engine(url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            for provider, origin in (("github", GITHUB_ORIGIN), ("gitlab", GITLAB_ORIGIN)):
-                workspace = uuid4()
+    with migrated_db.connect() as connection:
+        for provider, origin in (("github", GITHUB_ORIGIN), ("gitlab", GITLAB_ORIGIN)):
+            workspace = uuid4()
+            connection.execute(
+                text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'T6', 7)"),
+                {"id": workspace},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO provider_installations "
+                    "(id, workspace_id, provider, external_id, metadata) "
+                    "VALUES (:id, :workspace, :provider, 99, '{}')"
+                ),
+                {"id": origin, "workspace": workspace, "provider": provider},
+            )
+            if provider == "gitlab":
                 connection.execute(
                     text(
-                        "INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'T6', 7)"
+                        "INSERT INTO gitlab_connections "
+                        "(provider_installation_id, workspace_id, instance_origin, "
+                        "token_ciphertext, credential_key_id, webhook_secret_digest) "
+                        "VALUES (:id, :workspace, 'https://gitlab.example', "
+                        ":envelope, 'test', :digest)"
                     ),
-                    {"id": workspace},
+                    {
+                        "id": origin,
+                        "workspace": workspace,
+                        "envelope": b"synthetic-envelope",
+                        "digest": "a" * 64,
+                    },
                 )
-                connection.execute(
-                    text(
-                        "INSERT INTO provider_installations "
-                        "(id, workspace_id, provider, external_id, metadata) "
-                        "VALUES (:id, :workspace, :provider, 99, '{}')"
-                    ),
-                    {"id": origin, "workspace": workspace, "provider": provider},
-                )
-                if provider == "gitlab":
-                    connection.execute(
-                        text(
-                            "INSERT INTO gitlab_connections "
-                            "(provider_installation_id, workspace_id, instance_origin, "
-                            "token_ciphertext, credential_key_id, webhook_secret_digest) "
-                            "VALUES (:id, :workspace, 'https://gitlab.example', "
-                            ":envelope, 'test', :digest)"
-                        ),
-                        {
-                            "id": origin,
-                            "workspace": workspace,
-                            "envelope": b"synthetic-envelope",
-                            "digest": "a" * 64,
-                        },
-                    )
-            connection.commit()
-            try:
-                yield Database(url, schema)
-            finally:
-                connection.rollback()
-    finally:
-        engine.dispose()
+        connection.commit()
+        try:
+            yield Database(url, schema)
+        finally:
+            connection.rollback()
 
 
 async def seed_receipt(

@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
@@ -436,15 +436,7 @@ def test_github_adapter_accepts_zero_installations() -> None:
 def migrated_link_database(migrated_db: MigratedDatabase) -> Iterator[tuple[str, str]]:
     database_url = migrated_db.url
     schema = migrated_db.schema
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            yield database_url, schema
-            connection.rollback()
-    finally:
-        engine.dispose()
+    yield database_url, schema
 
 
 @pytest.mark.integration

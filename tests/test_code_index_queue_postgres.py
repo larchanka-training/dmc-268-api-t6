@@ -30,7 +30,7 @@ from aio_pika.abc import AbstractIncomingMessage, AbstractQueue, AbstractRobustC
 from aiormq.exceptions import ChannelPreconditionFailed
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -178,20 +178,11 @@ def _insert_repository(connection: Any, installation_external_id: int, full_name
 def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
     url = migrated_db.url
     schema = migrated_db.schema
-    engine = create_engine(url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                a = _insert_repository(connection, 18, "octo/indexed-a")
-                b = _insert_repository(connection, 17, "octo/indexed-b")
-                connection.commit()
-                yield Database(url, schema, a, b)
-            finally:
-                connection.rollback()
-    finally:
-        engine.dispose()
+    with migrated_db.connect() as connection:
+        a = _insert_repository(connection, 18, "octo/indexed-a")
+        b = _insert_repository(connection, 17, "octo/indexed-b")
+        connection.commit()
+        yield Database(url, schema, a, b)
 
 
 async def _next(queue: AbstractQueue, timeout: float = 10.0) -> AbstractIncomingMessage:

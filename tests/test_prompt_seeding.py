@@ -10,7 +10,7 @@ from importlib.resources import files
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.bootstrap.seed_prompts import PromptAsset, load_prompt_assets, seed_prompt_versions
@@ -35,15 +35,7 @@ def migrated_prompt_database(migrated_db: MigratedDatabase) -> Iterator[tuple[st
     """Provide a disposable, migrated PostgreSQL schema when explicitly configured."""
     database_url = migrated_db.url
     schema = migrated_db.schema
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            yield database_url, schema
-            connection.rollback()
-    finally:
-        engine.dispose()
+    yield database_url, schema
 
 
 def test_load_prompt_assets_preserves_full_file_and_checksum() -> None:

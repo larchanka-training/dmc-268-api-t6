@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from uuid import UUID
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -67,30 +67,21 @@ def index(migrated_db: MigratedDatabase) -> Iterator[_Index]:
     """One repository with RAG on."""
     database_url = migrated_db.url
     schema = migrated_db.schema
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                repository_a = UUID(_repository(connection, installation_external_id=17))
-                repository_b = UUID(_repository(connection, installation_external_id=18))
-                connection.execute(text("UPDATE repositories SET rag_enabled = true"))
-                connection.commit()
-                async_engine = create_async_engine(
-                    database_url,
-                    connect_args={"options": f"-csearch_path={schema}"},
-                    poolclass=NullPool,
-                )
-                try:
-                    factory = async_sessionmaker(async_engine, expire_on_commit=False)
-                    yield _Index(factory, repository_a, repository_b)
-                finally:
-                    asyncio.run(async_engine.dispose())
-            finally:
-                connection.rollback()
-    finally:
-        engine.dispose()
+    with migrated_db.connect() as connection:
+        repository_a = UUID(_repository(connection, installation_external_id=17))
+        repository_b = UUID(_repository(connection, installation_external_id=18))
+        connection.execute(text("UPDATE repositories SET rag_enabled = true"))
+        connection.commit()
+        async_engine = create_async_engine(
+            database_url,
+            connect_args={"options": f"-csearch_path={schema}"},
+            poolclass=NullPool,
+        )
+        try:
+            factory = async_sessionmaker(async_engine, expire_on_commit=False)
+            yield _Index(factory, repository_a, repository_b)
+        finally:
+            asyncio.run(async_engine.dispose())
 
 
 def _importer(path: str) -> IndexedFile:

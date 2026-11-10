@@ -10,7 +10,7 @@ from typing import cast
 from uuid import UUID
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.sql import ClauseElement
 
@@ -125,74 +125,67 @@ def test_pending_cancellation_query_rebuilds_old_head_pointer_without_queued_fil
 def cancellation_database(migrated_db: MigratedDatabase) -> Iterator[tuple[str, str]]:
     database_url = migrated_db.url
     schema = migrated_db.schema
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            workspace_id = UUID(int=10)
-            installation_id = UUID(int=11)
-            repository_id = UUID(int=12)
-            connection.execute(
-                text(
-                    "INSERT INTO workspaces (id, name, daily_budget_usd) "
-                    "VALUES (:id, 'Cancellation signal test', 0)"
-                ),
-                {"id": workspace_id},
-            )
-            connection.execute(
-                text(
-                    "INSERT INTO provider_installations "
-                    "(id, workspace_id, provider, external_id, metadata) "
-                    "VALUES (:id, :workspace_id, 'github', 17, '{}'::jsonb)"
-                ),
-                {"id": installation_id, "workspace_id": workspace_id},
-            )
-            connection.execute(
-                text(
-                    "INSERT INTO repositories "
-                    "(id, provider_installation_id, external_id, full_name, "
-                    "default_branch, web_url) "
-                    "VALUES (:id, :installation_id, 101, 'octo/repo', 'main', "
-                    "'https://github.com/octo/repo')"
-                ),
-                {"id": repository_id, "installation_id": installation_id},
-            )
-            connection.execute(
-                text(
-                    "INSERT INTO code_changes "
-                    "(id, repository_id, external_id, external_number, title, source_branch, "
-                    "target_branch, base_sha, head_sha, state, web_url) "
-                    "VALUES (:id, :repository_id, 901, 7, 'Test PR', 'feature', 'main', "
-                    ":base_sha, :head_sha, 'closed', 'https://github.com/octo/repo/pull/7')"
-                ),
-                {
-                    "id": _PR,
-                    "repository_id": repository_id,
-                    "base_sha": "b" * 40,
-                    "head_sha": "c" * 40,
-                },
-            )
-            connection.execute(
-                text(
-                    "INSERT INTO prompt_versions (id, key, version, content, checksum, is_active) "
-                    "VALUES (:id, 'review.system', 1, 'system', :checksum, true)"
-                ),
-                {"id": UUID(int=13), "checksum": "a" * 64},
-            )
-            connection.execute(
-                text(
-                    "INSERT INTO rule_versions "
-                    "(id, repository_id, version, rules, checksum, is_active) "
-                    "VALUES (:id, :repository_id, 1, '[]'::jsonb, :checksum, true)"
-                ),
-                {"id": UUID(int=14), "repository_id": repository_id, "checksum": "b" * 64},
-            )
-            connection.commit()
-            yield database_url, schema
-            connection.rollback()
-    finally:
-        engine.dispose()
+    with migrated_db.connect() as connection:
+        workspace_id = UUID(int=10)
+        installation_id = UUID(int=11)
+        repository_id = UUID(int=12)
+        connection.execute(
+            text(
+                "INSERT INTO workspaces (id, name, daily_budget_usd) "
+                "VALUES (:id, 'Cancellation signal test', 0)"
+            ),
+            {"id": workspace_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO provider_installations "
+                "(id, workspace_id, provider, external_id, metadata) "
+                "VALUES (:id, :workspace_id, 'github', 17, '{}'::jsonb)"
+            ),
+            {"id": installation_id, "workspace_id": workspace_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO repositories "
+                "(id, provider_installation_id, external_id, full_name, "
+                "default_branch, web_url) "
+                "VALUES (:id, :installation_id, 101, 'octo/repo', 'main', "
+                "'https://github.com/octo/repo')"
+            ),
+            {"id": repository_id, "installation_id": installation_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO code_changes "
+                "(id, repository_id, external_id, external_number, title, source_branch, "
+                "target_branch, base_sha, head_sha, state, web_url) "
+                "VALUES (:id, :repository_id, 901, 7, 'Test PR', 'feature', 'main', "
+                ":base_sha, :head_sha, 'closed', 'https://github.com/octo/repo/pull/7')"
+            ),
+            {
+                "id": _PR,
+                "repository_id": repository_id,
+                "base_sha": "b" * 40,
+                "head_sha": "c" * 40,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO prompt_versions (id, key, version, content, checksum, is_active) "
+                "VALUES (:id, 'review.system', 1, 'system', :checksum, true)"
+            ),
+            {"id": UUID(int=13), "checksum": "a" * 64},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO rule_versions "
+                "(id, repository_id, version, rules, checksum, is_active) "
+                "VALUES (:id, :repository_id, 1, '[]'::jsonb, :checksum, true)"
+            ),
+            {"id": UUID(int=14), "repository_id": repository_id, "checksum": "b" * 64},
+        )
+        connection.commit()
+        yield database_url, schema
 
 
 @pytest.mark.integration

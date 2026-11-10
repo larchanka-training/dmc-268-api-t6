@@ -43,7 +43,7 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -177,44 +177,35 @@ class _Fleet:
 def fleet(migrated_db: MigratedDatabase) -> Iterator[_Fleet]:
     database_url = migrated_db.url
     schema = migrated_db.schema
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                a = UUID(_repository(connection, installation_external_id=17))
-                b = UUID(_repository(connection, installation_external_id=18))
-                installation = connection.scalar(
-                    text("SELECT provider_installation_id FROM repositories WHERE id = :id"),
-                    {"id": a},
-                )
-                a2 = uuid4()
-                connection.execute(
-                    text(
-                        "INSERT INTO repositories "
-                        "(id, provider_installation_id, external_id, full_name, default_branch, "
-                        "web_url) VALUES (:id, :installation, 102, 'octo/web', 'main', "
-                        "'https://github.com/octo/web')"
-                    ),
-                    {"id": a2, "installation": installation},
-                )
-                connection.commit()
-                neighbour = _sibling(connection, a, external_id=103, installation_external_id=19)
-                async_engine = create_async_engine(
-                    database_url,
-                    connect_args={"options": f"-csearch_path={schema}"},
-                    poolclass=NullPool,
-                )
-                try:
-                    factory = async_sessionmaker(async_engine, expire_on_commit=False)
-                    yield _Fleet(_Index(factory, a, b), installation, a2, neighbour)
-                finally:
-                    asyncio.run(async_engine.dispose())
-            finally:
-                connection.rollback()
-    finally:
-        engine.dispose()
+    with migrated_db.connect() as connection:
+        a = UUID(_repository(connection, installation_external_id=17))
+        b = UUID(_repository(connection, installation_external_id=18))
+        installation = connection.scalar(
+            text("SELECT provider_installation_id FROM repositories WHERE id = :id"),
+            {"id": a},
+        )
+        a2 = uuid4()
+        connection.execute(
+            text(
+                "INSERT INTO repositories "
+                "(id, provider_installation_id, external_id, full_name, default_branch, "
+                "web_url) VALUES (:id, :installation, 102, 'octo/web', 'main', "
+                "'https://github.com/octo/web')"
+            ),
+            {"id": a2, "installation": installation},
+        )
+        connection.commit()
+        neighbour = _sibling(connection, a, external_id=103, installation_external_id=19)
+        async_engine = create_async_engine(
+            database_url,
+            connect_args={"options": f"-csearch_path={schema}"},
+            poolclass=NullPool,
+        )
+        try:
+            factory = async_sessionmaker(async_engine, expire_on_commit=False)
+            yield _Fleet(_Index(factory, a, b), installation, a2, neighbour)
+        finally:
+            asyncio.run(async_engine.dispose())
 
 
 def _sync(index: _Index) -> SyncInstallationRepositories:

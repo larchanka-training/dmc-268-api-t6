@@ -14,7 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -50,15 +50,7 @@ class Database:
 def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
     database_url = migrated_db.url
     schema = migrated_db.schema
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            yield Database(database_url, schema)
-            connection.rollback()
-    finally:
-        engine.dispose()
+    yield Database(database_url, schema)
 
 
 class UnknownInstallation:
