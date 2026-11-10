@@ -62,7 +62,7 @@ T0 — момент, когда на шаге 3 поставлен лейбл. �
 
 | Время | Шаг | Действие | Результат на экране |
 |---|---|---|---|
-| 0:00–0:45 | 1. Правила команды | Вкладка 1: `.review/rules.md` | Разделы `# Security` (параметризованный SQL), `## Python` (`except Exception` только на границе фоновой задачи), `# Performance` (запрос на каждый элемент списка), блок `review-ignore` |
+| 0:00–0:45 | 1. Правила команды | Вкладка 1: `.review/rules.md` | Разделы `# Security` (параметризованный SQL), `## Python` (`except Exception` только на границе фоновой задачи), `# Performance` (запрос на каждый элемент списка), блок `review-ignore`: GitHub показывает его блоком кода с `generated/**` и `**/*.min.js` |
 | 0:45–1:30 | 2. PR с багами | Вкладка 2 → Files changed | Новый файл `shop/orders.py`; во вкладке Checks — зелёный `CI / check` |
 | 1:30–2:00 | 3. Триггер | Справа Labels → `ai-review`. Засечь T0 | Лейбл `ai-review` на PR; через несколько секунд в Checks появляется `AI Review` — «AI-ревью выполняется». На репетиции прогон `fast` шёл около 20 секунд, и к концу шага check уже мог смениться на «AI-ревью: <вердикт>» |
 | 2:00–3:30 | 4. Правила в портале | Вкладка 3: Settings песочницы | Automatic review включён; CI waiting — `Auto (wait for CI when the commit has checks)`; панель Review rules — `File found`, `.review/rules.md`, `main`, текст файла, Ignored paths `**/*.min.js` и `generated/**` |
