@@ -286,15 +286,23 @@ class PromptBuilder:
     @staticmethod
     def render_policy_rules(snapshot: PolicySnapshot) -> str:
         """Render the numbered repository-rules block, including absence and empty state."""
-        return _render_policy_document(
-            snapshot.rules, tag="repository_rules", block_id="policy-rules"
-        )
+        return PromptBuilder.render_rules_document(snapshot.rules)
+
+    @staticmethod
+    def render_rules_document(document: PolicyDocument) -> str:
+        """The repository-rules block of one document, as ``render_policy_rules`` renders it."""
+        return _render_policy_document(document, tag="repository_rules", block_id="policy-rules")
 
     @staticmethod
     def render_policy_agents(snapshot: PolicySnapshot) -> str:
         """Render the numbered AGENTS.md block, including absence and empty state."""
+        return PromptBuilder.render_agents_document(snapshot.agents)
+
+    @staticmethod
+    def render_agents_document(document: PolicyDocument) -> str:
+        """The AGENTS.md block of one document, as ``render_policy_agents`` renders it."""
         return _render_policy_document(
-            snapshot.agents, tag="project_conventions_document", block_id="policy-agents"
+            document, tag="project_conventions_document", block_id="policy-agents"
         )
 
     @staticmethod

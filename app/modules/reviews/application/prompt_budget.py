@@ -22,6 +22,7 @@ from app.modules.reviews.application.policy_snapshot import (
     RULES_DOCUMENT_PATH,
     CallManifest,
     ExecutionProfile,
+    PolicyDocument,
     PolicySnapshot,
     SourceRole,
 )
@@ -197,8 +198,15 @@ class PreSendGuardError(ValueError):
 
 def policy_tokens(snapshot: PolicySnapshot, counter: TokenCounter) -> int:
     """Measure the token count of rendered policy documents."""
-    rendered_rules = PromptBuilder.render_policy_rules(snapshot)
-    rendered_agents = PromptBuilder.render_policy_agents(snapshot)
+    return policy_document_tokens(snapshot.rules, snapshot.agents, counter)
+
+
+def policy_document_tokens(
+    rules: PolicyDocument, agents: PolicyDocument, counter: TokenCounter
+) -> int:
+    """The token count of both policy documents as rendered, before any snapshot exists."""
+    rendered_rules = PromptBuilder.render_rules_document(rules)
+    rendered_agents = PromptBuilder.render_agents_document(agents)
     return counter.count(rendered_rules) + counter.count(rendered_agents)
 
 
