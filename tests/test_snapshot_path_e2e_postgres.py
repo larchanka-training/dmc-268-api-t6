@@ -255,9 +255,16 @@ class ModelHttp:
 
     kinds: list[str]
     bodies: list[dict[str, Any]] = field(default_factory=list)
+    summaries: list[dict[str, Any]] = field(default_factory=list)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
+        if body.get("response_format", {}).get("json_schema", {}).get("name") == (
+            "ChangeSummaryOutput"
+        ):
+            # The change summary agent (#316): the attempt's last call, when a slot is left.
+            self.summaries.append(body)
+            return completion(json.dumps({"sentences": ["Adds an extra counter to a service."]}))
         self.bodies.append(body)
         kind = self.kinds.pop(0)
         if kind == "unavailable":
@@ -642,8 +649,9 @@ def _observe(
 
 
 # The trace of a v4 attempt, as built (G aligns the canon, PIPELINE_SPEC §7, with it). The
-# stage's ``context.build`` is the attempt's only one (#168 part 6); ``llm.verify`` sits in
-# the publishing transaction right before ``review.postprocess``.
+# stage's ``context.build`` is the attempt's only one (#168 part 6); the change summary
+# agent's ``llm.call`` (#316) follows the verifier's without a manifest; ``llm.verify`` sits
+# in the publishing transaction right before ``review.postprocess``.
 _SNAPSHOT_PATH_STEPS = [
     "policy.load",
     "vcs.fetch_diff",
@@ -654,6 +662,7 @@ _SNAPSHOT_PATH_STEPS = [
     "context.manifest",
     "llm.call",
     "context.manifest",
+    "llm.call",
     "llm.call",
     "llm.review_output",
     "llm.verify",
@@ -679,10 +688,14 @@ def _assert_snapshot_path(
     review_fallback: bool = False,
     version: int = 4,
     rag: bool = False,
+    summarized: bool = True,
 ) -> None:
     run_id, (review_pin, _, verifier_pin) = observed.run_id, observed.pins
     assert observed.state == ("publishing", None, attempt)
     steps = list(_SNAPSHOT_PATH_STEPS)
+    if not summarized:
+        # The attempt's four calls leave the change summary agent no slot: no call is sent.
+        del steps[steps.index("llm.review_output") - 1]
     if rag:
         # RAG is on: the stage records the index after the context build.
         steps.insert(steps.index("context.build") + 1, "context.rag")
@@ -717,6 +730,9 @@ def _assert_snapshot_path(
     # The run's one context_payloads row is that build's response (schema 2).
     assert observed.payloads == [(2, stage_build)]
     calls = [request for request, _ in observed.actions["llm.call"]]
+    if summarized:
+        *calls, summary = calls
+        assert (summary["operation"], summary["prompt_version_id"]) == ("change_summary", None)
     manifests = observed.actions["context.manifest"]
     assert [call["stage"] for call in calls] == stages
     for call, (manifest_request, manifest) in zip(calls, manifests, strict=True):
@@ -796,6 +812,11 @@ def _assert_snapshot_path(
     ]
     [(_, postprocess)] = observed.actions["review.postprocess"]
     assert postprocess["inline"] == 1
+    assert postprocess["change_summary"] == (
+        {"status": "shown", "received": 1, "shown": 1}
+        if summarized
+        else {"status": "failed", "error_code": "llm_unavailable"}
+    )
     assert [(pointer.run_id, pointer.findings_hash) for pointer in observed.queue.published] == [
         (run_id, postprocess["findings_hash"])
     ]
@@ -827,7 +848,11 @@ def test_a_retried_v4_attempt_keeps_the_snapshot_and_the_pins(env: Env) -> None:
     assert observed.outcomes == ["ack", "ack"]
     assert len(observed.queue.retries) == 1
     _assert_snapshot_path(
-        observed, attempt=2, earlier=("policy.load", "vcs.fetch_diff"), review_fallback=True
+        observed,
+        attempt=2,
+        earlier=("policy.load", "vcs.fetch_diff"),
+        review_fallback=True,
+        summarized=False,
     )
     rotated = (_ROTATED, _ROTATED_REVIEW, _ROTATED_VERIFIER)
     assert all(

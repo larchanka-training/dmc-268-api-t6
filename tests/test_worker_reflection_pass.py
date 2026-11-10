@@ -294,17 +294,41 @@ def test_process_review_run_gives_the_reflection_pass_and_the_change_summary_to_
 
 
 class _Answers:
-    """The provider: the review answer first, then a verifier answer for the shown ids."""
+    """The provider: the review answer first, then a verifier answer for the shown ids.
+
+    The change summary agent's call (#316) is answered aside, in ``summaries``.
+    """
 
     def __init__(self, review: str) -> None:
         self.review = review
         self.requests: list[ChatRequest] = []
+        self.summaries: list[ChatRequest] = []
 
     async def complete(
         self, request: ChatRequest, *, checkpoint: RunProviderCheckpoint
     ) -> ChatResponse:
         await checkpoint()
-        self.requests.append(request)
+        if request.response_schema is not None and (
+            request.response_schema.name == "ChangeSummaryOutput"
+        ):
+            self.summaries.append(request)
+            content = json.dumps({"sentences": ["Adds a compute function."]})
+        else:
+            self.requests.append(request)
+            content = self._answer(request)
+        return ChatResponse(
+            raw={"choices": [{"message": {"content": content}}]},
+            content=content,
+            finish_reason="stop",
+            model=request.profile.model,
+            prompt_tokens=10,
+            completion_tokens=20,
+            cached_tokens=0,
+            cost=None,
+            cost_currency=None,
+        )
+
+    def _answer(self, request: ChatRequest) -> str:
         if len(self.requests) == 1:
             content = self.review
         elif len(self.requests) == 2:
@@ -327,17 +351,7 @@ class _Answers:
             )
         else:
             raise AssertionError("unexpected provider call")
-        return ChatResponse(
-            raw={"choices": [{"message": {"content": content}}]},
-            content=content,
-            finish_reason="stop",
-            model=request.profile.model,
-            prompt_tokens=10,
-            completion_tokens=20,
-            cached_tokens=0,
-            cost=None,
-            cost_currency=None,
-        )
+        return content
 
 
 class _Manifests:
