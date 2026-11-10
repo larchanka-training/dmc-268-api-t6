@@ -727,6 +727,10 @@ def test_executive_change_summary_without_room_for_one_sentence_is_left_out() ->
             "Merges !\u200b7 with ~\u200bbug, %\u200bv1 and $\u200b9.",
         ),
         (
+            'Labels it ~"Needs work" for %"1.0 beta".',
+            'Labels it ~\u200b"Needs work" for %\u200b"1.0 beta".',
+        ),
+        (
             "Moves purge_stale_runs to app/jobs.py, done!",
             "Moves purge_stale_runs to app/jobs.py, done!",
         ),
@@ -746,6 +750,7 @@ def test_executive_change_summary_without_room_for_one_sentence_is_left_out() ->
         "issue-references",
         "gh-reference",
         "gitlab-references",
+        "gitlab-quoted-label-and-milestone",
         "plain",
     ],
 )

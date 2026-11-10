@@ -74,6 +74,7 @@ _CHANGE_SUMMARY_SIGNATURE = "**What changed** (автоописание, не з
 _CHANGE_SUMMARY_LINK_STARTS = re.compile(
     r"[@<&]"  # mentions, e-mail addresses, HTML tags, <autolinks>, entities, GitLab epics
     r"|[#!~%$](?=\w)"  # issue, merge request, label, milestone and snippet references
+    r"|[~%](?=\")"  # GitLab labels and milestones in quotes: ~"Needs work", %"1.0 beta"
     r"|(?<=\])(?=\()"  # inline links and images
     r"|(?<=:)(?=//)"  # URLs with a scheme
     r"|(?i:(?<=www)(?=\.))"  # www. autolinks, also after _, * or (
