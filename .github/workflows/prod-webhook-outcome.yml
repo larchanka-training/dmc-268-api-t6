@@ -2,16 +2,25 @@ name: Prod webhook outcome
 
 # Read-only lookup of what the prod webhook-worker did with one GitHub delivery (#308 Part 2): the
 # `GitHub webhook delivery <id> event=... status=...` line of its log, for the delivery id shown
-# under Recent Deliveries of the prod GitHub App. Nobody on the team has SSH to the course VPS, and
-# the line appears only after the delivery was processed, so a Deploy prod run cannot carry it.
-# The job changes nothing on the host, takes no VPS lock and needs no approval.
+# under Recent Deliveries of the prod GitHub App. Input stack=staging reads the staging project on
+# the same course VPS instead, for a delivery of the staging App (#574). Nobody on the team has SSH
+# to the course VPS, and the line appears only after the delivery was processed, so a deploy run
+# cannot carry it. The job changes nothing on the host, takes no VPS lock and needs no approval.
 on:
   workflow_dispatch:
     inputs:
       delivery_id:
-        description: "GitHub delivery id (X-GitHub-Delivery GUID from Recent Deliveries of the prod App)"
+        description: "GitHub delivery id (X-GitHub-Delivery GUID from Recent Deliveries of the prod or staging App)"
         required: true
         type: string
+      stack:
+        description: "Compose project on the course VPS to read: prod (dmc-268-api-prod) or staging (dmc-268-api-staging)"
+        required: false
+        type: choice
+        options:
+          - prod
+          - staging
+        default: prod
 
 permissions:
   contents: read
@@ -24,14 +33,21 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: Validate the delivery id
+      - name: Validate the inputs
         env:
           DELIVERY_ID: ${{ inputs.delivery_id }}
+          STACK: ${{ inputs.stack }}
         run: |
           # One lowercase GUID (as GitHub shows it) and nothing else: the id is matched against the
           # log as a fixed string and printed into the step summary.
           if [[ ! "${DELIVERY_ID}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]; then
             echo "::error::delivery_id must be one GUID (the X-GitHub-Delivery value of Recent Deliveries)" >&2
+            exit 1
+          fi
+          # The stack names the compose project read on the host: one of the two choices, nothing
+          # else.
+          if [[ "${STACK}" != prod && "${STACK}" != staging ]]; then
+            echo "::error::stack must be prod or staging" >&2
             exit 1
           fi
 
@@ -48,7 +64,8 @@ jobs:
           # Prod runs only on the shared course VPS (password auth, port 22, API behind the edge proxy
           # as api-prod). Only non-secret values go to the step outputs. This job has no Environment,
           # so STAGING_HOST comes from the repository or the organization, never from Environment
-          # staging.
+          # staging. Staging runs on the same VPS while STAGING_HOST is unset (ci-cd.yml), and the
+          # lookup uses only host and port: one target serves both stacks.
           if [[ -n "${STAGING_HOST}" ]]; then
             echo "prod deploy targets the course VPS only; GitHub variable STAGING_HOST (Terraform host) is set" >&2
             exit 1
@@ -99,6 +116,7 @@ jobs:
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
           DELIVERY_ID: ${{ inputs.delivery_id }}
+          STACK: ${{ inputs.stack }}
         with:
           host: ${{ steps.target.outputs.host }}
           port: ${{ steps.target.outputs.port }}
@@ -107,19 +125,27 @@ jobs:
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
           capture_stdout: true
-          envs: DELIVERY_ID
+          envs: DELIVERY_ID,STACK
           script: |
             set -euo pipefail
             set +o xtrace
             # Checked again on the host: the id is never interpreted, only matched as a fixed
-            # string.
+            # string, and the stack only picks one of two compose projects (deploy.sh names the
+            # project after its app dir, /opt/dmc-268-api-<stack>).
             if [[ ! "${DELIVERY_ID}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]; then
               echo "delivery_id must be one GUID" >&2
               exit 1
             fi
-            ids="$(docker ps -aq --no-trunc --filter label=com.docker.compose.project=dmc-268-api-prod --filter label=com.docker.compose.service=webhook-worker)"
+            case "${STACK}" in
+              prod | staging) project="dmc-268-api-${STACK}" ;;
+              *)
+                echo "stack must be prod or staging" >&2
+                exit 1
+                ;;
+            esac
+            ids="$(docker ps -aq --no-trunc --filter "label=com.docker.compose.project=${project}" --filter label=com.docker.compose.service=webhook-worker)"
             if [[ -z "${ids}" ]]; then
-              echo "no webhook-worker container in dmc-268-api-prod" >&2
+              echo "no webhook-worker container in ${project}" >&2
               exit 1
             fi
             # The worker logs through the root logger to stderr; one line per processed delivery.
@@ -141,14 +167,20 @@ jobs:
       - name: Show the outcome
         env:
           DELIVERY_ID: ${{ inputs.delivery_id }}
+          STACK: ${{ inputs.stack }}
           LOOKUP_STDOUT: ${{ steps.lookup.outputs.stdout }}
         run: |
           # The SSH action appends its own banner to stdout: keep only the outcome lines. Backticks
           # are dropped so log text cannot close the code fence of the summary.
           lines="$(printf '%s\n' "${LOOKUP_STDOUT}" | grep -F -- "GitHub webhook delivery ${DELIVERY_ID} " | tr -d '`' || true)"
+          # The heading names the stack read; a prod lookup keeps the summary it had before #574.
+          title=Prod
+          if [[ "${STACK}" == staging ]]; then
+            title=Staging
+          fi
           # shellcheck disable=SC2016  # Markdown code spans and fence, not shell
           {
-            echo "### Prod webhook outcome"
+            echo "### ${title} webhook outcome"
             echo
             printf -- '- Delivery: `%s`\n' "${DELIVERY_ID}"
             if [[ -z "${lines}" ]]; then
