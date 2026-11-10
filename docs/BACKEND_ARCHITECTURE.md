@@ -134,7 +134,7 @@ Application зависит от узких интерфейсов, сгрупп�
 | `CodeIndexEnabler` | `repositories` | запрос полной сборки индекса (создание строки состояния или новое поколение очищенного индекса, с маркером пробуждения) при включении RAG на сессии и в транзакции вызывающего use case; реализация — в `code_index.infrastructure` |
 | `CodeIndexStore`, `CodeIndexUnitOfWork` | `code_index` | индекс графа RAG v1 по `repository_id` (fenced-запись, публикация, чтение, очистка, сборка мусора) и граница транзакции модуля; реализация — в `code_index.infrastructure` |
 | `CodeIndexMaintenance`, `CodeIndexMaintenanceUnitOfWork` | `code_index` | кандидаты leader-задач индекса без `repository_id` (TTL-очистка, сборка мусора, запросы пробуждения, сверка с HEAD, кандидаты повторного включения и очистки для сходимости, #143); каждый шаг по репозиторию идёт через `CodeIndexStore`; реализация — в `code_index.infrastructure` |
-| `PaymentGateway` | `billing` | создание и подтверждение оплаты |
+| `PaymentGateway` | `billing` | вызовы Stripe (Customer, Checkout, подписка, счета, возвраты, сверка, проверка вебхуков) вне транзакции БД с `Idempotency-Key`; баланс в `credit_ledger`, а не в Stripe ([ADR 0002 §10](adr/0002-billing-monetization.md#10-stripe)) |
 | `UnitOfWork` | общий контракт; расширение в использующем модуле | граница транзакции и доступ к интерфейсам repositories |
 | `Clock`, `IdGenerator` | `common` | детерминированные тесты и технические значения |
 
@@ -272,7 +272,7 @@ app/
     billing/
       domain/
       application/
-      infrastructure/          # Payment/CreditLedger models, repos, Stripe implementation
+      infrastructure/          # Payment/CreditLedger models, repos, Stripe implementation (ADR 0002)
     analytics/
       domain/
       application/
@@ -326,8 +326,19 @@ Application управляет транзакцией через [UnitOfWork](..
 [`SqlAlchemyUsageLedger.record`](../app/modules/analytics/infrastructure/usage_ledger.py):
 после завершения вызова провайдера он записывает `usage_events` в собственной короткой
 транзакции (`session_factory.begin()`), чтобы оплаченная стоимость сохранилась при
-rollback основного run. Исключение касается только этого ledger, не обычных
-repositories; транзакция по-прежнему не охватывает сетевой вызов.
+rollback основного run. Второе узкое исключение (план, с #371,
+[ADR 0002 §3.3](adr/0002-billing-monetization.md#33-момент-и-формула-списания)):
+единственная точка записи модуля `billing` пишет только строки списаний run, их сторно
+и возвраты по итогу run (`credit_ledger`) и снятие его удержания, своей короткой
+транзакцией сразу после `usage_events`, после commit конечного состояния run или позже
+из leader-задачи досписания, идемпотентно; строки, ключи и механика удержаний в #371.
+Удержание, которое пишется при claim (гейт 1), поднимается или снимается на гейте 2
+и снимается при выключении `billing_enforcement`, пишет обычный use case (claim,
+гейт 2, выключение флага) в собственной транзакции этого use case через порт модуля
+`billing`; истечение грантов тоже пишет обычный use case. В исключение они не
+входят. Исключения не распространяются на обычные repositories и не разрешают
+сетевых вызовов внутри транзакции БД.
+<!-- SYNC: то же исключение в AGENTS.md, .agents/rules/backend.md §3 п. 3 (авторитетный), здесь и в ADR 0002 §3.3; менять все четыре места вместе -->
 
 План выполнения worker:
 
@@ -345,6 +356,13 @@ repositories; транзакция по-прежнему не охватывае
 
 Вызовы GitHub и Stripe также не включаются в длительную DB-транзакцию. Их retries,
 idempotency и reconciliation — часть соответствующего use case, не repository.
+
+Модуль `billing` (план, [ADR 0002](adr/0002-billing-monetization.md)): правила
+списаний, гейтов, удержаний и порога расхода, флаг `billing_enforcement` и порядок
+внедрения, роли и запись об исключении участника задаёт ADR 0002 (§3.3, §5.2, §8,
+§11, §16), механику журнала задаёт #371; здесь они не пересказываются. Этот документ
+добавляет к ним только порт `PaymentGateway` (таблица интерфейсов выше) и второе
+исключение короткой транзакции выше.
 
 ### Worker и очередь (#34)
 
