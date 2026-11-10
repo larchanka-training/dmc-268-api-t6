@@ -68,6 +68,12 @@ _EXECUTIVE_BLOCK_CHAR_LIMIT = 1500
 _CHECKLIST_NAME_LIMITS = (5, 3, 1, 0)
 # CVS §8.2: the change summary agent's text is a signed description, never a finding.
 _CHANGE_SUMMARY_SIGNATURE = "**What changed** (автоописание, не замечание):"
+# Its input is the PR's own title and diff, and no verifier checks it: a backslash keeps the
+# characters of links, images, HTML and entities literal, and a zero-width space after "@",
+# in "://" and after "www" keeps mentions and autolinks from forming.
+_CHANGE_SUMMARY_MARKUP = re.compile(r"[\\\[\]<>&]")
+_CHANGE_SUMMARY_LINK_START = re.compile(r"@|(?<=:)(?=//)|(?i:(?<=\bwww)(?=\.))")
+_ZERO_WIDTH_SPACE = "\u200b"
 _DISPLAYED_NAME_CHARS = 120
 # CVS §8.2: such a name is unusable or unproven, so only its reason and count are public.
 _COUNT_ONLY_REASONS = frozenset({"unsupported_path", "identity_unresolved"})
@@ -668,7 +674,9 @@ def _executive_block(
         "## Executive summary\n\n"
         f"**Verdict:** {run_verdict or unavailable_label} · **Risk Score:** {risk}"
     )
-    sentences = tuple(_hide_names(sentence.strip(), unnamed_paths) for sentence in change_summary)
+    sentences = tuple(
+        _plain_text(_hide_names(sentence.strip(), unnamed_paths)) for sentence in change_summary
+    )
     block = verdict_line
     for shown in range(len(sentences), -1, -1):
         header = (
@@ -686,6 +694,14 @@ def _executive_block(
             if len(block) <= _EXECUTIVE_BLOCK_CHAR_LIMIT:
                 return block, shown
     return block, 0
+
+
+def _plain_text(text: str) -> str:
+    """The agent's sentence as literal text: no mention, link, image, HTML or entity."""
+    escaped = _CHANGE_SUMMARY_MARKUP.sub(lambda match: f"\\{match.group()}", text)
+    return _CHANGE_SUMMARY_LINK_START.sub(
+        lambda match: f"{match.group()}{_ZERO_WIDTH_SPACE}", escaped
+    )
 
 
 def _overview_block(

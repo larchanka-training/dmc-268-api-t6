@@ -697,3 +697,31 @@ def test_executive_change_summary_without_room_for_one_sentence_is_left_out() ->
 
     assert result.executive_block == plain.executive_block
     assert result.change_summary_shown == 0
+
+
+@pytest.mark.parametrize(
+    ("sentence", "shown"),
+    [
+        ("Pings @octo-org/admins about it.", "Pings @\u200bocto-org/admins about it."),
+        (
+            "Links [the docs](https://evil.test/x).",
+            "Links \\[the docs\\](https:\u200b//evil.test/x).",
+        ),
+        (
+            "Adds ![x](http://t.test/p.png) to it.",
+            "Adds !\\[x\\](http:\u200b//t.test/p.png) to it.",
+        ),
+        ("Adds <img src=x> here.", "Adds \\<img src=x\\> here."),
+        ("Adds &#64;octo here.", "Adds \\&#64;octo here."),
+        ("Moves the docs to WWW.evil.test now.", "Moves the docs to WWW\u200b.evil.test now."),
+        ("Keeps a \\[ escape.", "Keeps a \\\\\\[ escape."),
+        ("Moves purge_stale_runs to app/jobs.py.", "Moves purge_stale_runs to app/jobs.py."),
+    ],
+    ids=["mention", "link", "image", "html", "entity", "www", "backslash", "plain"],
+)
+def test_executive_change_summary_shows_no_mention_link_image_or_markup(
+    sentence: str, shown: str
+) -> None:
+    result = _process_snapshots([_text_change()], change_summary=(sentence,))
+
+    assert result.executive_block.endswith(f"{_SIGNED}{shown}")
