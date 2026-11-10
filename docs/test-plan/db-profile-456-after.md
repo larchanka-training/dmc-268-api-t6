@@ -71,11 +71,24 @@ SQL сократился во всех парах. Время вне SQL у св
 | 1 | Совместно: индекс `ix_usage_events_run_totals` и один запрос прогонов по дню и статусу с `LATERAL` вместо трёх коррелированных подзапросов | `_status_counts` + `_usage_and_duration` + `_days: runs` → `_runs` | 708,6 → 128,1; 578,0 → 113,0; 174,8 → 46,1 | у `_usage_and_duration` три подзапроса по `ix_usage_events_run_created` с чтением строк таблицы, у каждого `loops=3613`, JIT 280,6 мс, выполнение 593,1 мс, 49 764 буфера → у `_runs` один `Index Only Scan using ix_usage_events_run_totals`, `loops=3613`, `Heap Fetches: 0`, без JIT, 141,5 мс, 17 356 буферов |
 | 2 | Совместно: индекс `ix_findings_published_run_id` и находки по дню, серьёзности и категории одним запросом | `_finding_counts` + `_days: categories` → `_finding_counts` | 535,9 → 111,7; 462,2 → 89,3; 152,8 → 34,2 | в каждом из двух запросов `Seq Scan on findings` на 127 375 строк, 287,9 и 317,1 мс, 14 675 и 14 667 буферов → `Index Only Scan using ix_findings_published_run_id`, `loops=4516`, `Heap Fetches: 0`, 151,6 мс, 17 563 буфера |
 | 3 | Совместно: индексы `ix_findings_published_run_id` и `ix_context_payloads_summary_only_stop`, `SET LOCAL jit = off` | `_terminal_heads` | 805,3 → 272,3; 644,0 → 226,1; 197,2 → 92,0 | `Seq Scan on findings` (127 375 строк) и `Seq Scan on context_payloads` (отброшено 51 580 строк), 38 854 буфера → `Index Only Scan` по обоим индексам (`loops=2394` и 952 строки за 0,5 мс), 34 251 буфер; JIT — строка 4 |
-| 4 | `SET LOCAL jit = off` в транзакции чтения сводки | `_terminal_heads`, до слияния также `_usage_and_duration` | см. строки 1 и 3 | JIT «до»: 477,1 из 895,5 мс выполнения `_terminal_heads` и 280,6 из 593,1 мс у `_usage_and_duration`. В плане «после» у `_terminal_heads` JIT остался (370,5 из 496,9 мс): команда выполняет `EXPLAIN` отдельным соединением, вне транзакции use case, и `SET LOCAL` туда не попадает. В замеренном вызове `SET LOCAL` отправляется в транзакции чтения перед запросами. `test_the_summary_reads_without_jit_and_leaves_the_pooled_connection_as_it_was` проверяет, что он идёт первым и что значение не остаётся на соединении пула; что JIT выключен во время самих запросов, тест не проверяет |
+| 4 | `SET LOCAL jit = off` в транзакции чтения сводки | `_terminal_heads`, до слияния также `_usage_and_duration` | отдельный замер, JIT вкл. → выкл.: `_terminal_heads` 97,72 → 61,87; пять `SELECT` сводки 181,71 → 148,17 | JIT «до»: 477,1 из 895,5 мс выполнения `_terminal_heads` и 280,6 из 593,1 мс у `_usage_and_duration`. Отдельный замер (ниже): у `_terminal_heads` JIT 81,09 из 97,72 мс; с `jit = off` план тот же, без JIT, выполнение 61,87 мс ([фрагменты](#summary-30d-_terminal_heads-с-jit-и-без)). В плане пары 1 «после» JIT остался (370,5 из 496,9 мс): команда выполняет `EXPLAIN` отдельным соединением, вне транзакции use case, и `SET LOCAL` туда не попадает. В замеренном вызове `SET LOCAL` отправляется в транзакции чтения перед запросами. `test_the_summary_reads_without_jit_and_leaves_the_pooled_connection_as_it_was` проверяет, что он идёт первым и что значение не остаётся на соединении пула; что JIT выключен во время самих запросов, тест не проверяет |
 | 5 | Совместно: индекс `ix_run_actions_postprocess_run_index` и идентификаторы одним массивом `= ANY(…)` вместо около 2 000 параметров `IN` | `load_review_results` | 500,0 → 292,7; 403,4 → 165,6; 115,2 → 72,1 | `Parallel Seq Scan on run_actions`, фильтр отбрасывает 119 562 строки на процесс, 210,5 мс, 12 902 буфера, из них 12 669 прочитано не из кэша → `Bitmap Index Scan on ix_run_actions_postprocess_run_index`, 34,6 мс, 1 896 буферов |
 | 6 | Сохранённые результаты summary-only голов не читаются | запасное чтение диффов в `load_review_results` | 10,9 → —; 11,2 → —; 4,3 → — | запрос больше не отправляется: в этих данных все головы окна без сохранённого результата — summary-only. Вердикта у таких голов нет ни «до», ни «после» (`test_a_summary_only_head_has_no_verdict_and_its_result_is_not_read`) |
 | 7 | Курсор списка сравнением строк `(created_at, id) < (…)` | `list_runs` в `runs by cursor` | 115,9 → 34,7; 105,8 → 21,2; 32,4 → 18,9 | `Index Scan Backward using ix_runs_created_id` идёт от новейшей строки, фильтр по `OR` отбрасывает 27 437 строк, 88,5 мс, 20 511 буферов → `Index Cond: (ROW(created_at, id) < ROW(…))`, 8,4 мс, 709 буферов |
 | 8 | Совместно: индексы `ix_usage_events_run_totals` и `ix_context_payloads_summary_only_stop` в списке | `list_runs` в `runs first page`; та же часть плана у курсора | 65,2 → 34,2; 58,4 → 22,9; 15,2 → 9,2 | `Seq Scan on context_payloads` (52 532 строки) и три `Bitmap Heap Scan on usage_events` на каждую строку страницы, 40,2 мс, 1 753 буфера → `Index Only Scan` по обоим индексам, `Heap Fetches: 0`, 8,7 мс, 674 буфера |
+
+Изменение 4 команда отдельно не измеряет: её `EXPLAIN` идёт мимо `SET LOCAL`, а в вызове изменения 3 и 4 действуют вместе. Поэтому JIT снят отдельно, 10.11.2026, на коде ветки и на базе полного объёма, которую создала команда с `--keep` (load 2–3). Запросы — те, что use case `summary 30d` отправил в тёплом вызове, с теми же параметрами (их текст пишет `--explain-out`). В одном соединении перед каждым `EXPLAIN (ANALYZE, BUFFERS)` ставится `SET jit = on` или `SET jit = off`, по три раза на значение, порядок чередуется; ниже — медианы времени выполнения, мс:
+
+| Запрос `summary 30d` | JIT вкл. | из них JIT | JIT выкл. |
+| --- | --- | --- | --- |
+| `_runs` | 38,34 | — | 38,98 |
+| `_terminal_heads` | 97,72 | 81,09 | 61,87 |
+| `load_review_results` | 6,91 | — | 6,69 |
+| `_finding_counts` | 38,45 | — | 40,35 |
+| `_workspaces` | 0,29 | — | 0,28 |
+| Сумма | 181,71 | | 148,17 |
+
+JIT включается только у `_terminal_heads`; у остальных запросов время с ним и без него совпадает в пределах 2 мс. У `summary 30d repo` и списка JIT не включается ни в одном запросе (тот же замер).
 
 `Buffers` одного запроса выросли только у `_finding_counts` (14 675 → 17 563). Вложенный цикл по `Index Only Scan` на 4 516 прогонов окна трогает больше страниц, чем один проход по таблице, но все они в кэше. При этом он заменяет два запроса, которые вместе читали 29 342 буфера и всю таблицу находок.
 
@@ -206,7 +219,7 @@ p95 «после» при load 50, 28 и 5,6: `runs first page` — 102,96, 66,8
 
 ## Планы «после»
 
-Пара 1, сценарий `summary 30d` и обе страницы списка. Оставлены верхний узел, его `Buffers`, узлы доступа к таблицам, которых касаются изменения, и итоговые строки; оценки стоимости убраны. Полные планы с текстом SQL пишет `--explain-out`. Строка `JIT` в плане `_terminal_heads` — от отдельного соединения, которым команда выполняет `EXPLAIN` ([изменение 4](#изменения-и-их-цифры)).
+Пара 1, сценарий `summary 30d` и обе страницы списка. Оставлены верхний узел, его `Buffers`, узлы доступа к таблицам, которых касаются изменения, и итоговые строки; оценки стоимости убраны. Полные планы с текстом SQL пишет `--explain-out`. Строка `JIT` в плане `_terminal_heads` — от отдельного соединения, которым команда выполняет `EXPLAIN` ([изменение 4](#изменения-и-их-цифры-ac3)); план без JIT, как в замеренном вызове, — в [отдельном фрагменте](#summary-30d-_terminal_heads-с-jit-и-без).
 
 ### `summary 30d`: `_runs`
 
@@ -248,6 +261,40 @@ Planning Time: 37.840 ms
 JIT:
   Timing: Generation 42.115 ms (Deform 20.843 ms), Inlining 0.000 ms, Optimization 13.208 ms, Emission 315.203 ms, Total 370.525 ms
 Execution Time: 496.928 ms
+```
+
+### `summary 30d`: `_terminal_heads` с JIT и без
+
+Отдельный замер 10.11.2026 (метод — под [таблицей изменений](#изменения-и-их-цифры-ac3)), последний из трёх повторов, одно соединение, те же текст и параметры запроса. Узлы плана те же; без JIT выполнение короче на 30 мс.
+
+`SET jit = on`:
+
+```text
+Nested Loop Left Join  (actual time=54.349..88.026 rows=6214 loops=1)
+  Buffers: shared hit=34256
+                                ->  Parallel Seq Scan on code_changes  (actual time=23.231..26.068 rows=12167 loops=3)
+                ->  Index Only Scan using ix_context_payloads_summary_only_stop on context_payloads  (actual time=0.025..0.131 rows=952 loops=1)
+                      Heap Fetches: 0
+  ->  Index Only Scan using ix_findings_published_run_id on findings  (actual time=0.002..0.002 rows=2 loops=2395)
+        Heap Fetches: 0
+Planning Time: 1.724 ms
+JIT:
+  Timing: Generation 8.401 ms (Deform 4.053 ms), Inlining 0.000 ms, Optimization 3.147 ms, Emission 66.891 ms, Total 78.438 ms
+Execution Time: 94.104 ms
+```
+
+`SET jit = off`:
+
+```text
+Nested Loop Left Join  (actual time=32.721..63.405 rows=6214 loops=1)
+  Buffers: shared hit=28056
+                                ->  Parallel Seq Scan on code_changes  (actual time=0.002..1.655 rows=12167 loops=3)
+                ->  Index Only Scan using ix_context_payloads_summary_only_stop on context_payloads  (actual time=0.061..0.268 rows=952 loops=1)
+                      Heap Fetches: 0
+  ->  Index Only Scan using ix_findings_published_run_id on findings  (actual time=0.002..0.002 rows=2 loops=2395)
+        Heap Fetches: 0
+Planning Time: 1.587 ms
+Execution Time: 64.322 ms
 ```
 
 ### `summary 30d`: `load_review_results`
