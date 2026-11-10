@@ -15,7 +15,9 @@ from typing import Any, NoReturn
 from uuid import UUID
 
 import pytest
+from fastapi import FastAPI
 from fastapi.routing import APIRoute, iter_route_contexts
+from pydantic import BaseModel
 from starlette.types import Message, Scope
 
 from app.bootstrap import auth_api
@@ -29,6 +31,11 @@ from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import (
     get_github_webhook_receipt_uow_factory,
     get_repository_settings,
+)
+from app.common.infrastructure.request_body_limit import (
+    RequestBodyLimitMiddleware,
+    allow_request_body,
+    request_body_limit,
 )
 from app.main import app, get_github_webhook_secret
 from app.modules.auth.application.scope import AuthScope
@@ -71,7 +78,11 @@ class _Answer:
 
 
 def _call(
-    method: str, path: str, chunks: list[bytes], headers: Mapping[str, str] | None = None
+    method: str,
+    path: str,
+    chunks: list[bytes],
+    headers: Mapping[str, str] | None = None,
+    target: FastAPI = app,
 ) -> _Answer:
     """Send ``chunks`` to ``app`` one ``http.request`` at a time and count what it reads."""
     scope: Scope = {
@@ -111,7 +122,7 @@ def _call(
         elif message["type"] == "http.response.body":
             body.extend(message.get("body", b""))
 
-    asyncio.run(app(scope, receive, send))
+    asyncio.run(target(scope, receive, send))
     return _Answer(status, content_type, bytes(body), reads)
 
 
@@ -345,6 +356,17 @@ def _routes_with_a_parsed_body() -> list[tuple[str, str]]:
     )
 
 
+def _body_limit(method: str, path: str) -> int:
+    [limit] = [
+        request_body_limit(route.original_route)
+        for route in iter_route_contexts(app.routes)
+        if isinstance(route.original_route, APIRoute)
+        and route.path_format == path
+        and method in (route.methods or ())
+    ]
+    return limit
+
+
 ROUTES_WITH_A_PARSED_BODY = _routes_with_a_parsed_body()
 
 
@@ -365,7 +387,7 @@ def test_the_route_walk_finds_the_five_routes_with_a_body() -> None:
 def test_every_route_with_a_parsed_body_answers_the_contract_413(method: str, path: str) -> None:
     url = re.sub(r"\{[^}]+\}", str(REPOSITORY_ID), path)
 
-    answer = _call(method, url, [b"x" * 65537, b"x"])
+    answer = _call(method, url, [b"x" * (_body_limit(method, path) + 1), b"x"])
 
     assert (answer.status, answer.reads) == (413, 1)
     _validator_for(method.lower(), path, "413").validate(answer.json())
@@ -383,3 +405,54 @@ def test_every_route_with_a_parsed_body_declares_413_in_the_contract(
     method: str, path: str
 ) -> None:
     assert "413" in _spec()["paths"][path][method.lower()]["responses"]
+
+
+class _Probe(BaseModel):
+    text: str
+
+
+def _probe_app(limit: int) -> FastAPI:
+    probe = FastAPI()
+    probe.add_middleware(RequestBodyLimitMiddleware)
+
+    @probe.post("/probe")
+    @allow_request_body(limit)
+    async def endpoint(body: _Probe) -> dict[str, int]:
+        return {"length": len(body.text)}
+
+    return probe
+
+
+ONE_HUNDRED_KIB = 100 * 1024
+
+
+@pytest.mark.parametrize(
+    ("chunks", "headers", "status", "reads"),
+    [
+        pytest.param(
+            [b'{"text": "', b"x" * (ONE_HUNDRED_KIB - 12), b'"}'],
+            {"content-type": "application/json"},
+            200,
+            3,
+            id="at-its-limit",
+        ),
+        pytest.param(
+            [b"x" * (ONE_HUNDRED_KIB + 1)],
+            {"content-length": str(ONE_HUNDRED_KIB + 1)},
+            413,
+            0,
+            id="declared-one-byte-over",
+        ),
+        pytest.param(
+            [b"x" * ONE_HUNDRED_KIB, b"x", b"x"], {}, 413, 2, id="chunked-crossing-on-the-second"
+        ),
+    ],
+)
+def test_a_route_with_its_own_limit_reads_up_to_it_and_no_further(
+    chunks: list[bytes], headers: dict[str, str], status: int, reads: int
+) -> None:
+    answer = _call("POST", "/probe", chunks, headers, target=_probe_app(ONE_HUNDRED_KIB))
+
+    assert (answer.status, answer.reads) == (status, reads)
+    if status == 200:
+        assert answer.json() == {"length": ONE_HUNDRED_KIB - 12}
