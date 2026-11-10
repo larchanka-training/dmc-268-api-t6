@@ -646,7 +646,7 @@ def test_legacy_technical_only_change_is_not_summary_only_no_reviewable_files() 
         None,
         omission_reason=OmissionReason.TOO_LARGE,
     )
-    outcome = _run((too_large,), files_changed=1)
+    outcome = _run((too_large,), files_changed=1, version="v2")
 
     assert outcome.skipped is None
     assert outcome.result is True
@@ -663,8 +663,10 @@ def _builds(trace: Trace) -> list[dict[str, Any]]:
 
 
 def test_a_second_attempt_of_residual_files_keeps_no_reviewable_files() -> None:
+    # A legacy run (≤ v3, CVS §8.3); on the snapshot path the same set is no-text partial
+    # (test_a_second_attempt_without_text_stays_partial_without_summary_only).
     missing = VcsFile("src/note.txt", "modified", _TEXT_BLOB, None, 3, 0, 3, None)
-    outcome = _run((missing,), files_changed=1, attempts=2)
+    outcome = _run((missing,), files_changed=1, attempts=2, version="v2")
     builds = _builds(outcome.trace)
 
     assert [item["reason"] for item in builds] == ["no_reviewable_files", "no_reviewable_files"]
@@ -708,8 +710,10 @@ def test_a_second_attempt_over_the_line_limit_stays_diff_too_large() -> None:
 def test_residual_unreviewable_file_makes_no_model_call() -> None:
     # Complete inventory, not a proven exclusion, not a legacy technical skip: the patch
     # is missing and the blob is ordinary text, so the builder's reason is no_reviewable_files.
+    # A legacy run (≤ v3, CVS §8.3); on the snapshot path the same set is no-text partial
+    # (test_a_snapshot_run_without_text_is_partial_without_summary_only_or_a_model_call).
     missing = VcsFile("src/note.txt", "modified", _TEXT_BLOB, None, 3, 0, 3, None)
-    outcome = _run((missing,), files_changed=1)
+    outcome = _run((missing,), files_changed=1, version="v2")
     build = _context(outcome.trace)
 
     assert outcome.skipped is None
@@ -880,8 +884,10 @@ def test_a_masked_text_file_stays_excluded_for_each_summary_only_reason() -> Non
         ),
         ((missing, masked, lock), 3, "no_reviewable_files", {"missing_patch": 1}),
     )
+    # A legacy run (≤ v3, CVS §8.3): on the snapshot path the last case is no-text partial
+    # (tests/test_summary_only_masked_publication_postgres.py).
     for files, files_changed, reason, reasons in cases:
-        outcome = _run(files, files_changed=files_changed)
+        outcome = _run(files, files_changed=files_changed, version="v2")
         build = _context(outcome.trace)
         assert build["reason"] == reason, reason
         assert build["coverage"]["status"] == "partial"
