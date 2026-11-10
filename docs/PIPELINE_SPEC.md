@@ -132,9 +132,9 @@ snapshot-путь (v4 и v5, `SNAPSHOT_REVIEW_PROMPT_VERSIONS`) описываю
 - cache hit: то же без первой группы `llm.call…`.
 - retry с сохранённым diff: без `vcs.fetch_diff`.
 - snapshot-путь (v4, v5), cache miss: `policy.load` → `vcs.fetch_diff` → `context.build` → `context.rag` → `context.manifest` → `llm.call…` (conventions) → `llm.repo_conventions` → `context.manifest` → `llm.call…` (ревью) → `context.manifest` → `llm.call…` верификатора (`operation: verification`; только при непустом наборе кандидатов) → `llm.call…` агента «что изменилось» (`operation: change_summary`, без `context.manifest`; нет записи, если шлюз отказал до отправки); затем в транзакции перехода в `publishing` (T8) — `llm.review_output` → `llm.verify` (только если verifier вызывался или его ответ взят из кэша ответа модели) → `review.postprocess`; затем `github.publish_review…`, `gitlab.publish_review…` или `bitbucket.publish_review…`. `context.rag` — при том же условии, что у legacy. `context.manifest` пишется перед каждым `llm.call`, кроме retry: retry переиспользует строку manifest своего вызова. Cache hit — без `context.manifest` и `llm.call…` conventions; retry с сохранённым diff — без `vcs.fetch_diff`.
-- snapshot-путь (v4, v5), backend none без вызовов модели (#130 F5, абзац о backend none ниже в этом разделе): `policy.load` → `vcs.fetch_diff` → `context.build` (`status: no_reviewable_text`) → `review.postprocess` → `github.publish_review…`, `gitlab.publish_review…` или `bitbucket.publish_review…`.
+- snapshot-путь (v4, v5), backend none и no-text partial без вызовов модели (#130 F5, #497 ч.3, абзацы о них ниже в этом разделе): `policy.load` → `vcs.fetch_diff` → `context.build` (`status: no_reviewable_text`, coverage `none` или `partial`) → `review.postprocess` → `github.publish_review…`, `gitlab.publish_review…` или `bitbucket.publish_review…`.
 - skip (`no_changes` / `all_changes_ignored`, включая доказанный empty-only/binary-only при полном inventory): попытка заканчивается на `context.build` до conventions, затем `skipped` (T19); если `all_changes_ignored` вернула сама сборка, а не проверка до неё, после `context.build` при том же условии ещё пишется `context.rag`.
-- summary-only (больше 3 000 разрешённых строк, неполный список файлов или нет проверяемых файлов): стадия останавливается до RAG, conventions, ревью и verifier. Trace: `policy.load` → `vcs.fetch_diff` → `context.build` (`status: summary_only`, `reason`: `diff_too_large` | `diff_inventory_incomplete` | `no_reviewable_files`, `blocks: []`, coverage `partial`) → `review.postprocess` → `github.publish_review…` или `gitlab.publish_review…`. Записей `llm.call` нет. Ровно 3 000 разрешённых строк при полном списке остаётся обычным ревью.
+- summary-only (больше 3 000 разрешённых строк, неполный список файлов или нет проверяемых файлов; на snapshot path `no_reviewable_files` остаётся только у truncated patch с сохранившимися строками, остальное — no-text partial выше): стадия останавливается до RAG, conventions, ревью и verifier. Trace: `policy.load` → `vcs.fetch_diff` → `context.build` (`status: summary_only`, `reason`: `diff_too_large` | `diff_inventory_incomplete` | `no_reviewable_files`, `blocks: []`, coverage `partial`) → `review.postprocess` → `github.publish_review…` или `gitlab.publish_review…`. Записей `llm.call` нет. Ровно 3 000 разрешённых строк при полном списке остаётся обычным ревью.
 - `tool` у `llm.call` стадию не различает: в пределах попытки `llm.call` до `llm.repo_conventions` — conventions, между ним и verifier — ревью, вызов verifier — `verification`; последним на snapshot-пути может идти агент «что изменилось» (`change_summary`, §4.5). Без кандидатов агент идёт сразу за ревью, поэтому его вызов от вызова ревью отличает только `operation`, а не порядок. В `run.step` для `llm.call` дополнительно `llmOperation: conventions | review` (#170 ч.2); `verification` и `change_summary` в SSE не попадают: вызов агента приходит без `llmOperation`, как вызов verifier. В `request` той же записи — `operation`: `conventions | review | verification | change_summary` (legacy `stage` в таблице ниже — цель #107). Записи `llm.call` best-effort: при сбое записи вызов остаётся без строки.
 - `attempt` в NOTIFY/SSE — `runs.attempt` в момент вставки строки (#170 ч.2). У `llm.call`, записанного в той же попытке, это совпадает с `request.attempt`: claim (T4) делает `attempt = attempt + 1 … RETURNING`, значение идёт через `ClaimedAttempt` и `RunCallContext(attempt=…)` в запись вызова. Поздняя запись действия предыдущей попытки после следующего claim берёт уже увеличенный `runs.attempt`. Каждую попытку открывает `policy.load`.
 - `try` у `github.publish_review` / `gitlab.publish_review` / `bitbucket.publish_review` — счётчик цикла публикации, а не попытка Run.
@@ -229,10 +229,11 @@ fallback/null, тогда как ранее опубликованное GitHub-
 историческая перепубликация не выполняется.
 
 Нового публичного coverage DTO, LLM-полей, result_id или таблиц результата нет.
-Полный #107, общий run-owned file_omissions #130/#168 и zero-LLM lifecycle
-no-text partial остаются целевыми, а не активированными #213.
+Полный #107 и общий run-owned file_omissions #130/#168 остаются целевыми, а не
+активированными #213.
 Zero-LLM lifecycle none активен на snapshot path с #130 F5; legacy (≤ v3) для того же
-inventory по-прежнему вызывает модель.
+inventory по-прежнему вызывает модель. Zero-LLM no-text partial активен на snapshot path
+с #497 ч.3; legacy (≤ v3) публикует тот же набор как summary-only `no_reviewable_files`.
 Summary-only с нулём вызовов модели — текущий жизненный цикл, не будущий:
 стадия останавливается до RAG, conventions, ревью и verifier и публикует
 `NoModelAnswer`; coverage partial, verdict null.
@@ -281,8 +282,10 @@ none с вызовом модели, как с #283. Too_large сверх 3 000 
 Если нет анализируемого текста, есть incomplete (возможно E/T), inventory полный,
 relevant counters известны и counted allowed ≤3 000, целевой исход — backend partial:
 summaryOnly=false, findings=[], verdict=null, reviewed_changed_lines=0; исходная
-неизвестная статистика остаётся null. Пока маршрута no-text partial нет, этот набор
-публикуется как summary-only `no_reviewable_files`, coverage partial, 0 LLM. Затем
+неизвестная статистика остаётся null. На snapshot path (v4+) маршрут построен с #497 ч.3:
+после обоих триггеров summary-only stage пишет `context.build` со `status: no_reviewable_text`
+и coverage partial, как в маршруте none выше; legacy (≤ v3) публикует этот набор как
+summary-only `no_reviewable_files`, coverage partial, 0 LLM. Затем
 T8/T14 → succeeded/neutral. Оба
 триггера summary-only имеют приоритет: unknown inventory/counters или >3 000
 counted allowed, в том числе missing-patch-only 4 000 строк. Все backend-ветки
