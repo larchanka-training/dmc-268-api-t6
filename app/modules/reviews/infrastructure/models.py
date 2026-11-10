@@ -44,6 +44,10 @@ from app.common.infrastructure.db.enums import (
     RunState,
     SeverityThreshold,
 )
+from app.modules.reviews.application.rules_simulation import (
+    RulesSimulationMode,
+    RulesSimulationStatus,
+)
 from app.modules.reviews.application.run_trigger import RunTrigger
 
 
@@ -528,3 +532,57 @@ class ContextManifest(Base):
     )
     schema_version: Mapped[int] = mapped_column(INTEGER, nullable=False, server_default=text("1"))
     created_at: Mapped[datetime] = timestamp_column()
+
+
+class RulesSimulation(Base):
+    """A rules playground simulation (#311): pasted code reviewed under pasted rules.
+
+    No Run, no pull request: the row holds the input until a worker reviews it. A user has
+    at most one ``queued`` or ``running`` simulation; one not finished 10 minutes after
+    ``created_at`` is failed with ``deadline_exceeded`` when it is next read.
+    """
+
+    __tablename__ = "rules_simulations"
+    __table_args__ = (
+        CheckConstraint(
+            "(status IN ('succeeded', 'failed')) = (finished_at IS NOT NULL)",
+            name="ck_rules_simulations_finished",
+        ),
+        CheckConstraint(
+            "(status = 'failed') = (error_code IS NOT NULL)",
+            name="ck_rules_simulations_error_code",
+        ),
+        CheckConstraint(
+            "octet_length(content) <= 65536 AND octet_length(rules_md) <= 65536",
+            name="ck_rules_simulations_input_size",
+        ),
+        Index(
+            "uq_rules_simulations_one_active_per_user",
+            "github_user_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+        Index("ix_rules_simulations_repository_id", "repository_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    repository_id: Mapped[UUID] = mapped_column(
+        ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False
+    )
+    github_user_id: Mapped[int] = mapped_column(
+        BIGINT, ForeignKey("github_user_profiles.id"), nullable=False
+    )
+    mode: Mapped[RulesSimulationMode] = mapped_column(
+        pg_enum(RulesSimulationMode, "rules_simulation_mode"), nullable=False
+    )
+    path: Mapped[str] = mapped_column(TEXT, nullable=False)
+    content: Mapped[str] = mapped_column(TEXT, nullable=False)
+    rules_md: Mapped[str] = mapped_column(TEXT, nullable=False)
+    status: Mapped[RulesSimulationStatus] = mapped_column(
+        pg_enum(RulesSimulationStatus, "rules_simulation_status"),
+        nullable=False,
+        server_default=RulesSimulationStatus.QUEUED.value,
+    )
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

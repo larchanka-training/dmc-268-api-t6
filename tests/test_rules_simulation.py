@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.modules.reviews.application.rules_simulation import (
     ActiveRulesSimulationExists,
@@ -18,6 +19,9 @@ from app.modules.reviews.application.rules_simulation import (
     RulesSimulationRequest,
     RulesSimulationStatus,
     check_simulation_input,
+)
+from app.modules.reviews.infrastructure.rules_simulation_store import (
+    SqlAlchemyRulesSimulationUnitOfWork,
 )
 from tests.rules_simulation_fakes import VISIBLE_REPOSITORY_ID, FakeRulesSimulations
 
@@ -253,3 +257,8 @@ def test_another_users_or_an_unknown_simulation_is_not_found() -> None:
 
     assert asyncio.run(other_get.execute(FIRST_ID)) is None
     assert asyncio.run(get.execute(UUID(int=99))) is None
+
+
+def test_the_store_refuses_to_work_without_a_scope() -> None:
+    with pytest.raises(ValueError, match="AuthScope"):
+        SqlAlchemyRulesSimulationUnitOfWork(async_sessionmaker(), None)
