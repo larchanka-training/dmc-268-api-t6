@@ -4,7 +4,7 @@ The run loads the policy of the base revision and applies it: what reaches the m
 policy ignores, and what a change in the head does not alter. The chain, its fakes and seeds
 live in ``tests/rules_md_e2e.py``. A case runs on both seeds unless it pins one.
 
-The module migrates one schema; each case starts from emptied tables with the same seed and
+The module gets one migrated database; each case starts from emptied tables with the same seed and
 from a deleted review topology, so the cases stay isolated.
 
 Opt-in: ``TEST_DATABASE_URL`` (disposable PostgreSQL) and ``TEST_RABBITMQ_URL`` (disposable

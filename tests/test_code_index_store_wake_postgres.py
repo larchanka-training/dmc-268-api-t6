@@ -1,8 +1,8 @@
 """PostgreSQL evidence for the wake-up marker (#143): triggers request a build, the leader
 clears it with a CAS.
 
-Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
-Each test migrates its own schema to head and drops it afterwards; the fixtures and the
+Opt-in: TEST_DATABASE_URL must target a test database whose user can create databases.
+Each test gets a clone of a database migrated to head, dropped afterwards; the fixtures and the
 store harness live in `tests/code_index_postgres.py`.
 """
 

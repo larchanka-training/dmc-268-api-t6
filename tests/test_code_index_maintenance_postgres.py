@@ -16,8 +16,8 @@ resurrects an index a concurrent toggle turned off, and its purges leave GC no r
 A webhook trigger's index update request resolves the delivery's repository under the same
 effective-RAG condition and writes the target and a fresh marker of a live index only.
 
-Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
-Each test migrates its own schema to head and drops it afterwards.
+Opt-in: TEST_DATABASE_URL must target a test database whose user can create databases.
+Each test gets a clone of a database migrated to head, dropped afterwards.
 """
 
 from __future__ import annotations

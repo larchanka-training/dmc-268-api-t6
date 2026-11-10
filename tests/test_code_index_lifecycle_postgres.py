@@ -28,8 +28,8 @@
   nothing; converge disarming an index while a PATCH turns RAG on ends either purged and
   re-armed or live, never live with RAG off.
 
-Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
-Each test migrates its own schema to head and drops it afterwards.
+Opt-in: TEST_DATABASE_URL must target a test database whose user can create databases.
+Each test gets a clone of a database migrated to head, dropped afterwards.
 """
 
 from __future__ import annotations

@@ -11,8 +11,8 @@ an hour, so a TTL purge spares an index reviews still read. A `failed`, a remove
 disabled index and a missing row take no write; with RAG off or a GitLab installation the
 state is not read.
 
-Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
-Each test migrates its own schema to head and drops it afterwards.
+Opt-in: TEST_DATABASE_URL must target a test database whose user can create databases.
+Each test gets a clone of a database migrated to head, dropped afterwards.
 """
 
 from __future__ import annotations

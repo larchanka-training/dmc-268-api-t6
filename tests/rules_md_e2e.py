@@ -11,7 +11,7 @@ Two seeds pick the review path through the active review prompt the run pins: ``
 v2: the snapshot path, where the rules.md text reaches the reviewer and the verifier). A case
 that fails while ``policy.load`` reads the documents runs on the v4 seed only.
 
-Each test module migrates one schema; each case starts from emptied tables with the same seed
+Each test module gets one migrated database; each case starts from emptied tables with the same seed
 and from a deleted review topology, so the cases stay isolated. The ``stack`` and ``seed``
 fixtures reach a test file through ``pytest_plugins``; the rest is imported.
 

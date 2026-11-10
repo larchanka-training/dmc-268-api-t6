@@ -1,4 +1,4 @@
-"""What the worker queue tests share: the topology reset, a migrated schema, the fakes (#34).
+"""What the worker queue tests share: the topology reset, a migrated database, the fakes (#34).
 
 The ``env`` fixture reaches a test file through ``pytest_plugins``; the rest is imported.
 

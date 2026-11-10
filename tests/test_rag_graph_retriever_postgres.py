@@ -6,8 +6,8 @@ publication committed during the read does not change it, and only the run's rep
 rows are read. An index without a READY row in that read gives its fresh status and no
 hints, also when the gate found it usable a moment before.
 
-Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
-Each test migrates its own schema to head and drops it afterwards.
+Opt-in: TEST_DATABASE_URL must target a test database whose user can create databases.
+Each test gets a clone of a database migrated to head, dropped afterwards.
 """
 
 from __future__ import annotations
