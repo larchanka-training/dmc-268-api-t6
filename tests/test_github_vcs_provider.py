@@ -321,15 +321,22 @@ def test_http_rate_limit_and_invalid_blob_fail_closed() -> None:
     asyncio.run(exercise())
 
 
-def test_blob_secondary_rate_limit_without_headers_is_retryable() -> None:
+@pytest.mark.parametrize(
+    ("status", "headers", "message"),
+    [
+        (403, {}, "You have exceeded a secondary rate limit. Please retry."),
+        (403, {"Retry-After": "60"}, "Please retry."),
+        (429, {}, "You have exceeded a secondary rate limit. Please retry."),
+        (503, {"Retry-After": "60"}, "Please retry."),
+    ],
+)
+def test_blob_rate_limit_is_retryable(status: int, headers: dict[str, str], message: str) -> None:
     encodings: list[str] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith(f"/git/blobs/{_BLOB}")
         encodings.append(request.headers["Accept-Encoding"])
-        return httpx.Response(
-            403, json={"message": "You have exceeded a secondary rate limit. Please retry."}
-        )
+        return httpx.Response(status, headers=headers, json={"message": message})
 
     async def exercise() -> None:
         async with httpx.AsyncClient(
@@ -348,6 +355,28 @@ def test_blob_secondary_rate_limit_without_headers_is_retryable() -> None:
 
     asyncio.run(exercise())
     assert encodings == ["identity"]
+
+
+@pytest.mark.parametrize("status", [403, 429])
+def test_blob_non_rate_limit_error_keeps_http_status_error(status: int) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Accept-Encoding"] == "identity"
+        return httpx.Response(status, json={"message": "Request refused"})
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), base_url="https://api.github.test"
+        ) as client:
+            provider = ClassifiedVcsProvider(
+                HttpGitHubVcsProvider(client=client, token_provider=Tokens())
+            )
+            with pytest.raises(httpx.HTTPStatusError) as caught:
+                await provider.get_blob(
+                    PullRequestLocator(17, "octo/repo", 7), _BLOB, checkpoint=provider_checkpoint
+                )
+        assert caught.value.response.status_code == status
+
+    asyncio.run(exercise())
 
 
 def test_blob_retrieval_stops_before_consuming_an_oversized_response() -> None:

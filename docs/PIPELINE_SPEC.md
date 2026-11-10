@@ -544,10 +544,13 @@ Fallback-модель — вторая модель шлюза с тем же st
 
 Чтения GitHub blob (`get_blob` / `get_repository_blob`) просят `Accept-Encoding: identity`, чтобы
 прочитать до 4 KiB тела ошибки. Без заголовков лимита 403/429 с `message` JSON-тела, содержащим
-«secondary rate limit», определяется так же, как у остальных чтений: `get_blob` через
-`ClassifiedVcsProvider` даёт retryable `diff_fetch_failed` с паузой 60 с. Другие сбои blob
-остаются best effort. Если сервер всё же вернул сжатое тело ошибки, оно не разбирается и без
-других признаков лимит не подтверждается.
+«secondary rate limit», даёт через `ClassifiedVcsProvider` retryable `diff_fetch_failed` с
+паузой 60 с. Заголовки `Retry-After` или `X-RateLimit-Remaining: 0` дают тот же результат при
+любом HTTP-статусе blob-чтения, включая 404 и 5xx. Без этих заголовков 429 без сообщения о
+secondary rate limit остаётся best effort для blob диффа. `fetch_files` пропускает контекстный
+файл и при подтверждённом лимите; чтение `AGENTS.md` передаёт retryable ошибку попытке.
+Остальные сбои blob диффа и контекстных файлов остаются best effort. Если сервер всё же вернул
+сжатое тело ошибки, оно не разбирается и без других признаков лимит не подтверждается.
 
 Ошибка при обновлении check-run состояние Run не меняет: пишется лог и метрика.
 
