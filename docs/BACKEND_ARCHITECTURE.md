@@ -618,7 +618,9 @@ ENUM, rename, partial indexes и data migrations. Перед применени�
 [`test_repository_rag_postgres.py`](../tests/test_repository_rag_postgres.py)
 проверяет ревизию `20261016_0033`, онбординг без включения RAG и статус индекса в
 `GET`/`PATCH /api/repos/{id}` по строкам `code_index_states`.
-Пользователь тестовой БД должен иметь право CREATE SCHEMA. В Alembic передаётся
+Пользователь тестовой БД должен иметь права CREATE SCHEMA и CREATEDB: остальные
+integration-тесты получают свою копию мигрированной шаблонной БД
+(`tests/template_database.py`). В Alembic передаётся
 готовое соединение: переменная `DATABASE_URL` приложения не может перенаправить тест
 в другую БД. Без `TEST_DATABASE_URL` интеграционные тесты пропускаются.
 
