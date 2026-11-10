@@ -171,7 +171,7 @@ def test_the_checker_runs_on_the_project_python_through_uv(tmp_path: Path) -> No
     ("exits", "code"),
     [("1 0", 1), ("0 1", 1), ("1 1", 1), ("1 2", 2), ("2 1", 2), ("2 0", 2)],
 )
-def test_the_worst_pass_decides_and_both_passes_run(tmp_path: Path, exits: str, code: int) -> None:
+def test_the_worst_pass_decides_and_every_pass_runs(tmp_path: Path, exits: str, code: int) -> None:
     result, calls = _run_script(tmp_path, "origin/main", str(tmp_path / "reports"), exits=exits)
 
     assert result.returncode == code
@@ -193,7 +193,8 @@ def _health(change: str, rule: str = "SKY-C304") -> dict[str, Any]:
     [
         ("introduced", "SKY-C304", 1),
         ("worsened", "SKY-Q301", 1),
-        # No base version: a moved legacy file, or a new file that pass 1 checks line by line.
+        # No base version at this path: a new file, which pass 1 checks line by line, or a moved
+        # one, which pass 3 checks against its own base version.
         ("unverified", "SKY-C304", 0),
         ("introduced", "SKY-L028", 0),
     ],
@@ -207,6 +208,141 @@ def test_only_functions_the_change_made_worse_fail(
 
     assert result.returncode == code
     assert ("app/example.py:7" in result.stdout) is bool(code)
+
+
+LEGACY = "".join(f"def f{i}(x):\n    return x + {i}\n\n\n" for i in range(10))
+
+
+def _moved_repo(tmp_path: Path, *, edit: bool, path: str = "app/moved.py") -> Path:
+    """``_script_repo`` whose HEAD moves ``app/legacy.py`` to ``path``, edited if asked.
+
+    It also moves ``app/other.py`` to ``app/kept.py`` unchanged: a pure move.
+    """
+    repo = _script_repo(tmp_path)
+    (repo / "app").mkdir()
+    (repo / "app/legacy.py").write_text(LEGACY, encoding="utf-8")
+    (repo / "app/other.py").write_text("def g(y):\n    return y\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "legacy")
+    git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    (repo / path).parent.mkdir(parents=True, exist_ok=True)
+    git(repo, "mv", "app/legacy.py", path)
+    git(repo, "mv", "app/other.py", "app/kept.py")
+    if edit:
+        (repo / path).write_text(LEGACY.replace("x + 3", "x + 30"), encoding="utf-8")
+    git(repo, "commit", "-q", "-am", "move")
+    return repo
+
+
+# A path with blanks in a new directory: the renames are read NUL-separated.
+@pytest.mark.parametrize("path", ["app/moved.py", "app/new dir/mo ved.py"])
+def test_a_file_moved_with_edits_is_checked_against_its_base_version(
+    tmp_path: Path, path: str
+) -> None:
+    repo = _moved_repo(tmp_path, edit=True, path=path)
+    # A branch's own config does not apply: pass 3 reads the merge base's, as passes 1 and 2.
+    with (repo / "pyproject.toml").open("a", encoding="utf-8") as pyproject:
+        pyproject.write("# changed on the branch\n")
+    git(repo, "commit", "-q", "-am", "config")
+    reports = tmp_path / "reports"
+    snapshots = tmp_path / "snapshots"
+    snapshots.mkdir()
+
+    result, calls = _run_script(
+        tmp_path, "origin/main", str(reports), repo=repo, env={"FAKE_UVX_SNAPSHOTS": str(snapshots)}
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert len(calls) == 3, calls
+    # Pass 3: pass 2 once more, in a scratch repository of the moved files and the config.
+    moved = calls[2].split()
+    assert calls[2].startswith(f"--from skylos=={_pinned_version()} skylos .")
+    assert f"--select {','.join(FUNCTION_RULES)}" in calls[2]
+    assert {"--quality", "--gate", "--force"} <= set(moved) and "--diff" not in moved
+    assert f"--format json-ci -o {reports}/moved-functions.json" in calls[2]
+    scratch = snapshots / "3"
+    base = moved[moved.index("--diff-base") + 1]
+    # Only the file moved with edits: the pure move of app/other.py needs no check.
+    assert git(scratch, "ls-tree", "-r", "--name-only", base).splitlines() == [
+        path,
+        "pyproject.toml",
+    ]
+    # Its base holds the moved file's merge-base version at the new path; its tree, the new one.
+    assert git(scratch, "show", f"{base}:{path}") == LEGACY.strip()
+    assert git(scratch, "show", f"{base}:pyproject.toml") == PYPROJECT.read_text().strip()
+    assert (scratch / path).read_text() == (repo / path).read_text()
+
+
+@pytest.mark.parametrize(
+    ("exits", "change", "code"),
+    [
+        ("0 0 0", "introduced", 1),
+        ("0 0 0", "worsened", 1),
+        ("0 0 0", "unverified", 0),
+        ("0 0 2", "introduced", 2),
+    ],
+)
+def test_a_function_a_move_made_worse_fails(
+    tmp_path: Path, exits: str, change: str, code: int
+) -> None:
+    report = json.dumps({"code_health": [{**_health(change), "file": "@PWD@/app/moved.py"}]})
+
+    result, calls = _run_script(
+        tmp_path,
+        "origin/main",
+        str(tmp_path / "reports"),
+        exits=exits,
+        repo=_moved_repo(tmp_path, edit=True),
+        env={"FAKE_UVX_REPORT_3": report},
+    )
+
+    assert result.returncode == code
+    assert len(calls) == 3, calls
+    # A Skylos failure skips the checker; its paths are relative to the scratch repository.
+    assert ("Moved functions over a limit" in result.stdout) is (code != 2)
+    assert ("SKY-C304  app/moved.py:7  " in result.stdout) is (code == 1)
+
+
+def test_a_pure_move_needs_no_third_pass(tmp_path: Path) -> None:
+    repo = _moved_repo(tmp_path, edit=False)
+
+    result, calls = _run_script(tmp_path, "origin/main", str(tmp_path / "reports"), repo=repo)
+
+    assert result.returncode == 0, result.stderr
+    assert len(calls) == 2, calls
+
+
+def test_a_base_the_clone_lacks_is_incomplete(tmp_path: Path) -> None:
+    result, calls = _run_script(tmp_path, "abc123", str(tmp_path / "reports"))
+
+    assert result.returncode == 2
+    assert len(calls) == 2, calls
+    assert "abc123" in result.stderr
+
+
+def test_a_scratch_repository_that_cannot_be_built_is_incomplete(tmp_path: Path) -> None:
+    result, calls = _run_script(
+        tmp_path,
+        "origin/main",
+        str(tmp_path / "reports"),
+        repo=_moved_repo(tmp_path, edit=True),
+        env={"TMPDIR": str(tmp_path / "missing")},
+    )
+
+    assert result.returncode == 2
+    assert len(calls) == 2, calls
+    assert "scratch repository" in result.stderr
+
+
+def test_a_moved_report_of_an_earlier_run_is_removed(tmp_path: Path) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "moved-functions.json").write_text("{}", encoding="utf-8")
+
+    result, _ = _run_script(tmp_path, "origin/main", str(reports))
+
+    assert result.returncode == 0, result.stderr
+    assert not (reports / "moved-functions.json").exists()
 
 
 def _check(tmp_path: Path, report: str) -> subprocess.CompletedProcess[str]:
@@ -331,7 +467,7 @@ def test_job_gates_pull_requests_and_pushes_to_main() -> None:
     upload = job_step(job, "Upload Skylos report")
     assert upload["if"] == "always()"
     assert upload["with"]["path"] == "${{ runner.temp }}/skylos/"
-    # Both passes always write a report: a missing one means the gate step broke.
+    # Passes 1 and 2 always write a report: a missing one means the gate step broke.
     assert upload["with"]["if-no-files-found"] == "error"
 
 

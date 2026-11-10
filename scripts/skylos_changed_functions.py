@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Verdict of the second pass of scripts/skylos_quality.sh (#263): changed functions.
+"""Verdict of the function passes of scripts/skylos_quality.sh (#263): changed functions.
 
-Usage: scripts/skylos_changed_functions.py REPORT RULES
+Usage: scripts/skylos_changed_functions.py REPORT RULES [LABEL]
 
 REPORT is the JSON report (``--format json-ci``) of a Skylos ``--diff-base`` scan, RULES a
-comma-separated list of function metric rules. Skylos compares each metric of a changed file with
-the merge base and marks it ``introduced`` (over the limit now, not at the base), ``worsened``
-(over the limit at the base and worse now) or ``unverified`` (the file has no version at the base:
-a new file or a moved one). Only the first two fail: a new file is checked line by line by the
-first pass, and a moved legacy function is not a new finding. Exit codes: 0 passed, 1 a changed
-function over a limit, 2 unreadable report.
+comma-separated list of function metric rules, LABEL the headline's subject (default "Changed
+functions"). Skylos compares each metric of a changed file with the file of the same path at the
+merge base and marks it ``introduced`` (over the limit now, not at the base), ``worsened`` (over
+the limit at the base and worse now) or ``unverified`` (no file at that path in the base: a new
+file or a moved one). Only the first two fail: a new file is checked line by line by the first
+pass, and a moved one by the third, against its own base version. Exit codes: 0 passed, 1 a
+changed function over a limit, 2 unreadable report.
 """
 
 from __future__ import annotations
@@ -55,17 +56,18 @@ def _write_summary(headline: str, failing: list[str]) -> None:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 3:
-        print("usage: scripts/skylos_changed_functions.py REPORT RULES", file=sys.stderr)
+    if len(argv) not in (3, 4):
+        print("usage: scripts/skylos_changed_functions.py REPORT RULES [LABEL]", file=sys.stderr)
         return 2
+    label = argv[3] if len(argv) == 4 else "Changed functions"
     try:
         findings = _read_findings(argv[1])
     except (OSError, ValueError, KeyError, TypeError) as error:
-        print(f"Changed functions: cannot read {argv[1]}: {error!r}", file=sys.stderr)
+        print(f"{label}: cannot read {argv[1]}: {error!r}", file=sys.stderr)
         return 2
     failing = _failing(findings, set(argv[2].split(",")))
     verdict = "FAILED" if failing else "PASSED"
-    headline = f"Changed functions over a limit: {verdict} ({len(failing)})"
+    headline = f"{label} over a limit: {verdict} ({len(failing)})"
     print("\n".join([headline, *failing]))
     _write_summary(headline, failing)
     return 1 if failing else 0
