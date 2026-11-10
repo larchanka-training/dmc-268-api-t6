@@ -44,6 +44,13 @@ def _execute(database_url: str, statement: str) -> None:
         engine.dispose()
 
 
+def alembic_config() -> Config:
+    """The project's alembic config with absolute paths: a test may run in another directory."""
+    config = Config(str(_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(_ROOT / "alembic"))
+    return config
+
+
 def _template(database_url: str) -> str:
     template = _templates.get(database_url)
     if template is not None:
@@ -51,9 +58,7 @@ def _template(database_url: str) -> str:
     template = f"tmpl_{uuid4().hex}"
     _execute(database_url, f'CREATE DATABASE "{template}"')
     _created.append((database_url, template))
-    config = Config(str(_ROOT / "alembic.ini"))
-    # Absolute: a test may run in another working directory.
-    config.set_main_option("script_location", str(_ROOT / "alembic"))
+    config = alembic_config()
     engine = create_engine(make_url(database_url).set(database=template), poolclass=NullPool)
     try:
         with engine.connect() as connection:
@@ -76,6 +81,21 @@ class MigratedDatabase:
 
     url: str
     schema: str
+
+    @contextlib.contextmanager
+    def connect(self) -> Iterator[Connection]:
+        """A connection with ``search_path`` on ``schema``; it rolls back on exit."""
+        engine = create_engine(self.url, poolclass=NullPool)
+        try:
+            with engine.connect() as connection:
+                connection.execute(text(f'SET search_path TO "{self.schema}"'))
+                connection.commit()
+                try:
+                    yield connection
+                finally:
+                    connection.rollback()
+        finally:
+            engine.dispose()
 
 
 @contextlib.contextmanager
@@ -106,18 +126,11 @@ def migrated_connection(database_url: str, schema: str) -> Iterator[Connection]:
 
     ``connection.engine.url`` is the new database's URL; the connection rolls back on exit.
     """
-    with migrated_database(database_url, schema) as url:
-        engine = create_engine(url, poolclass=NullPool)
-        try:
-            with engine.connect() as connection:
-                connection.execute(text(f'SET search_path TO "{schema}"'))
-                connection.commit()
-                try:
-                    yield connection
-                finally:
-                    connection.rollback()
-        finally:
-            engine.dispose()
+    with (
+        migrated_database(database_url, schema) as url,
+        MigratedDatabase(url, schema).connect() as connection,
+    ):
+        yield connection
 
 
 @atexit.register
