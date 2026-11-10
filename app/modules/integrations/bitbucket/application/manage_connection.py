@@ -530,7 +530,7 @@ class ManageBitbucketConnection:
             BindingPosition(
                 workspace_id,
                 last.installation_id,
-                last.position_full_name or last.full_name,
+                last.position_full_name if last.position_full_name is not None else last.full_name,
                 last.repository_id,
             )
         )
