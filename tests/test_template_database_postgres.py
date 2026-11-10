@@ -6,12 +6,14 @@ from uuid import uuid4
 
 import pytest
 from alembic.autogenerate import compare_metadata
+from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.pool import NullPool
 
+from alembic import command
 from app.bootstrap.db_metadata import metadata
 from tests.template_database import MigratedDatabase, alembic_config, migrated_database
 
@@ -91,3 +93,26 @@ def test_a_clone_is_dropped_on_exit_with_a_connection_left_open(test_database_ur
     finally:
         admin.dispose()
     assert left == 0
+
+
+def test_clones_of_one_server_url_share_one_migration(
+    test_database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A query of its own makes the URL a key the per-process template cache has not seen.
+    url = (
+        make_url(test_database_url)
+        .update_query_dict({"application_name": f"template-cache-{uuid4().hex}"})
+        .render_as_string(hide_password=False)
+    )
+    upgrades: list[str] = []
+    upgrade = command.upgrade
+
+    def counted(config: Config, revision: str) -> None:
+        upgrades.append(revision)
+        upgrade(config, revision)
+
+    monkeypatch.setattr(command, "upgrade", counted)
+    for _ in range(2):
+        with migrated_database(url, _schema()):
+            pass
+    assert upgrades == ["head"]
