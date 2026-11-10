@@ -12,7 +12,6 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -22,13 +21,10 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.bootstrap.reviews_api import (
     ReviewsApiResources,
     get_github_webhook_receipt_uow_factory,
@@ -52,6 +48,9 @@ from app.modules.reviews.infrastructure.ci_eligibility_candidates import (
 )
 from app.modules.reviews.infrastructure.github_ci import HttpGitHubCurrentHeadCiProvider
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 HEAD = "e" * 40
 NEW_HEAD = "d" * 40
@@ -69,21 +68,15 @@ class Database:
 
 
 @pytest.fixture
-def database() -> Iterator[Database]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_trigger_{uuid4().hex}"
+def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
+    database_url = migrated_db.url
+    schema = migrated_db.schema
     workspace, installation, repository = uuid4(), uuid4(), uuid4()
     engine = create_engine(database_url)
     try:
         with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
             connection.execute(text(f'SET search_path TO "{schema}"'))
             connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
             for statement, values in (
                 (
                     "INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'W', 0)",
@@ -116,9 +109,6 @@ def database() -> Iterator[Database]:
             connection.commit()
             yield Database(database_url, schema)
             connection.rollback()
-            connection.execute(text("SET search_path TO public"))
-            connection.execute(DropSchema(schema, cascade=True))
-            connection.commit()
     finally:
         engine.dispose()
 

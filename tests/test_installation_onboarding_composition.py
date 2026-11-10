@@ -16,7 +16,6 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.ext.asyncio import (
@@ -25,9 +24,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.bootstrap.installation_onboarding import InstallationOnboarding
 from app.bootstrap.reviews_api import (
     ReviewsApiResources,
@@ -75,6 +72,9 @@ from app.modules.repositories.infrastructure.models import (
 )
 from app.modules.workspaces.infrastructure.models import Workspace
 from tests.github_webhook_fixtures import load_github_webhook_fixture, removal_of
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 
 @dataclass
@@ -120,26 +120,17 @@ class UnusedDetailsProvider(InstallationRepositoryDetailsProvider):
 
 
 @pytest.fixture
-def migrated_onboarding_database() -> Iterator[tuple[str, str]]:
+def migrated_onboarding_database(migrated_db: MigratedDatabase) -> Iterator[tuple[str, str]]:
     """Provide an isolated migrated PostgreSQL schema when configured."""
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_installation_onboarding_{uuid4().hex}"
+    database_url = migrated_db.url
+    schema = migrated_db.schema
     engine = create_engine(database_url)
     try:
         with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
             connection.execute(text(f'SET search_path TO "{schema}"'))
             connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
             yield database_url, schema
             connection.rollback()
-            connection.execute(text("SET search_path TO public"))
-            connection.execute(DropSchema(schema, cascade=True))
-            connection.commit()
     finally:
         engine.dispose()
 

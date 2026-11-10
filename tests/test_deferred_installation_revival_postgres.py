@@ -7,7 +7,6 @@ schema; receipts are seeded directly. Opt-in with ``TEST_DATABASE_URL``.
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -16,13 +15,10 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from alembic.config import Config
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.modules.integrations.webhooks.application.revive_deferred_installation_deliveries import (
     ReviveDeferredInstallationDeliveries,
 )
@@ -32,6 +28,9 @@ from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts im
 from app.modules.integrations.webhooks.infrastructure.models import WebhookEvent
 from app.modules.repositories.infrastructure.models import ProviderInstallation
 from app.modules.workspaces.infrastructure.models import Workspace
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 NOW = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
 LINKED = 1000001
@@ -49,25 +48,16 @@ class Database:
 
 
 @pytest.fixture
-def database() -> Iterator[Database]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_revival_{uuid4().hex}"
+def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
+    database_url = migrated_db.url
+    schema = migrated_db.schema
     engine = create_engine(database_url)
     try:
         with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
             connection.execute(text(f'SET search_path TO "{schema}"'))
             connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
             yield Database(database_url, schema)
             connection.rollback()
-            connection.execute(text("SET search_path TO public"))
-            connection.execute(DropSchema(schema, cascade=True))
-            connection.commit()
     finally:
         engine.dispose()
 

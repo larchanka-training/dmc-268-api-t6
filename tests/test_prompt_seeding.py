@@ -3,24 +3,22 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Iterator
 from dataclasses import replace
 from hashlib import sha256
 from importlib.resources import files
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
-from alembic.config import Config
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.bootstrap.seed_prompts import PromptAsset, load_prompt_assets, seed_prompt_versions
 from app.modules.reviews.application.policy_snapshot import PINNED_PROMPT_CHECKSUMS
 from app.modules.reviews.infrastructure.models import PromptVersion
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 V3_SHA256 = "eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452"
@@ -33,26 +31,17 @@ def _up_to(assets: tuple[PromptAsset, ...], version: int) -> tuple[PromptAsset, 
 
 
 @pytest.fixture
-def migrated_prompt_database() -> Iterator[tuple[str, str]]:
+def migrated_prompt_database(migrated_db: MigratedDatabase) -> Iterator[tuple[str, str]]:
     """Provide a disposable, migrated PostgreSQL schema when explicitly configured."""
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_prompt_seed_{uuid4().hex}"
+    database_url = migrated_db.url
+    schema = migrated_db.schema
     engine = create_engine(database_url)
     try:
         with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
             connection.execute(text(f'SET search_path TO "{schema}"'))
             connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
             yield database_url, schema
             connection.rollback()
-            connection.execute(text("SET search_path TO public"))
-            connection.execute(DropSchema(schema, cascade=True))
-            connection.commit()
     finally:
         engine.dispose()
 

@@ -18,12 +18,12 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, make_url
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 pytestmark = pytest.mark.integration
 _TOKEN = "SYNTHETIC_PAT_CANARY_169"
@@ -113,11 +113,9 @@ class Operator:
 
 
 @pytest.fixture
-def operator(tmp_path: Path) -> Iterator[Operator]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL CLI tests")
-    schema = f"test_gitlab_admin_{uuid4().hex}"
+def operator(migrated_db: MigratedDatabase, tmp_path: Path) -> Iterator[Operator]:
+    database_url = migrated_db.url
+    schema = migrated_db.schema
     workspace, other_workspace = uuid4(), uuid4()
     engine = create_engine(database_url, hide_parameters=True)
     launcher = tmp_path / "gitlab_admin_launcher.py"
@@ -162,12 +160,8 @@ raise SystemExit(main())
     )
     try:
         with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
             connection.execute(text(f'SET search_path TO "{schema}"'))
             connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
             connection.execute(
                 text(
                     "INSERT INTO workspaces (id, name, daily_budget_usd) "
@@ -193,8 +187,6 @@ raise SystemExit(main())
             connection.commit()
             yield Operator(env, launcher, workspace, engine, schema, other_workspace)
     finally:
-        with engine.begin() as connection:
-            connection.execute(DropSchema(schema, cascade=True))
         engine.dispose()
 
 

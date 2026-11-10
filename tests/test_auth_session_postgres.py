@@ -3,44 +3,34 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from alembic.config import Config
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.modules.auth.application.exchange_github_code import AuthenticatedUser
 from app.modules.auth.infrastructure.models import AuthRefreshSession, GitHubUserProfile
 from app.modules.auth.infrastructure.sessions import SqlAlchemyAuthSessionUnitOfWork
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 
 @pytest.fixture
-def auth_schema() -> Iterator[tuple[str, str]]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_auth_session_{uuid4().hex}"
+def auth_schema(migrated_db: MigratedDatabase) -> Iterator[tuple[str, str]]:
+    database_url = migrated_db.url
+    schema = migrated_db.schema
     engine = create_engine(database_url)
     try:
         with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
             connection.execute(text(f'SET search_path TO "{schema}"'))
             connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
             yield database_url, schema
             connection.rollback()
-            connection.execute(text("SET search_path TO public"))
-            connection.execute(DropSchema(schema, cascade=True))
-            connection.commit()
     finally:
         engine.dispose()
 

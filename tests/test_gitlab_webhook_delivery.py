@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
@@ -13,15 +12,12 @@ from uuid import UUID, uuid4
 import aio_pika
 import httpx
 import pytest
-from alembic.config import Config
 from fastapi import FastAPI
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 from starlette.types import Message, Scope
 
-from alembic import command
 from app.bootstrap.gitlab import (
     GitLabWebhookResources,
     build_gitlab_webhook_resources,
@@ -36,6 +32,9 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
 )
 from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
 from tests.gitlab_webhook_fakes import Acceptor, Authenticator
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 CONNECTION = UUID("00000000-0000-0000-0000-000000000071")
 SECRET = "synthetic-webhook-secret-canary-0001"
@@ -376,20 +375,14 @@ class Database:
 
 
 @pytest.fixture
-def database() -> Iterator[Database]:
-    url = os.environ.get("TEST_DATABASE_URL")
-    if url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_gitlab_webhook_delivery_{uuid4().hex}"
+def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
+    url = migrated_db.url
+    schema = migrated_db.schema
     engine = create_engine(url)
     try:
         with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
             connection.execute(text(f'SET search_path TO "{schema}"'))
             connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
             for number, origin, secret, provider in (
                 (71, CONNECTION, SECRET, "gitlab"),
                 (72, OTHER, OTHER_SECRET, "gitlab"),
@@ -448,8 +441,6 @@ def database() -> Iterator[Database]:
             connection.commit()
         yield Database(url, schema)
     finally:
-        with engine.begin() as cleanup:
-            cleanup.execute(DropSchema(schema, cascade=True, if_exists=True))
         engine.dispose()
 
 

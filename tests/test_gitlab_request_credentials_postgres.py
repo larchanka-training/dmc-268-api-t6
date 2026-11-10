@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -13,7 +12,6 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from alembic.config import Config
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import (
@@ -22,9 +20,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.modules.integrations.gitlab.application.manage_connection import (
     CredentialEnvelope,
     GitLabConnectionLifecycle,
@@ -53,6 +49,9 @@ from app.modules.repositories.application.onboard_repository import load_default
 from app.modules.repositories.application.sync_installation_repositories import (
     RepositoryOnboardingInput,
 )
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 pytestmark = pytest.mark.integration
 _TOKEN = "synthetic-authority-PAT-canary"
@@ -60,23 +59,17 @@ _ORIGIN = "https://gitlab.com"
 
 
 @pytest.fixture
-def authority_database() -> Iterator[tuple[str, str, UUID]]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_gitlab_request_authority_{uuid4().hex}"
+def authority_database(migrated_db: MigratedDatabase) -> Iterator[tuple[str, str, UUID]]:
+    database_url = migrated_db.url
+    schema = migrated_db.schema
     workspace = uuid4()
     engine = create_engine(database_url, hide_parameters=True)
     try:
         with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
             connection.commit()
             try:
                 connection.execute(text(f'SET search_path TO "{schema}"'))
                 connection.commit()
-                config = Config("alembic.ini")
-                config.attributes["connection"] = connection
-                command.upgrade(config, "head")
                 connection.execute(
                     text(
                         "INSERT INTO workspaces (id,name,daily_budget_usd) "
@@ -95,9 +88,6 @@ def authority_database() -> Iterator[tuple[str, str, UUID]]:
                 yield database_url, schema, workspace
             finally:
                 connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
     finally:
         engine.dispose()
 

@@ -3,25 +3,24 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import ReviewsApiResources
 from app.main import app
 from app.modules.auth.application.scope import AuthScope
 from tests.installation_onboarding_fakes import active_installation
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 WORKSPACE_A = UUID("00000000-0000-0000-0000-000000000011")
 WORKSPACE_B = UUID("00000000-0000-0000-0000-000000000012")
@@ -35,20 +34,14 @@ PROMPT = UUID("00000000-0000-0000-0000-000000000071")
 
 
 @pytest.fixture
-def portal_database() -> Iterator[tuple[str, str]]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_portal_scope_{uuid4().hex}"
+def portal_database(migrated_db: MigratedDatabase) -> Iterator[tuple[str, str]]:
+    database_url = migrated_db.url
+    schema = migrated_db.schema
     engine = create_engine(database_url)
     try:
         with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
             connection.execute(text(f'SET search_path TO "{schema}"'))
             connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
             for workspace_id, name in ((WORKSPACE_A, "Alpha"), (WORKSPACE_B, "Beta")):
                 connection.execute(
                     text(
@@ -225,9 +218,6 @@ def portal_database() -> Iterator[tuple[str, str]]:
             connection.commit()
             yield database_url, schema
             connection.rollback()
-            connection.execute(text("SET search_path TO public"))
-            connection.execute(DropSchema(schema, cascade=True))
-            connection.commit()
     finally:
         engine.dispose()
 

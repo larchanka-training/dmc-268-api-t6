@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,9 +34,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.modules.code_index.application.index_refresh import RequestIndexRefresh
 from app.modules.code_index.application.index_store import IndexedFile
 from app.modules.code_index.application.leader_tasks import (
@@ -71,7 +68,6 @@ from tests.code_index_postgres import (
     _Index,
     _mark_failed,
     _marker,
-    _migration_config,
     _module,
     _purge,
     _read,
@@ -82,6 +78,9 @@ from tests.code_index_postgres import (
     _wait_until_blocked,
     _write,
 )
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 
 @dataclass(frozen=True)
@@ -93,19 +92,15 @@ class _Fleet:
 
 
 @pytest.fixture
-def fleet() -> Iterator[_Fleet]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_code_index_{uuid4().hex}"
+def fleet(migrated_db: MigratedDatabase) -> Iterator[_Fleet]:
+    database_url = migrated_db.url
+    schema = migrated_db.schema
     engine = create_engine(database_url)
     try:
         with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
             connection.execute(text(f'SET search_path TO "{schema}"'))
             connection.commit()
             try:
-                command.upgrade(_migration_config(connection), "head")
                 ids = tuple(
                     sorted(
                         UUID(_repository(connection, installation_external_id=17 + number))
@@ -125,9 +120,6 @@ def fleet() -> Iterator[_Fleet]:
                     asyncio.run(async_engine.dispose())
             finally:
                 connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
     finally:
         engine.dispose()
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -12,13 +11,10 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
 from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
     SqlAlchemyGitHubWebhookReceiptUnitOfWork,
@@ -28,6 +24,9 @@ from app.modules.integrations.webhooks.infrastructure.models import WebhookEvent
 from app.modules.workspaces.infrastructure.github_installation_links import (
     SqlAlchemyGitHubInstallationLinkUnitOfWork,
 )
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 pytestmark = pytest.mark.integration
 NOW = datetime(2026, 10, 19, 12, tzinfo=UTC)
@@ -55,20 +54,14 @@ class Database:
 
 
 @pytest.fixture
-def database() -> Iterator[Database]:
-    url = os.environ.get("TEST_DATABASE_URL")
-    if url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_receipt_provider_{uuid4().hex}"
+def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
+    url = migrated_db.url
+    schema = migrated_db.schema
     engine = create_engine(url)
     try:
         with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
             connection.execute(text(f'SET search_path TO "{schema}"'))
             connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
             for provider, origin in (("github", GITHUB_ORIGIN), ("gitlab", GITLAB_ORIGIN)):
                 workspace = uuid4()
                 connection.execute(
@@ -106,9 +99,6 @@ def database() -> Iterator[Database]:
                 yield Database(url, schema)
             finally:
                 connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
     finally:
         engine.dispose()
 

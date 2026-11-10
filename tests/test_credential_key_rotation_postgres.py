@@ -12,13 +12,10 @@ from collections.abc import Iterator
 from uuid import UUID, uuid4
 
 import pytest
-from alembic.config import Config
 from sqlalchemy import Connection, create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.credential_key_rotation import KINDS, KeyRotation, Kind
 from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
     BitbucketCredentialCipher,
@@ -39,6 +36,9 @@ from app.modules.integrations.gitlab.infrastructure.credential_cipher import (
 from app.modules.integrations.gitlab.infrastructure.credential_cipher import (
     EncryptedCredential as GitLabEncrypted,
 )
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 pytestmark = pytest.mark.integration
 _OLD = b"o" * 32
@@ -63,20 +63,16 @@ def test_rotation_inventory_covers_all_stored_ciphertext_columns(
 
 
 @pytest.fixture
-def rotation_database() -> Iterator[tuple[str, Connection, UUID, UUID, UUID, UUID]]:
-    url = os.environ.get("TEST_DATABASE_URL")
-    if url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_key_rotation_{uuid4().hex}"
+def rotation_database(
+    migrated_db: MigratedDatabase,
+) -> Iterator[tuple[str, Connection, UUID, UUID, UUID, UUID]]:
+    url = migrated_db.url
+    schema = migrated_db.schema
     engine = create_engine(url, hide_parameters=True)
     try:
         with engine.connect() as db:
-            db.execute(CreateSchema(schema))
             db.execute(text(f'SET search_path TO "{schema}"'))
             db.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = db
-            command.upgrade(config, "head")
             workspace, bb_installation, gl_installation, repository = (uuid4() for _ in range(4))
             db.execute(
                 text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'test', 7)"),
@@ -176,9 +172,6 @@ def rotation_database() -> Iterator[tuple[str, Connection, UUID, UUID, UUID, UUI
             db.commit()
             yield url, db, workspace, bb_installation, gl_installation, repository
             db.rollback()
-            db.execute(text("SET search_path TO public"))
-            db.execute(DropSchema(schema, cascade=True))
-            db.commit()
     finally:
         engine.dispose()
 

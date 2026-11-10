@@ -13,18 +13,15 @@ Each test migrates its own schema to head and drops it afterwards.
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Iterator, Sequence
 from functools import partial
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.modules.code_index.application.index_store import (
     ImportRecord,
     IndexedEdge,
@@ -47,7 +44,6 @@ from tests.code_index_postgres import (
     _imports,
     _Index,
     _mark_failed,
-    _migration_config,
     _module,
     _publish,
     _purge,
@@ -55,6 +51,9 @@ from tests.code_index_postgres import (
     _uses,
     _write,
 )
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 _RAG_OFF = "UPDATE repositories SET rag_enabled = false WHERE id = :repository"
 # The changed symbol `foo` of `a.py`, and a module-level change of `a.py`.
@@ -63,20 +62,16 @@ _MODULE = GraphTarget("a.py", "")
 
 
 @pytest.fixture
-def index() -> Iterator[_Index]:
+def index(migrated_db: MigratedDatabase) -> Iterator[_Index]:
     """Two repositories with RAG on, each in a Workspace and installation of its own."""
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_code_index_{uuid4().hex}"
+    database_url = migrated_db.url
+    schema = migrated_db.schema
     engine = create_engine(database_url)
     try:
         with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
             connection.execute(text(f'SET search_path TO "{schema}"'))
             connection.commit()
             try:
-                command.upgrade(_migration_config(connection), "head")
                 repository_a = UUID(_repository(connection, installation_external_id=17))
                 repository_b = UUID(_repository(connection, installation_external_id=18))
                 # `_repository` leaves the toggle off.
@@ -94,9 +89,6 @@ def index() -> Iterator[_Index]:
                     asyncio.run(async_engine.dispose())
             finally:
                 connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
     finally:
         engine.dispose()
 
@@ -235,7 +227,7 @@ def test_a_publication_committed_during_the_read_does_not_change_it(
 
 @pytest.mark.integration
 def test_the_read_is_one_repeatable_read_read_only_transaction_closed_on_return(
-    index: _Index, monkeypatch: pytest.MonkeyPatch
+    index: _Index, migrated_db: MigratedDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def scenario() -> None:
         await _enable(index, index.a)
@@ -266,7 +258,7 @@ def test_the_read_is_one_repeatable_read_read_only_transaction_closed_on_return(
         # A pooled engine with pre-ping, as the worker builds it: the second read checks
         # out a pinged connection.
         engine = create_async_engine(
-            os.environ["TEST_DATABASE_URL"],
+            migrated_db.url,
             connect_args={"options": f"-csearch_path={schema}"},
             pool_pre_ping=True,
         )
