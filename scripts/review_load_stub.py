@@ -172,7 +172,13 @@ def verification_answer(prompt: str) -> dict[str, object]:
     }
 
 
+def change_summary_answer(_prompt: str) -> dict[str, object]:
+    """The change summary agent's answer (#316): one fixed sentence, whatever the change."""
+    return {"sentences": ["The load stub describes the change in one sentence."]}
+
+
 ANSWERS: dict[str, Callable[[str], dict[str, object]]] = {
+    "ChangeSummaryOutput": change_summary_answer,
     "RepoConventionsDraft": conventions_answer,
     "ReviewOutput": review_answer,
     "ReviewOutputV2": review_answer_v2,

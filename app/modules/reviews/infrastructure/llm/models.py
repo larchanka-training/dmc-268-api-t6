@@ -1,4 +1,5 @@
-"""Implementations of the review and conventions model ports on top of ``LlmGateway``.
+"""Implementations of the review, conventions, verifier and change summary model ports on top
+of ``LlmGateway``.
 
 The worker (#34) creates them per claimed attempt, binding ``RunCallContext``; the
 use cases keep their narrow ports and know nothing about providers or retries.
@@ -11,6 +12,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import replace
 from uuid import UUID, uuid4
 
+from app.modules.reviews.application.change_summary import (
+    CHANGE_SUMMARY_MAX_INPUT_TOKENS,
+    ChangeSummary,
+    ChangeSummaryRequest,
+    build_change_summary_prompt,
+)
 from app.modules.reviews.application.conventions import (
     ConventionsRequest,
     build_conventions_manifest,
@@ -50,10 +57,12 @@ from app.modules.reviews.application.review_output import (
 )
 from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.infrastructure.llm.answers import (
+    change_summary_output_schema,
     conventions_answer_validator,
     conventions_schema,
     provider_schema,
     review_answer_contract,
+    validate_change_summary_answer,
     validate_verifier_answer,
     verifier_answer_without_reasons,
     verifier_output_schema,
@@ -70,6 +79,7 @@ from app.modules.reviews.infrastructure.llm.transport import ChatMessage, Respon
 REVIEW_OPERATION = "review"
 CONVENTIONS_OPERATION = "conventions"
 VERIFICATION_OPERATION = "verification"
+CHANGE_SUMMARY_OPERATION = "change_summary"
 # TL-2 (CVS §7.3): provider-call slots a snapshot-path task keeps for the stages after it.
 _REVIEW_RESERVED_CALLS = 1  # the verifier
 _CONVENTIONS_RESERVED_CALLS = 2  # the review and the verifier
@@ -242,6 +252,44 @@ class GatewayVerifierModel:
             result.accepted_manifest_id,
             accepted_manifest=result.accepted_manifest,
         )
+
+
+class GatewayChangeSummaryModel:
+    """``ChangeSummaryModel``: the review route under the ``change_summary`` operation.
+
+    Its own usage and ``llm.call`` rows, the strict ``ChangeSummaryOutput`` schema and the
+    bounded repair. No policy snapshot or manifest goes to the gateway: the prompt is pinned
+    in code, so ``llm.call`` records no prompt version instead of the review prompt's. The
+    input is fitted to ``CHANGE_SUMMARY_MAX_INPUT_TOKENS``, capped by the route's window.
+    """
+
+    def __init__(self, gateway: LlmGateway, run: RunCallContext) -> None:
+        self._gateway = gateway
+        self._run = run
+
+    async def summarize_change(self, *, request: ChangeSummaryRequest) -> ChangeSummary:
+        max_tokens = min(
+            CHANGE_SUMMARY_MAX_INPUT_TOKENS, self._gateway.max_prompt_tokens(self._run.engine)
+        )
+        prompt = build_change_summary_prompt(
+            request, max_input_tokens=max_tokens, counter=self._gateway.token_counter()
+        )
+        result = await self._gateway.generate(
+            StructuredTask(
+                operation=CHANGE_SUMMARY_OPERATION,
+                messages=_messages(prompt),
+                schema=ResponseSchema(
+                    "ChangeSummaryOutput", provider_schema(change_summary_output_schema())
+                ),
+                validate=validate_change_summary_answer,
+                bounded_repair=True,
+            ),
+            replace(self._run, prompt_version_id=None),
+        )
+        sentences = result.output["sentences"]
+        # CONTRACT: the validator accepted 1 to 3 strings under "sentences".
+        assert isinstance(sentences, list)
+        return ChangeSummary(tuple(str(sentence) for sentence in sentences))
 
 
 def _checked_against(

@@ -65,6 +65,7 @@ def test_load_prompt_assets_preserves_full_file_and_checksum() -> None:
     assert [(asset.key, asset.version) for asset in assets] == [
         ("review.conventions", 1),
         ("review.conventions", 2),
+        ("review.summary", 1),
         ("review.system", 1),
         ("review.system", 2),
         ("review.system", 3),
@@ -121,6 +122,20 @@ def test_seeded_verifier_checksums_match_the_builder_reading() -> None:
         assert sha256(builder_reading.encode("utf-8")).hexdigest() == asset.checksum
 
 
+def test_the_change_summary_pin_is_the_seeded_checksum_and_the_packaged_bytes() -> None:
+    # The change summary agent reads its packaged prompt and checks it against this pin.
+    (summary,) = [
+        asset
+        for asset in load_prompt_assets(REPO_ROOT / "review" / "prompts")
+        if asset.key == "review.summary"
+    ]
+
+    assert summary.version == 1
+    assert summary.checksum == PINNED_PROMPT_CHECKSUMS["review.summary:v1"]
+    packaged = files("review.prompts").joinpath("review.summary.v1.md").read_bytes()
+    assert sha256(packaged).hexdigest() == summary.checksum
+
+
 def test_load_prompt_assets_preserves_crlf_bytes_and_checksum(tmp_path: Path) -> None:
     source_bytes = b"---\r\nkey: review.system\r\nversion: 1\r\n---\r\nPrompt\r\n"
     source_path = tmp_path / "review.system.v1.md"
@@ -170,16 +185,65 @@ def test_first_seed_makes_the_newest_version_of_each_prompt_active(
                     .order_by(PromptVersion.key)
                 )
                 active_versions = [(key, version) for key, version in rows.tuples().all()]
-                assert inserted == 9
+                assert inserted == 10
                 return active_versions
         finally:
             await engine.dispose()
 
     assert asyncio.run(seed_and_read_active_versions()) == [
         ("review.conventions", 2),
+        ("review.summary", 1),
         ("review.system", 5),
         ("review.verifier", 2),
     ]
+
+
+@pytest.mark.integration
+def test_seeding_review_summary_into_a_seeded_database_leaves_the_other_rows_unchanged(
+    migrated_prompt_database: tuple[str, str],
+) -> None:
+    """#316 AC8: the deploy that adds ``review.summary`` inserts its row and nothing else."""
+    database_url, schema = migrated_prompt_database
+    assets = load_prompt_assets(REPO_ROOT / "review" / "prompts")
+    before_summary = tuple(asset for asset in assets if asset.key != "review.summary")
+    every_column = select(
+        PromptVersion.id,
+        PromptVersion.key,
+        PromptVersion.version,
+        PromptVersion.content,
+        PromptVersion.checksum,
+        PromptVersion.is_active,
+        PromptVersion.created_at,
+    ).order_by(PromptVersion.key, PromptVersion.version)
+
+    async def exercise() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        engine = create_async_engine(
+            database_url, connect_args={"options": f"-csearch_path={schema}"}
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory.begin() as session:
+                assert await seed_prompt_versions(session, before_summary) == len(before_summary)
+            # Read persisted rows through a fresh session after each commit.
+            async with factory() as session:
+                before = [dict(row) for row in (await session.execute(every_column)).mappings()]
+            async with factory.begin() as session:
+                assert await seed_prompt_versions(session, assets) == 1
+            async with factory() as session:
+                after = [dict(row) for row in (await session.execute(every_column)).mappings()]
+            return before, after
+        finally:
+            await engine.dispose()
+
+    before, after = asyncio.run(exercise())
+
+    assert before
+    assert [row for row in after if row["key"] != "review.summary"] == before
+    assert [
+        (row["key"], row["version"], row["is_active"])
+        for row in after
+        if row["key"] == "review.summary"
+    ] == [("review.summary", 1, True)]
 
 
 @pytest.mark.integration
@@ -247,7 +311,7 @@ def test_full_seed_upgrades_v2_to_v3_once_and_preserves_old_content(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, legacy_assets) == 6
+                assert await seed_prompt_versions(session, legacy_assets) == 7
             async with factory() as session:
                 old = (
                     await session.scalars(
@@ -265,7 +329,7 @@ def test_full_seed_upgrades_v2_to_v3_once_and_preserves_old_content(
             # Read persisted rows through a fresh session, after both commits.
             async with factory() as session:
                 rows = list((await session.scalars(select(PromptVersion))).all())
-                assert len(rows) == 7
+                assert len(rows) == 8
                 active = [row for row in rows if row.key == "review.system" and row.is_active]
                 assert len(active) == 1
                 assert (active[0].version, active[0].content, active[0].checksum) == (
@@ -305,7 +369,7 @@ def test_seed_rejects_changed_v2_without_overwriting_its_persisted_content(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, assets) == 9
+                assert await seed_prompt_versions(session, assets) == 10
             with pytest.raises(ValueError, match=r"immutable prompt changed: review\.system\.v2"):
                 async with factory.begin() as session:
                     await seed_prompt_versions(session, (tampered,))
@@ -353,7 +417,7 @@ def test_full_seed_upgrades_v3_to_v4_once_and_preserves_v3(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, _up_to(assets, 3)) == 7
+                assert await seed_prompt_versions(session, _up_to(assets, 3)) == 8
             async with factory.begin() as session:
                 assert await seed_prompt_versions(session, _up_to(assets, 4)) == 1
             async with factory.begin() as session:
@@ -395,7 +459,7 @@ def test_full_seed_upgrades_v4_to_v5_once_and_preserves_v4(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, _up_to(assets, 4)) == 8
+                assert await seed_prompt_versions(session, _up_to(assets, 4)) == 9
             async with factory.begin() as session:
                 assert await seed_prompt_versions(session, assets) == 1
             async with factory.begin() as session:
@@ -437,7 +501,7 @@ def test_an_older_seed_after_v5_inserts_nothing_and_keeps_v5_active(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, assets) == 9
+                assert await seed_prompt_versions(session, assets) == 10
             async with factory.begin() as session:
                 assert await seed_prompt_versions(session, _up_to(assets, 4)) == 0
             async with factory.begin() as session:
