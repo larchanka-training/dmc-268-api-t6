@@ -1,7 +1,7 @@
 # Сценарий демо v1.0
 
 Показ на 7–10 минут на staging: от PR с багами и `.review/rules.md` до дашборда аналитики.
-Сверено со staging 09.11.2026 (api `0c8d626e`, ui `fc3781f2`); экранные тексты интерфейса — на
+Сверено со staging 10.11.2026 (api `42c7e5ae`, ui `bdf32fa4`); экранные тексты интерфейса — на
 английском, как в staging UI; тексты check-run на GitHub — на русском, как их пишет бот. Как
 устроена цепочка за кадром — [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -71,7 +71,7 @@ T0 — момент, когда на шаге 3 поставлен лейбл. �
 | 6:00–7:00 | 7. Цена прогона | Вкладка 3: Run, обновить | Status `succeeded`; Findings по severity; Duration; Input tokens, Output tokens, Cost; дифф с находками, фильтр по Severity. Cost округлён до цента: прогон на этом файле стоит меньше цента, на экране `$0.00`, поэтому расход показывают токенами |
 | 7:00–7:30 | 8. Аудит | Вкладка 3: Audit, строка с номером демо-PR в колонке `PR` | Строка демо-PR: Trigger `webhook`, Status `succeeded`, Cost. Она верхняя, только если после демо-прогона в workspace ничего не запускалось |
 | 7:30–8:30 | 9. Аналитика | Вкладка 4: `7 days`, репозиторий `axyi/dmc268-t6-sandbox` | Плитки `Runs: Succeeded`, `Pull requests: Blocking` / `Attention` / `Clean`, `Critical`…`Info`, `Cost`; график `Findings by day`; блок `Budget today` |
-| +1:00 | 10. Playground — если вошёл в релиз | Показать проверку правила без PR | На api `0c8d626e` и ui `fc3781f2` Playground нет: шаг пропускается |
+| +1:00 | 10. Playground — если вошёл в релиз | Показать проверку правила без PR | На api `42c7e5ae` и ui `bdf32fa4` Playground нет: шаг пропускается |
 
 Итого 8:30, с Playground — 9:30.
 
