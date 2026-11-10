@@ -440,6 +440,33 @@ def test_a_v7_capture_hides_retrieved_comments_and_replays_on_v7(tmp_path: Path)
     assert replay(root)["validity"] == 1.0
 
 
+def test_a_rag_capture_of_a_prompt_without_a_retrieved_section_is_not_replayed(
+    tmp_path: Path,
+) -> None:
+    """The recorder refuses such a prompt, so only an edited manifest names one: its replay
+    stops on the manifest, before the offline build of any case would fail on it."""
+    from review.scripts.eval_replay import ReplayError, replay
+
+    root = rag_root(tmp_path)
+    record_rag(root, valid_answers(), "graph")
+    path = root / "responses" / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    v4 = REPO_ROOT / "review" / "prompts" / "review.system.v4.md"
+    manifest.update(
+        prompt_path="review/prompts/review.system.v4.md",
+        prompt_sha=hashlib.sha256(v4.read_bytes()).hexdigest(),
+        prompt_version="v4",
+    )
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ReplayError) as refused:
+        replay(root)
+    assert str(refused.value).startswith(
+        "a RAG capture of review/prompts/review.system.v4.md: review.system v4 has no "
+        "retrieved section"
+    )
+
+
 def test_the_capture_replays_without_the_rag_fields_being_rejected(tmp_path: Path) -> None:
     from review.scripts.eval_replay import replay
 
