@@ -12,7 +12,8 @@ import yaml  # type: ignore[import-untyped]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github/workflows/sync-drift.yml"
-SCRIPT = "python3 scripts/check_sync_drift.py"
+# uv runs tools here (AGENTS.md); the script is stdlib only, so it needs no project environment.
+SCRIPT = "uv run --no-project python scripts/check_sync_drift.py"
 
 
 def _workflow() -> dict[Any, Any]:
@@ -46,16 +47,23 @@ def test_compares_this_tree_with_a_checkout_of_ui_main() -> None:
     assert workflow["permissions"] == {"contents": "read"}
     # The job name is the check name: never one of the required contexts of ruleset `main`.
     assert job["name"] == "SYNC drift vs ui main"
-    uses = [step["uses"] for step in steps if "uses" in step]
-    assert all(re.fullmatch(r"actions/checkout@[0-9a-f]{40}", ref) for ref in uses), uses
-    api, ui = (step.get("with", {}) for step in steps if "uses" in step)
-    assert api == {"persist-credentials": False}
-    assert ui == {
-        "repository": "larchanka-training/dmc-268-ui-t6",
-        "ref": "main",
-        "path": "ui-main",
-        "persist-credentials": False,
-    }
+    refs = [step["uses"] for step in steps if "uses" in step]
+    assert all(re.fullmatch(r"[\w-]+/[\w-]+@[0-9a-f]{40}", ref) for ref in refs), refs
+    actions = [(step["uses"].split("@")[0], step.get("with")) for step in steps if "uses" in step]
+    assert actions == [
+        ("actions/checkout", {"persist-credentials": False}),
+        (
+            "actions/checkout",
+            {
+                "repository": "larchanka-training/dmc-268-ui-t6",
+                "ref": "main",
+                "path": "ui-main",
+                "persist-credentials": False,
+            },
+        ),
+        # The same uv and Python as the other jobs that set up uv.
+        ("astral-sh/setup-uv", {"version": "0.12.11", "python-version": "3.13"}),
+    ]
     runs = [(step["run"].strip(), step.get("if")) for step in steps if "run" in step]
     # The JSON step runs after a red marker step too, so one run lists both kinds of drift.
     assert runs == [
