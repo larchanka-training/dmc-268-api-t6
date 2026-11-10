@@ -77,6 +77,7 @@ class RunListItem:
     summary_only: bool = False
     usage: RunUsage = field(default_factory=RunUsage)
     triggered_by: str | None = None
+    data_purged: bool = False
 
 
 @dataclass(frozen=True)

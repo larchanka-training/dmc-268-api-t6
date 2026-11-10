@@ -109,6 +109,7 @@ def test_sqlalchemy_run_repository_filters_and_orders_with_a_tied_timestamp_curs
         created_at=created_at,
         trigger="webhook",
         triggered_by=None,
+        data_purged_at=None,
     )
     code_change = SimpleNamespace(
         external_number=5, title="Review me", web_url="https://example.test/pull/5"
@@ -170,6 +171,7 @@ def test_sqlalchemy_run_repository_gets_detail_with_one_summary_query() -> None:
         created_at=created_at,
         trigger="rerun",
         triggered_by=None,
+        data_purged_at=None,
     )
     code_change = SimpleNamespace(
         external_number=5, title="Review me", web_url="https://example.test/pull/5"
@@ -195,6 +197,47 @@ def test_sqlalchemy_run_repository_gets_detail_with_one_summary_query() -> None:
     assert "SELECT usage_events.model" in sql
     assert "SELECT count(*)" in sql
     assert run.id in compiled.params.values()
+
+
+@pytest.mark.parametrize(
+    ("data_purged_at", "data_purged"),
+    [
+        pytest.param(datetime(2026, 11, 6, tzinfo=UTC), True, id="purged"),
+        pytest.param(None, False, id="not-purged"),
+    ],
+)
+def test_sqlalchemy_run_repository_maps_the_purge_marker_to_data_purged(
+    data_purged_at: datetime | None, data_purged: bool
+) -> None:
+    created_at = datetime(2026, 9, 24, tzinfo=UTC)
+    run = SimpleNamespace(
+        id=UUID("00000000-0000-0000-0000-000000000001"),
+        state=RunState.SUCCEEDED,
+        engine=Engine.FAST,
+        attempt=1,
+        cancel_requested=False,
+        started_at=created_at,
+        finished_at=created_at,
+        error_code=None,
+        head_sha="a" * 40,
+        created_at=created_at,
+        trigger="webhook",
+        triggered_by=None,
+        data_purged_at=data_purged_at,
+    )
+    code_change = SimpleNamespace(
+        external_number=5, title="Review me", web_url="https://example.test/pull/5"
+    )
+    session = FakeSession([(run, code_change, "org/repo", None, 4, False, 0, 0, 0, "github")])
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
+        allow_unscoped=True,
+    )
+
+    item = asyncio.run(repository.get_run(run.id))
+
+    assert item is not None
+    assert item.data_purged is data_purged
 
 
 def test_sqlalchemy_run_repository_cancels_only_the_locked_target_run() -> None:

@@ -162,6 +162,7 @@ class RunDetailDto(RunSessionDto):
     verdict: Verdict | None
     severity_counts: SeverityCountsDto
     budget: RunBudgetDto | None
+    data_purged: bool
 
 
 class LatestRunDto(ApiDto):

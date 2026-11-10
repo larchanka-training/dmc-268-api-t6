@@ -216,6 +216,22 @@ def test_budget_is_null_before_the_first_llm_call() -> None:
     assert detail is not None and detail.budget is None
 
 
+@pytest.mark.parametrize("data_purged", [True, False])
+def test_run_detail_endpoint_emits_data_purged(data_purged: bool) -> None:
+    from app.main import get_run_repository
+    from tests.portal_test_client import authenticated_test_client
+
+    app.dependency_overrides[get_run_repository] = lambda: Detail(
+        replace(run_item(), data_purged=data_purged), review("high")
+    )
+    try:
+        body = authenticated_test_client(app).get(f"/api/runs/{RUN}").json()
+    finally:
+        app.dependency_overrides.clear()
+
+    assert body["dataPurged"] is data_purged
+
+
 def test_run_detail_endpoint_emits_pull_request_refs_and_camel_case_results() -> None:
     from app.main import get_run_repository
     from tests.portal_test_client import authenticated_test_client

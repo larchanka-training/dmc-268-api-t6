@@ -673,6 +673,7 @@ def to_run_detail_dto(detail: RunDetail) -> RunDetailDto:
             if detail.budget is not None
             else None
         ),
+        data_purged=detail.run.data_purged,
     )
 
 
