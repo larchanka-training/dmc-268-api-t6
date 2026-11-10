@@ -13,11 +13,12 @@ from __future__ import annotations
 import atexit
 import contextlib
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
 from alembic.config import Config
-from sqlalchemy import create_engine, text
+from sqlalchemy import Connection, create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema
@@ -69,6 +70,14 @@ def _template(database_url: str) -> str:
     return template
 
 
+@dataclass(frozen=True)
+class MigratedDatabase:
+    """The URL of a ``migrated_database`` and the schema that holds its objects."""
+
+    url: str
+    schema: str
+
+
 @contextlib.contextmanager
 def migrated_database(database_url: str, schema: str) -> Iterator[str]:
     """A new database at alembic head with its objects in ``schema``; yields its URL.
@@ -89,6 +98,26 @@ def migrated_database(database_url: str, schema: str) -> Iterator[str]:
         yield clone.render_as_string(hide_password=False)
     finally:
         _execute(database_url, f'DROP DATABASE IF EXISTS "{clone.database}" WITH (FORCE)')
+
+
+@contextlib.contextmanager
+def migrated_connection(database_url: str, schema: str) -> Iterator[Connection]:
+    """A connection to a ``migrated_database`` with ``search_path`` on ``schema``.
+
+    ``connection.engine.url`` is the new database's URL; the connection rolls back on exit.
+    """
+    with migrated_database(database_url, schema) as url:
+        engine = create_engine(url, poolclass=NullPool)
+        try:
+            with engine.connect() as connection:
+                connection.execute(text(f'SET search_path TO "{schema}"'))
+                connection.commit()
+                try:
+                    yield connection
+                finally:
+                    connection.rollback()
+        finally:
+            engine.dispose()
 
 
 @atexit.register
