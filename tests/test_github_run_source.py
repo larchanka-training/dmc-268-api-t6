@@ -13,8 +13,10 @@ import pytest
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     StaticGitHubInstallationAccessTokenProvider,
 )
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.conventions import RepositoryFile
-from app.modules.reviews.application.vcs_diff import VcsMetadataProvider
+from app.modules.reviews.application.run_failures import RunFailure
+from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsMetadataProvider
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from tests.github_run_source_fakes import BASE, HEAD, LOCATOR, Blobs, Runs
 
@@ -78,6 +80,31 @@ def test_unreadable_or_binary_context_files_are_skipped_with_a_warning(
     assert files == (RepositoryFile(path="ok.py", size=9, content="print(1)\n"),)
     assert "Skipping context file logo.png" in caplog.text
     assert "Skipping context file lost.py" in caplog.text
+
+
+def test_rate_limited_context_blob_is_skipped_with_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class LimitedBlobs(Blobs):
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            if sha == "2" * 40:
+                raise RunFailure("diff_fetch_failed", retry_after=None, rate_limited=True)
+            return await super().get_blob(locator, sha, checkpoint=checkpoint)
+
+    tree = {"tree": [_blob("ok.py", "1" * 40), _blob("limited.py", "2" * 40)]}
+    source = _source(tree, LimitedBlobs({"1" * 40: b"print(1)\n"}))
+
+    async def scenario() -> tuple[RepositoryFile, ...]:
+        await source.fetch_tree(uuid4())
+        return await source.fetch_files(uuid4(), ("ok.py", "limited.py"))
+
+    with caplog.at_level(logging.WARNING):
+        files = asyncio.run(scenario())
+
+    assert files == (RepositoryFile(path="ok.py", size=9, content="print(1)\n"),)
+    assert "Skipping context file limited.py" in caplog.text
 
 
 def test_conventions_tree_and_files_come_from_the_base_revision_when_asked() -> None:

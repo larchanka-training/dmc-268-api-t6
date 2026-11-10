@@ -17,7 +17,7 @@ from app.common.infrastructure.github_repository_path import commit_sha_segment
 from app.modules.reviews.application.conventions import RepositoryFile, RepositorySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput, RunVcsRepository
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
-from app.modules.reviews.application.run_failures import RunCancelled
+from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
 from app.modules.reviews.application.vcs_diff import VcsMetadataProvider
 from app.modules.reviews.infrastructure.github_vcs import (
     _REQUEST_TIMEOUT,
@@ -130,7 +130,9 @@ class GitHubRunSource:
             try:
                 blob = await self._vcs.get_blob(run.locator, sha, checkpoint=self._checkpoint)
                 content = blob.decode("utf-8")
-            except (httpx.HTTPError, ValueError):
+            except (httpx.HTTPError, ValueError, RunFailure) as exc:
+                if isinstance(exc, RunFailure) and not exc.rate_limited:
+                    raise
                 # Context files are best effort, like the blob cache of the diff step.
                 _LOGGER.warning("Skipping context file %s of run %s", path, self._run_id)
                 continue
