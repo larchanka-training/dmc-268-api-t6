@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.bootstrap.reviews_api import get_create_rules_simulation, get_rules_simulation
+from app.main import app
 from app.modules.reviews.application.rules_simulation import (
     ActiveRulesSimulationExists,
     CreateRulesSimulation,
@@ -23,6 +29,8 @@ from app.modules.reviews.application.rules_simulation import (
 from app.modules.reviews.infrastructure.rules_simulation_store import (
     SqlAlchemyRulesSimulationUnitOfWork,
 )
+from tests.openapi_contract import _validator_for
+from tests.portal_test_client import authenticated_test_client
 from tests.rules_simulation_fakes import VISIBLE_REPOSITORY_ID, FakeRulesSimulations
 
 REPOSITORY_ID = VISIBLE_REPOSITORY_ID
@@ -262,3 +270,172 @@ def test_another_users_or_an_unknown_simulation_is_not_found() -> None:
 def test_the_store_refuses_to_work_without_a_scope() -> None:
     with pytest.raises(ValueError, match="AuthScope"):
         SqlAlchemyRulesSimulationUnitOfWork(async_sessionmaker(), None)
+
+
+SIMULATIONS = f"/api/repos/{REPOSITORY_ID}/rules-simulations"
+POST_SPEC = "/api/repos/{repo_id}/rules-simulations"
+GET_SPEC = "/api/rules-simulations/{simulation_id}"
+VALID_BODY = {"mode": "code", "path": "src/app.py", "content": "print(1)\n", "rulesMd": ""}
+
+
+@pytest.fixture
+def store() -> FakeRulesSimulations:
+    return FakeRulesSimulations()
+
+
+@pytest.fixture
+def client(store: FakeRulesSimulations) -> Iterator[TestClient]:
+    clock = Clock()
+    create, get = _use_cases(store, clock)
+    app.dependency_overrides[get_create_rules_simulation] = lambda: create
+    app.dependency_overrides[get_rules_simulation] = lambda: get
+    try:
+        yield authenticated_test_client(app)
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_a_simulation_is_accepted_with_202_and_read_by_id(client: TestClient) -> None:
+    created = client.post(SIMULATIONS, json=VALID_BODY)
+    read = client.get(f"/api/rules-simulations/{FIRST_ID}")
+
+    assert created.status_code == 202
+    expected = {
+        "id": str(FIRST_ID),
+        "repositoryId": str(REPOSITORY_ID),
+        "mode": "code",
+        "path": "src/app.py",
+        "status": "queued",
+        "errorCode": None,
+        "createdAt": "2026-11-10T12:00:00Z",
+        "finishedAt": None,
+    }
+    assert created.json() == expected
+    _validator_for("post", POST_SPEC, "202").validate(created.json())
+    assert (read.status_code, read.json()) == (200, expected)
+    _validator_for("get", GET_SPEC, "200").validate(read.json())
+
+
+def test_an_unseen_repository_or_simulation_is_404(client: TestClient) -> None:
+    repository = client.post(f"/api/repos/{UUID(int=5)}/rules-simulations", json=VALID_BODY)
+    simulation = client.get(f"/api/rules-simulations/{UUID(int=5)}")
+
+    assert (repository.status_code, repository.json()) == (404, {"detail": "repository not found"})
+    assert (simulation.status_code, simulation.json()) == (404, {"detail": "simulation not found"})
+    _validator_for("post", POST_SPEC, "404").validate(repository.json())
+    _validator_for("get", GET_SPEC, "404").validate(simulation.json())
+
+
+def test_a_second_simulation_is_409_with_the_active_id(client: TestClient) -> None:
+    client.post(SIMULATIONS, json=VALID_BODY)
+
+    response = client.post(SIMULATIONS, json=VALID_BODY)
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "active_simulation_exists", "id": str(FIRST_ID)}
+    _validator_for("post", POST_SPEC, "409").validate(response.json())
+
+
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        (
+            {"content": "x" * 65_537},
+            {"detail": "content_too_large", "limit": 65_536, "actual": 65_537, "diagnostics": []},
+        ),
+        (
+            {"path": "../app.py"},
+            {"detail": "path_invalid", "limit": None, "actual": None, "diagnostics": []},
+        ),
+        (
+            {"rulesMd": "```review-ignore\nsrc/[ab]\n```\n"},
+            {
+                "detail": "rules_invalid",
+                "limit": None,
+                "actual": None,
+                "diagnostics": [
+                    {
+                        "code": "policy_ignore_pattern_invalid",
+                        "message": (
+                            "Invalid review-ignore mask: the character is reserved in a mask"
+                        ),
+                        "line": 2,
+                        "column": 5,
+                        "limit": None,
+                        "actual": None,
+                    }
+                ],
+            },
+        ),
+    ],
+    ids=["content-too-large", "path-invalid", "rules-invalid"],
+)
+def test_a_refused_input_is_422_with_its_code(
+    client: TestClient, store: FakeRulesSimulations, change: dict[str, str], expected: object
+) -> None:
+    response = client.post(SIMULATIONS, json={**VALID_BODY, **change})
+
+    assert (response.status_code, response.json()) == (422, expected)
+    _validator_for("post", POST_SPEC, "422").validate(response.json())
+    assert store.rows == {}
+
+
+@pytest.mark.parametrize(
+    ("body", "error_type", "location"),
+    [
+        ({k: v for k, v in VALID_BODY.items() if k != "mode"}, "missing", ["body", "mode"]),
+        ({**VALID_BODY, "mode": "patch"}, "enum", ["body", "mode"]),
+        ({**VALID_BODY, "content": ""}, "string_too_short", ["body", "content"]),
+        ({**VALID_BODY, "extra": "x"}, "extra_forbidden", ["body", "<unknown field>"]),
+    ],
+    ids=["missing-field", "unknown-mode", "empty-content", "unknown-field"],
+)
+def test_a_malformed_body_is_422_without_echoing_the_input(
+    client: TestClient, body: dict[str, str], error_type: str, location: list[str]
+) -> None:
+    response = client.post(SIMULATIONS, json=body)
+
+    assert response.status_code == 422
+    [error] = response.json()["detail"]
+    assert set(error) == {"type", "loc", "msg"}
+    assert (error["type"], error["loc"]) == (error_type, location)
+    _validator_for("post", POST_SPEC, "422").validate(response.json())
+
+
+def test_64_kib_of_code_and_rules_reach_the_checks_instead_of_413(client: TestClient) -> None:
+    body = {**VALID_BODY, "content": "x" * 65_537, "rulesMd": "y" * 65_536}
+
+    response = client.post(
+        SIMULATIONS,
+        content=json.dumps(body).encode(),
+        headers={"content-type": "application/json"},
+    )
+
+    assert (response.status_code, response.json()["detail"]) == (422, "content_too_large")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"mode": "code", "content": SECRET, "rulesMd": SECRET},
+        {**VALID_BODY, "mode": SECRET, "content": SECRET, "rulesMd": SECRET},
+        {**VALID_BODY, "content": SECRET * 4_000, "rulesMd": SECRET},
+        {**VALID_BODY, "content": SECRET, "rulesMd": f"```review-ignore\n{SECRET}/[x]\n```\n"},
+        {**VALID_BODY, "content": SECRET, "rulesMd": SECRET * 2_000},
+        {**VALID_BODY, "content": SECRET, "rulesMd": f"# {SECRET}\n"},
+    ],
+    ids=["missing-path", "bad-mode", "content-too-large", "bad-mask", "tokens", "accepted"],
+)
+def test_pasted_code_and_rules_reach_neither_logs_nor_error_bodies(
+    client: TestClient, caplog: pytest.LogCaptureFixture, body: dict[str, str]
+) -> None:
+    caplog.set_level(logging.DEBUG)
+
+    first = client.post(SIMULATIONS, json=body)
+    again = client.post(SIMULATIONS, json=body)
+    other = client.post(f"/api/repos/{UUID(int=5)}/rules-simulations", json=body)
+
+    for response in (first, again, other):
+        assert response.status_code in {202, 404, 409, 422}
+        assert SECRET not in response.text
+    assert SECRET not in caplog.text

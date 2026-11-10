@@ -29,11 +29,13 @@ from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import (
     ReviewsApiResources,
     get_cancel_run,
+    get_create_rules_simulation,
     get_file_blob_cache,
     get_github_webhook_receipt_uow_factory,
     get_pull_requests,
     get_repository_settings,
     get_rerun_uow_factory,
+    get_rules_simulation,
     get_rules_status,
     get_run_publisher,
     get_run_repository,
@@ -49,7 +51,10 @@ from app.bootstrap.run_step_listener import run_step_listener
 from app.bootstrap.run_update_listener import run_update_listener
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
 from app.common.domain.run_enums import RunStatus
-from app.common.infrastructure.request_body_limit import RequestBodyLimitMiddleware
+from app.common.infrastructure.request_body_limit import (
+    RequestBodyLimitMiddleware,
+    allow_request_body,
+)
 from app.common.infrastructure.telemetry import (
     TracingMiddleware,
     configure_logging,
@@ -113,6 +118,11 @@ from app.modules.reviews.api.dtos import (
     PullsByVerdictDto,
     ReviewCommentDto,
     ReviewSummaryDto,
+    RulesInputDiagnosticDto,
+    RulesSimulationConflictDto,
+    RulesSimulationCreateDto,
+    RulesSimulationDto,
+    RulesSimulationRejectionDto,
     RunActionDto,
     RunBudgetDto,
     RunDetailDto,
@@ -176,6 +186,14 @@ from app.modules.reviews.application.rerun_run import (
     RerunUnitOfWork,
 )
 from app.modules.reviews.application.review_output import Category, Severity
+from app.modules.reviews.application.rules_simulation import (
+    ActiveRulesSimulationExists,
+    CreateRulesSimulation,
+    GetRulesSimulation,
+    RulesSimulation,
+    RulesSimulationRejected,
+    RulesSimulationRequest,
+)
 from app.modules.reviews.application.run_events import (
     InMemoryRunStepHub,
     InMemoryRunUpdateHub,
@@ -191,6 +209,9 @@ from app.modules.reviews.application.run_events import (
     utc_rfc3339,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
+
+# 64 KiB of code plus 64 KiB of rules with room for JSON escapes; each is checked on its own.
+RULES_SIMULATION_BODY_BYTES = 512 * 1024
 
 api_router = APIRouter(
     prefix="/api", dependencies=[Depends(get_auth_scope)], route_class=StrictJsonRoute
@@ -417,7 +438,10 @@ def _safe_validation_location(request: Request, error: dict[str, Any]) -> tuple[
 
 @app.exception_handler(RequestValidationError)
 async def render_validation_error(request: Request, exc: RequestValidationError) -> Response:
-    """Preserve FastAPI errors outside Bitbucket; redact workspace and webhook routes."""
+    """Preserve FastAPI errors outside Bitbucket and rules simulations; redact those routes.
+
+    A rules simulation body holds pasted code and rules (#311): its errors never echo them.
+    """
     path = request.url.path
     segments = path.split("/")
     is_bitbucket_route = (
@@ -429,7 +453,12 @@ async def render_validation_error(request: Request, exc: RequestValidationError)
         or path == "/webhooks/bitbucket"
         or path.startswith("/webhooks/bitbucket/")
     )
-    if not is_bitbucket_route:
+    is_rules_simulation_route = (
+        len(segments) == 5
+        and segments[1:3] == ["api", "repos"]
+        and segments[4] == "rules-simulations"
+    ) or segments[1:3] == ["api", "rules-simulations"]
+    if not is_bitbucket_route and not is_rules_simulation_route:
         try:
             return await request_validation_exception_handler(request, exc)
         except (UnicodeEncodeError, UnicodeDecodeError):
@@ -707,6 +736,39 @@ def to_rules_status_dto(item: RulesStatus) -> RulesStatusDto:
     }
     dto = _RULES_STATUS_DTOS[item.status]
     return cast(RulesStatusDto, dto.model_validate({k: values[k] for k in dto.model_fields}))
+
+
+def to_rules_simulation_dto(item: RulesSimulation) -> RulesSimulationDto:
+    return RulesSimulationDto(
+        id=item.id,
+        repository_id=item.repository_id,
+        mode=item.mode,
+        path=item.path,
+        status=item.status,
+        error_code=item.error_code,
+        created_at=item.created_at,
+        finished_at=item.finished_at,
+    )
+
+
+def _rules_simulation_rejection(error: RulesSimulationRejected) -> JSONResponse:
+    body = RulesSimulationRejectionDto(
+        detail=error.code,
+        limit=error.limit,
+        actual=error.actual,
+        diagnostics=[
+            RulesInputDiagnosticDto(
+                code=item.code,
+                message=item.message,
+                line=item.line,
+                column=item.column,
+                limit=item.limit,
+                actual=item.actual,
+            )
+            for item in error.diagnostics
+        ],
+    )
+    return JSONResponse(body.model_dump(mode="json", by_alias=True), status_code=422)
 
 
 def to_pull_request_summary_dto(item: PullRequestSummary) -> PullRequestSummaryDto:
@@ -1257,6 +1319,69 @@ async def get_repository_rules_status(
     if item is None:
         raise HTTPException(status_code=404, detail="repository not found")
     return to_rules_status_dto(item)
+
+
+@api_router.post(
+    "/repos/{repo_id}/rules-simulations",
+    status_code=202,
+    response_model=RulesSimulationDto,
+    summary="Simulate a review of pasted code under pasted rules",
+    description=(
+        "Accept pasted code or a diff and the text that takes the role of `.review/rules.md`; "
+        "the simulation is read with `GET /api/rules-simulations/{simulation_id}`."
+    ),
+    responses={
+        401: {"description": "Unauthorized"},
+        404: {"description": "Repository not found"},
+        409: {"model": RulesSimulationConflictDto, "description": "A simulation is active"},
+        422: {"model": RulesSimulationRejectionDto, "description": "Input refused"},
+    },
+)
+@allow_request_body(RULES_SIMULATION_BODY_BYTES)
+async def create_rules_simulation(
+    repo_id: UUID,
+    body: RulesSimulationCreateDto,
+    use_case: Annotated[CreateRulesSimulation, Depends(get_create_rules_simulation)],
+) -> RulesSimulationDto | JSONResponse:
+    request = RulesSimulationRequest(
+        repository_id=repo_id,
+        mode=body.mode,
+        path=body.path,
+        content=body.content,
+        rules_md=body.rules_md,
+    )
+    try:
+        item = await use_case.execute(request)
+    except RulesSimulationRejected as error:
+        return _rules_simulation_rejection(error)
+    except ActiveRulesSimulationExists as error:
+        conflict = RulesSimulationConflictDto(
+            detail="active_simulation_exists", id=error.simulation_id
+        )
+        return JSONResponse(conflict.model_dump(mode="json", by_alias=True), status_code=409)
+    if item is None:
+        raise HTTPException(status_code=404, detail="repository not found")
+    return to_rules_simulation_dto(item)
+
+
+@api_router.get(
+    "/rules-simulations/{simulation_id}",
+    response_model=RulesSimulationDto,
+    summary="Get a rules simulation",
+    description="The status of a simulation of the caller; another user's is 404.",
+    responses={
+        401: {"description": "Unauthorized"},
+        404: {"description": "Simulation not found"},
+    },
+)
+async def get_rules_simulation_status(
+    simulation_id: UUID,
+    use_case: Annotated[GetRulesSimulation, Depends(get_rules_simulation)],
+) -> RulesSimulationDto:
+    item = await use_case.execute(simulation_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="simulation not found")
+    return to_rules_simulation_dto(item)
 
 
 @api_router.get(

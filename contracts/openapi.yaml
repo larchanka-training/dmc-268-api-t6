@@ -35,7 +35,9 @@ info:
     `BitbucketHTTPValidationError`: rejected `input` and `ctx` are omitted, and
     `loc` preserves declared field names and array indices while replacing
     submitted object keys outside the declared schema with `<unknown field>`.
-    This keeps Bitbucket credentials out of its 422 response.
+    This keeps Bitbucket credentials out of its 422 response. The rules simulation
+    operations redact theirs the same way (`RedactedHTTPValidationError`): their
+    bodies hold pasted code and rules.
 
     **Extensions.** `x-service` names the logical service that owns an operation (one FastAPI
     app today, see Origin and CORS).
@@ -61,8 +63,8 @@ tags:
     description: Workspace-scoped Bitbucket Cloud repository connection management.
   - name: rules
     description: >-
-      The `.review/rules.md` status of a repository; the planned DB rule set operations are
-      replaced (RULES_FORMAT_SPEC §10).
+      The `.review/rules.md` status of a repository and rules playground simulations; the
+      planned DB rule set operations are replaced (RULES_FORMAT_SPEC §10).
   - name: metrics
     description: Usage totals, a daily series, and workspace daily budgets.
   - name: badges
@@ -852,6 +854,123 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
+  /api/repos/{repo_id}/rules-simulations:
+    parameters:
+      - $ref: "#/components/parameters/RepoId"
+    post:
+      operationId: createRulesSimulation
+      tags: [rules]
+      summary: Simulate a review of pasted code under pasted rules (rules playground)
+      description: |
+        Accepts pasted code (`mode: code`: the file `path` whole, as added) or a unified diff of
+        that one file (`mode: diff`: lines of its right side) and `rulesMd`, which takes the role
+        of `.review/rules.md` next to the service defaults; an empty `rulesMd` means the service
+        defaults only. The simulation is a separate operation, not `previewRuleVersion`: it
+        calls the model, changes no rules of the repository and creates no run, check run or
+        provider call (RULES_FORMAT_SPEC §10). The answer is `202` with the stored simulation;
+        its result is read with `getRulesSimulation`. Visibility is the same as
+        `getRepository`: a repository of another Workspace is 404.
+
+        **Not executed yet.** Until #311 Part 4 no worker takes a simulation: it stays
+        `queued` and is `failed` with `deadline_exceeded` 10 minutes after its creation.
+
+        Every refusal comes before any model call and stores nothing:
+        - `422` `path_invalid`: `path` is not a canonical repository path (no empty, `.` or `..`
+          segment, no leading `/`, no backslash or control character, at most 1 024 UTF-8 bytes
+          and 128 segments);
+        - `422` `content_invalid`: `content` holds U+0000 or a lone surrogate;
+        - `422` `content_too_large`: `content` is over 65 536 UTF-8 bytes, with `limit` and
+          `actual`;
+        - `422` `rules_invalid`: `rulesMd` breaks the format or `policy-limits/v1`
+          (RULES_FORMAT_SPEC §3.3: 65 536 bytes, encoding, control characters, the
+          `review-ignore` block and its masks, and the 12 000-token budget of the rendered
+          rules, counted with `counter/v2`), with one §9 diagnostic;
+        - `422` `HTTPValidationError` for a malformed body, without the rejected values;
+        - `409` `active_simulation_exists` with the `id` of the caller's `queued` or `running`
+          simulation: one at a time per user. A simulation not finished 10 minutes after its
+          creation is `failed` with `deadline_exceeded` and no longer counts as active.
+
+        Neither the pasted code nor the rules are quoted in a response, a log or an error:
+        a diagnostic names a line and a column, never the text there. The body may take up to
+        512 KiB (64 KiB of code and 64 KiB of rules with room for JSON escapes); a larger one is
+        `413`.
+      x-service: portal-api
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RulesSimulationCreate"
+      responses:
+        "202":
+          description: The simulation is stored as `queued`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RulesSimulation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The caller already has an active simulation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RulesSimulationConflict"
+        "413":
+          description: The request body exceeds 512 KiB. It is refused while being read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "422":
+          description: The input is refused, or the body is malformed.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/RulesSimulationRejection"
+                  - $ref: "#/components/schemas/RedactedHTTPValidationError"
+        "503":
+          description: Authentication is not configured.
+  /api/rules-simulations/{simulation_id}:
+    parameters:
+      - name: simulation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getRulesSimulation
+      tags: [rules]
+      summary: Status of a rules playground simulation
+      description: |
+        A simulation of the caller in a repository the caller can still see; another user's
+        simulation, or one whose repository is no longer visible, is 404. A `queued` or
+        `running` simulation not finished 10 minutes after `createdAt` is answered, and
+        stored, as `failed` with `errorCode: deadline_exceeded`. `errorCode` is set only for
+        `failed`.
+      x-service: portal-api
+      responses:
+        "200":
+          description: The simulation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RulesSimulation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: The simulation id is not a UUID; the rejected value is not echoed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RedactedHTTPValidationError"
         "503":
           description: Authentication is not configured.
   /api/repos/{repo_id}/rules:
@@ -2403,6 +2522,130 @@ components:
           description: >-
             The offending mask, cut to 80 characters with `...`; backticks become `'` and control
             characters `?`.
+      additionalProperties: false
+    RulesSimulationCreate:
+      type: object
+      description: >-
+        Pasted code or a one-file diff and the text that takes the role of `.review/rules.md`.
+      required: [mode, path, content, rulesMd]
+      properties:
+        mode:
+          $ref: "#/components/schemas/RulesSimulationMode"
+        path:
+          type: string
+          description: Repository-relative path of the pasted file; it names the language.
+        content:
+          type: string
+          minLength: 1
+          description: At most 65 536 UTF-8 bytes, checked after parsing (`content_too_large`).
+        rulesMd:
+          type: string
+          description: Empty means the service defaults only.
+      additionalProperties: false
+    RulesSimulationMode:
+      type: string
+      description: "`code`: the file whole, as added; `diff`: a unified diff of that file."
+      enum: [code, diff]
+    RulesSimulation:
+      type: object
+      description: A simulation as stored; the pasted code and rules are never returned.
+      required: [id, repositoryId, mode, path, status, errorCode, createdAt, finishedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        repositoryId:
+          type: string
+          format: uuid
+        mode:
+          $ref: "#/components/schemas/RulesSimulationMode"
+        path:
+          type: string
+        status:
+          type: string
+          description: "`queued` and `running` are active; `succeeded` and `failed` are final."
+          enum: [queued, running, succeeded, failed]
+        errorCode:
+          type: [string, "null"]
+          description: Set only for `failed`; `deadline_exceeded` after 10 minutes.
+        createdAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: [string, "null"]
+          format: date-time
+      additionalProperties: false
+    RulesSimulationConflict:
+      type: object
+      description: The caller's active simulation, which a new one waits for.
+      required: [detail, id]
+      properties:
+        detail:
+          type: string
+          const: active_simulation_exists
+        id:
+          type: string
+          format: uuid
+      additionalProperties: false
+    RulesSimulationRejection:
+      type: object
+      description: >-
+        An input refused before any model call. `limit` and `actual` are set for
+        `content_too_large`; `diagnostics` holds one entry for `rules_invalid`.
+      required: [detail, limit, actual, diagnostics]
+      properties:
+        detail:
+          type: string
+          enum: [path_invalid, content_invalid, content_too_large, rules_invalid]
+        limit:
+          type: [integer, "null"]
+          minimum: 0
+        actual:
+          type: [integer, "null"]
+          minimum: 0
+        diagnostics:
+          type: array
+          items:
+            $ref: "#/components/schemas/RulesInputDiagnostic"
+      additionalProperties: false
+    RulesInputDiagnostic:
+      type: object
+      description: >-
+        One RULES_FORMAT_SPEC §9 diagnostic of `rulesMd`: `code` is a `policy_*` code, `message`
+        has no location and quotes nothing of the rules, `line` and `column` are 1-based (the
+        column in Unicode scalars) and null when the problem has no position.
+      required: [code, message, line, column, limit, actual]
+      properties:
+        code:
+          type: string
+          minLength: 1
+        message:
+          type: string
+        line:
+          type: [integer, "null"]
+          minimum: 1
+        column:
+          type: [integer, "null"]
+          minimum: 1
+        limit:
+          type: [integer, "null"]
+          minimum: 0
+        actual:
+          type: [integer, "null"]
+          minimum: 0
+      additionalProperties: false
+    RedactedHTTPValidationError:
+      type: object
+      description: >-
+        A request validation error of a route whose body holds pasted code or secrets: rejected
+        values and context are omitted, and submitted object keys outside the schema are
+        `<unknown field>` in `loc`.
+      required: [detail]
+      properties:
+        detail:
+          type: array
+          items:
+            $ref: "#/components/schemas/BitbucketValidationError"
       additionalProperties: false
     RulesStatus:
       description: The last read of `.review/rules.md`, told apart by `status`.

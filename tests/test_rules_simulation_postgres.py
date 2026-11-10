@@ -30,7 +30,7 @@ from app.modules.reviews.infrastructure.rules_simulation_store import (
     SqlAlchemyRulesSimulationStore,
     SqlAlchemyRulesSimulationUnitOfWork,
 )
-from tests.portal_postgres import REPO_A, REPO_B, WS_A, WS_B, Env
+from tests.portal_postgres import REPO_A, REPO_B, WS_A, WS_B, Env, api
 
 pytest_plugins = ("tests.portal_postgres",)
 
@@ -262,3 +262,21 @@ def test_a_failed_insert_does_not_carry_the_pasted_input(portal_env: Env) -> Non
         assert error.__suppress_context__
 
     _run(portal_env, scenario)
+
+
+def test_the_endpoints_run_on_the_real_store(portal_env: Env) -> None:
+    body = {"mode": "diff", "path": "src/app.py", "content": "@@ -1 +1 @@\n-a\n+b\n", "rulesMd": ""}
+    with api(portal_env, _ALICE) as (client, _):
+        created = client.post(f"/api/repos/{REPO_A}/rules-simulations", json=body)
+        read = client.get(f"/api/rules-simulations/{created.json()['id']}")
+        again = client.post(f"/api/repos/{REPO_A}/rules-simulations", json=body)
+        other = client.post(f"/api/repos/{REPO_B}/rules-simulations", json=body)
+
+    assert created.status_code == 202
+    assert (read.status_code, read.json()) == (200, created.json())
+    assert read.json()["status"] == "queued"
+    assert (again.status_code, again.json()) == (
+        409,
+        {"detail": "active_simulation_exists", "id": created.json()["id"]},
+    )
+    assert (other.status_code, other.json()) == (404, {"detail": "repository not found"})

@@ -4,12 +4,17 @@ from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, ConfigDict
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from app.common.domain.run_enums import Engine, RunStatus
 from app.modules.reviews.application.finding_side import Side
 from app.modules.reviews.application.get_metrics_summary import MetricsRange
 from app.modules.reviews.application.review_output import Category, Effort, Severity
+from app.modules.reviews.application.rules_simulation import (
+    RulesSimulationMode,
+    RulesSimulationRejectionCode,
+    RulesSimulationStatus,
+)
 from app.modules.reviews.application.run_trigger import RunTrigger
 from app.modules.reviews.application.verdict import Verdict
 
@@ -240,3 +245,47 @@ class MetricsSummaryDto(ApiDto):
     totals: MetricsTotalsDto
     series: list[MetricsDayDto]
     workspaces: list[WorkspaceDailyBudgetDto]
+
+
+class RulesSimulationCreateDto(ApiDto):
+    """The pasted code or diff and the text that takes the role of ``.review/rules.md``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: RulesSimulationMode
+    path: str
+    # The 64 KiB limit is checked by the use case: a schema error would echo the value.
+    content: str = Field(min_length=1)
+    rules_md: str
+
+
+class RulesSimulationDto(ApiDto):
+    id: UUID
+    repository_id: UUID
+    mode: RulesSimulationMode
+    path: str
+    status: RulesSimulationStatus
+    error_code: str | None
+    created_at: UtcDatetime
+    finished_at: UtcDatetime | None
+
+
+class RulesSimulationConflictDto(ApiDto):
+    detail: Literal["active_simulation_exists"]
+    id: UUID
+
+
+class RulesInputDiagnosticDto(ApiDto):
+    code: str
+    message: str
+    line: int | None
+    column: int | None
+    limit: int | None
+    actual: int | None
+
+
+class RulesSimulationRejectionDto(ApiDto):
+    detail: RulesSimulationRejectionCode
+    limit: int | None
+    actual: int | None
+    diagnostics: list[RulesInputDiagnosticDto]

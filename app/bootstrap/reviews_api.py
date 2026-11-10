@@ -118,6 +118,10 @@ from app.modules.reviews.application.publish_cancellation_signals import (
 )
 from app.modules.reviews.application.repository_badge import BadgeRun, GetRepositoryBadge
 from app.modules.reviews.application.rerun_run import RerunUnitOfWork
+from app.modules.reviews.application.rules_simulation import (
+    CreateRulesSimulation,
+    GetRulesSimulation,
+)
 from app.modules.reviews.application.run_events import (
     InMemoryRunUpdateHub,
     RunAccessRepository,
@@ -148,6 +152,9 @@ from app.modules.reviews.infrastructure.repository_badge_queries import (
     SqlAlchemyRepositoryBadgeQueries,
 )
 from app.modules.reviews.infrastructure.rerun_store import SqlAlchemyRerunUnitOfWork
+from app.modules.reviews.infrastructure.rules_simulation_store import (
+    SqlAlchemyRulesSimulationUnitOfWork,
+)
 from app.modules.reviews.infrastructure.run_repository import (
     SqlAlchemyCancelRunUnitOfWork,
     SqlAlchemyRunRepository,
@@ -488,6 +495,24 @@ def get_rules_status(
 ) -> GetRulesStatus:
     return GetRulesStatus(
         partial(SqlAlchemyRulesStatusUnitOfWork, _resources(request).session_factory, scope)
+    )
+
+
+def get_create_rules_simulation(
+    request: Request,
+    scope: Annotated[AuthScope, Depends(get_auth_scope)],
+) -> CreateRulesSimulation:
+    return CreateRulesSimulation(
+        partial(SqlAlchemyRulesSimulationUnitOfWork, _resources(request).session_factory, scope)
+    )
+
+
+def get_rules_simulation(
+    request: Request,
+    scope: Annotated[AuthScope, Depends(get_auth_scope)],
+) -> GetRulesSimulation:
+    return GetRulesSimulation(
+        partial(SqlAlchemyRulesSimulationUnitOfWork, _resources(request).session_factory, scope)
     )
 
 

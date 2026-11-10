@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
 from app.common.application.unit_of_work import UnitOfWork
@@ -105,12 +105,17 @@ class RulesInputDiagnostic:
         )
 
 
+RulesSimulationRejectionCode = Literal[
+    "path_invalid", "content_invalid", "content_too_large", "rules_invalid"
+]
+
+
 class RulesSimulationRejected(Exception):
     """A refused input; the exception text is the code alone."""
 
     def __init__(
         self,
-        code: str,
+        code: RulesSimulationRejectionCode,
         *,
         limit: int | None = None,
         actual: int | None = None,
