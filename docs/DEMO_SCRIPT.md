@@ -64,10 +64,10 @@ T0 — момент, когда на шаге 3 поставлен лейбл. �
 |---|---|---|---|
 | 0:00–0:45 | 1. Правила команды | Вкладка 1: `.review/rules.md` | Разделы `# Security` (параметризованный SQL), `## Python` (`except Exception` только на границе фоновой задачи), `# Performance` (запрос на каждый элемент списка), блок `review-ignore`: GitHub показывает его блоком кода с `generated/**` и `**/*.min.js` |
 | 0:45–1:30 | 2. PR с багами | Вкладка 2 → Files changed | Новый файл `shop/orders.py`; во вкладке Checks — зелёный `CI / check` |
-| 1:30–2:00 | 3. Триггер | Справа Labels → `ai-review`. Засечь T0 | Лейбл `ai-review` на PR; через несколько секунд в Checks появляется `AI Review` — «AI-ревью выполняется». На репетиции прогон `fast` шёл около 20 секунд, и к концу шага check уже мог смениться на «AI-ревью: <вердикт>» |
+| 1:30–2:00 | 3. Триггер | Справа Labels → `ai-review`. Засечь T0. Вкладка Checks | Лейбл `ai-review` на PR. Во вкладке Checks через несколько секунд, без перезагрузки, появляется группа `dmc268-t6-reviewer` с `AI Review` и жёлтым значком выполнения; название check-run в списке не показывается. Прогон `fast` идёт около 20 секунд, и к концу шага значок может смениться на итоговый |
 | 2:00–3:30 | 4. Правила в портале | Вкладка 3: Settings песочницы | Automatic review включён; CI waiting — `Auto (wait for CI when the commit has checks)`; панель Review rules — `File found`, `.review/rules.md`, `main`, текст файла, Ignored paths `**/*.min.js` и `generated/**` |
 | 3:30–4:30 | 5. Как шёл прогон | Вкладка 3: Runs → строка демо-PR | Страница `Run for PR #<N>`: этапы `Collecting context` → `Model analysis` → `Publishing` отмечены пройденными, список `Review session` — от `policy.load` до `github.publish_review`, модель, `Token limit`, `Cost limit`. Прогон к этому шагу обычно закончен; если ещё идёт, этапы и список растут на экране |
-| 4:30–6:00 | 6. Ревью на PR | Вкладка 2 → Conversation. Ревью нет — [запасной путь](#3-запасной-путь-ревью-не-пришло) | Ревью от `dmc268-t6-reviewer[bot]`: `Executive summary` с `Verdict` и `Risk Score`, `Risk summary`; inline-комментарии в `shop/orders.py` (ожидаются, см. под таблицей); в Checks `AI Review` — «AI-ревью: <вердикт>» |
+| 4:30–6:00 | 6. Ревью на PR | Вкладка 2 → Conversation, затем Checks → `AI Review`. Ревью нет — [запасной путь](#3-запасной-путь-ревью-не-пришло) | Ревью от `dmc268-t6-reviewer[bot]`: `Executive summary` с `Verdict` и `Risk Score`, `Risk summary`; inline-комментарии в `shop/orders.py` (ожидаются, см. под таблицей). В Checks справа — заголовок «AI-ревью: <вердикт>», под ним счёт находок `critical: …, high: …`, строка `inline: N` и ссылка на Run |
 | 6:00–7:00 | 7. Цена прогона | Вкладка 3: Run, обновить | Status `succeeded`; Findings по severity; Duration; Input tokens, Output tokens, Cost; дифф с находками, фильтр по Severity. Cost округлён до цента: прогон на этом файле стоит меньше цента, на экране `$0.00`, поэтому расход показывают токенами |
 | 7:00–7:30 | 8. Аудит | Вкладка 3: Audit, строка с номером демо-PR в колонке `PR` | Строка демо-PR: Trigger `webhook`, Status `succeeded`, Cost. Она верхняя, только если после демо-прогона в workspace ничего не запускалось |
 | 7:30–8:30 | 9. Аналитика | Вкладка 4: `7 days`, репозиторий `axyi/dmc268-t6-sandbox` | Плитки `Runs: Succeeded`, `Pull requests: Blocking` / `Attention` / `Clean`, `Critical`…`Info`, `Cost`; график `Findings by day`; блок `Budget today` |
@@ -96,7 +96,8 @@ T0 — момент, когда на шаге 3 поставлен лейбл. �
 не пришло — ведущий переключается на запасной PR.
 
 1. Причину назвать по `AI Review` во вкладке Checks демо-PR и по странице Runs, не больше 20
-   секунд. Check-run создаётся, когда worker берёт Run, а не когда Run создан
+   секунд. Название check-run видно справа после клика по `AI Review`, в списке его нет.
+   Check-run создаётся, когда worker берёт Run, а не когда Run создан
    ([PIPELINE_SPEC.md §1](PIPELINE_SPEC.md#1-состояния-и-переходы), T1 и T4):
    - `AI Review` нет, строки демо-PR в Runs нет: Run не создан. Причины: Automatic review
      выключен, CI не зелёный, лейбл не `ai-review`, PR закрыт.
