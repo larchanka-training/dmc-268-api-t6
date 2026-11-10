@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -47,10 +46,8 @@ class Database:
 
 
 @pytest.fixture
-def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
-    database_url = migrated_db.url
-    schema = migrated_db.schema
-    yield Database(database_url, schema)
+def database(migrated_db: MigratedDatabase) -> Database:
+    return Database(migrated_db.url, migrated_db.schema)
 
 
 class UnknownInstallation:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from dataclasses import replace
 from hashlib import sha256
 from importlib.resources import files
@@ -31,11 +30,9 @@ def _up_to(assets: tuple[PromptAsset, ...], version: int) -> tuple[PromptAsset, 
 
 
 @pytest.fixture
-def migrated_prompt_database(migrated_db: MigratedDatabase) -> Iterator[tuple[str, str]]:
-    """Provide a disposable, migrated PostgreSQL schema when explicitly configured."""
-    database_url = migrated_db.url
-    schema = migrated_db.schema
-    yield database_url, schema
+def migrated_prompt_database(migrated_db: MigratedDatabase) -> tuple[str, str]:
+    """Provide a disposable, migrated PostgreSQL database when explicitly configured."""
+    return migrated_db.url, migrated_db.schema
 
 
 def test_load_prompt_assets_preserves_full_file_and_checksum() -> None:

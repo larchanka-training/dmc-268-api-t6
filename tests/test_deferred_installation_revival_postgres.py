@@ -7,7 +7,6 @@ schema; receipts are seeded directly. Opt-in with ``TEST_DATABASE_URL``.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -48,10 +47,8 @@ class Database:
 
 
 @pytest.fixture
-def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
-    database_url = migrated_db.url
-    schema = migrated_db.schema
-    yield Database(database_url, schema)
+def database(migrated_db: MigratedDatabase) -> Database:
+    return Database(migrated_db.url, migrated_db.schema)
 
 
 def _receipt(

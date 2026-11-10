@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -46,11 +45,9 @@ AGENTS_SHA = "a" * 40
 
 
 @pytest.fixture
-def migrated_conventions_database(migrated_db: MigratedDatabase) -> Iterator[tuple[str, str]]:
-    """Provide a disposable migrated PostgreSQL schema when explicitly configured."""
-    database_url = migrated_db.url
-    schema = migrated_db.schema
-    yield database_url, schema
+def migrated_conventions_database(migrated_db: MigratedDatabase) -> tuple[str, str]:
+    """Provide a disposable migrated PostgreSQL database when explicitly configured."""
+    return migrated_db.url, migrated_db.schema
 
 
 async def _seed_repository_with_two_runs(

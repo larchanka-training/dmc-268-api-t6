@@ -89,10 +89,7 @@ def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
                     },
                 )
         connection.commit()
-        try:
-            yield Database(url, schema)
-        finally:
-            connection.rollback()
+        yield Database(url, schema)
 
 
 async def seed_receipt(

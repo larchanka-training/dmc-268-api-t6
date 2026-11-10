@@ -123,10 +123,7 @@ def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
                 {"id": repository, "origin": origin, "instance": instance},
             )
         connection.commit()
-        try:
-            yield Database(url, schema)
-        finally:
-            connection.rollback()
+        yield Database(url, schema)
 
 
 def receipt(

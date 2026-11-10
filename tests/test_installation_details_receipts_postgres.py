@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -58,10 +58,8 @@ class Database:
 
 
 @pytest.fixture
-def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
-    database_url = migrated_db.url
-    schema = migrated_db.schema
-    yield Database(database_url, schema)
+def database(migrated_db: MigratedDatabase) -> Database:
+    return Database(migrated_db.url, migrated_db.schema)
 
 
 @dataclass

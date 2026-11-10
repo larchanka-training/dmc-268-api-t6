@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -21,10 +20,8 @@ pytest_plugins = ("tests.migrated_postgres",)
 
 
 @pytest.fixture
-def auth_schema(migrated_db: MigratedDatabase) -> Iterator[tuple[str, str]]:
-    database_url = migrated_db.url
-    schema = migrated_db.schema
-    yield database_url, schema
+def auth_schema(migrated_db: MigratedDatabase) -> tuple[str, str]:
+    return migrated_db.url, migrated_db.schema
 
 
 @pytest.mark.integration

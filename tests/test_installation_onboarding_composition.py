@@ -7,7 +7,7 @@ import hashlib
 import hmac
 import json
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -120,11 +120,9 @@ class UnusedDetailsProvider(InstallationRepositoryDetailsProvider):
 
 
 @pytest.fixture
-def migrated_onboarding_database(migrated_db: MigratedDatabase) -> Iterator[tuple[str, str]]:
-    """Provide an isolated migrated PostgreSQL schema when configured."""
-    database_url = migrated_db.url
-    schema = migrated_db.schema
-    yield database_url, schema
+def migrated_onboarding_database(migrated_db: MigratedDatabase) -> tuple[str, str]:
+    """Provide an isolated migrated PostgreSQL database when configured."""
+    return migrated_db.url, migrated_db.schema
 
 
 def test_composition_accepts_typed_event_and_internal_installation_id(

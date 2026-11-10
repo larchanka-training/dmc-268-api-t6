@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import TracebackType
@@ -433,10 +432,8 @@ def test_github_adapter_accepts_zero_installations() -> None:
 
 
 @pytest.fixture
-def migrated_link_database(migrated_db: MigratedDatabase) -> Iterator[tuple[str, str]]:
-    database_url = migrated_db.url
-    schema = migrated_db.schema
-    yield database_url, schema
+def migrated_link_database(migrated_db: MigratedDatabase) -> tuple[str, str]:
+    return migrated_db.url, migrated_db.schema
 
 
 @pytest.mark.integration
