@@ -1674,11 +1674,11 @@ def test_a_case_that_cannot_be_rebuilt_fails_the_replay_naming_the_case(
     root, responses, _ = record_rag_arm(tmp_path, "graph")
     original = eval_rag_context_module.build_arm_input
 
-    async def build(case_dir: Path, arm: Any, *, review_model: str) -> Any:
+    async def build(case_dir: Path, arm: Any, *, review_model: str, version: str) -> Any:
         # The case validation builds with its own model name; the replay with the recorded one.
         if review_model == "primary-model":
             raise ValueError("the recorded model cannot be built for")
-        return await original(case_dir, arm, review_model=review_model)
+        return await original(case_dir, arm, review_model=review_model, version=version)
 
     monkeypatch.setattr(eval_rag_context_module, "build_arm_input", build)
 
@@ -1914,10 +1914,10 @@ def test_a_rebuild_that_raises_is_a_replay_error_naming_the_case(
     root, responses, _ = record_rag_arm(tmp_path, "graph")
     original = eval_rag_context_module.build_arm_input
 
-    async def build(case_dir: Path, arm: Any, *, review_model: str) -> Any:
+    async def build(case_dir: Path, arm: Any, *, review_model: str, version: str) -> Any:
         if review_model == "primary-model":
             raise error
-        return await original(case_dir, arm, review_model=review_model)
+        return await original(case_dir, arm, review_model=review_model, version=version)
 
     monkeypatch.setattr(eval_rag_context_module, "build_arm_input", build)
 

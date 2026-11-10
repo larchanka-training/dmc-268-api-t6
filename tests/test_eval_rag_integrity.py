@@ -89,8 +89,8 @@ def _tamper(
 ) -> None:
     """Make the build give ``arm`` an input another build would not."""
 
-    async def build(case_dir: Path, wanted: Arm, *, review_model: str) -> ArmInput:
-        built = await build_arm_input(case_dir, wanted, review_model=review_model)
+    async def build(case_dir: Path, wanted: Arm, *, review_model: str, version: str) -> ArmInput:
+        built = await build_arm_input(case_dir, wanted, review_model=review_model, version=version)
         return change(built) if wanted == arm else built
 
     monkeypatch.setattr(eval_rag_check, "build_arm_input", build)
@@ -159,7 +159,7 @@ def test_check_1_arm_a_has_no_retrieved_block_and_both_arms_share_the_other_bloc
 
 
 def test_check_1_a_retrieved_block_in_arm_a_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    arm_b = asyncio.run(build_arm_input(_SPIKE, "B", review_model="m"))
+    arm_b = asyncio.run(build_arm_input(_SPIKE, "B", review_model="m", version="v5"))
 
     def leak(built: ArmInput) -> ArmInput:
         return replace(
@@ -785,7 +785,7 @@ def test_check_9_a_candidate_the_limits_cut_breaks_a_controls_exact_set(tmp_path
             encoding="utf-8",
         )
     _reindex(case)
-    arm_b = asyncio.run(build_arm_input(case, "B", review_model="m"))
+    arm_b = asyncio.run(build_arm_input(case, "B", review_model="m", version="v5"))
     kept = sorted(eval_rag_check._retrieved(arm_b))
 
     errors = _rule(check_case(case, _control(kept)), "rag_limits")
@@ -859,7 +859,7 @@ def _record_errors(case_dir: Path, record: Mapping[str, Any]) -> list[str]:
 def test_st1_a_build_that_raises_anything_is_a_build_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def explode(case_dir: Path, arm: Arm, *, review_model: str) -> ArmInput:
+    async def explode(case_dir: Path, arm: Arm, *, review_model: str, version: str) -> ArmInput:
         raise RuntimeError("boom")
 
     monkeypatch.setattr(eval_rag_check, "build_arm_input", explode)
@@ -1216,7 +1216,7 @@ def test_sp7_system_prompt_drift_is_an_error(monkeypatch: pytest.MonkeyPatch) ->
 def test_sp7_either_retrieved_list_of_arm_a_alone_is_an_error(
     monkeypatch: pytest.MonkeyPatch, side: str
 ) -> None:
-    arm_b = asyncio.run(build_arm_input(_SPIKE, "B", review_model="m"))
+    arm_b = asyncio.run(build_arm_input(_SPIKE, "B", review_model="m", version="v5"))
 
     def leak(built: ArmInput) -> ArmInput:
         if side == "payload":
