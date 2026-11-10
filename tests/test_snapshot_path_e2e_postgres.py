@@ -9,7 +9,9 @@ fit, a manifest per call, the review citing the diff and the L3 excerpt, the ver
 that excerpt, ``llm.verify`` and the publication input. A v3 run in the same composition
 stays on the legacy path. A retried v4 attempt keeps the snapshot and every pinned prompt
 while newer rows go live, and a provider failure after a model call sends the review to the
-fallback on a manifest row of its own. The v4 prompt shows no retrieved section. A run bound
+fallback on a manifest row of its own. A v4 or v5 run publishes with the threshold and cap
+the Repository had when the run was created, on its first attempt and on a retry, though the
+Repository changes both in between (#387). The v4 prompt shows no retrieved section. A run bound
 to the packaged ``review.system.v5.md`` (#144) always shows one: empty with RAG off; with a
 ready graph index the review shows and records the caller of the changed function, the
 verifier shows it again with the same index commit, and a retry before the accepted answer
@@ -63,6 +65,7 @@ from app.worker import (
 )
 from tests.code_index_postgres import C1, C2, _build, _enable, _Index
 from tests.portal_postgres import REPO_A, REPO_B, Env
+from tests.publication_settings_postgres import _settings
 from tests.test_github_vcs_provider import _pull_payload
 from tests.test_llm_gateway import FALLBACK, PRIMARY, completion
 from tests.test_prompt_seeding import _up_to
@@ -358,15 +361,26 @@ async def _scenario(
     verifier_kinds: tuple[str, ...] = ("verifier",),
     files: tuple[dict[str, Any], ...] | None = None,
     redeliveries: int = 0,
+    settings: tuple[tuple[str, int], ...] = (),
 ) -> Observed:
     """``version``: the review.system version the run is bound to; v3 is the seeded live row.
     ``v5_seeded``: the run is created under the seeded live v4 row, then the v5 seed makes v5
     live before the worker takes the run. ``llm``: the models of the composition;
     ``review_kind`` and ``verifier_kinds``: how the review and the verifier calls answer;
     ``files``: the changed files GitHub lists, the service and its test when ``None``;
-    ``redeliveries``: how many more times the worker takes the run once it is due again."""
+    ``redeliveries``: how many more times the worker takes the run once it is due again;
+    ``settings``: the Repository's publication pair (threshold, cap) before the run is created,
+    then one before each time the worker takes the run."""
+    pairs = iter(settings)
+
+    async def next_pair() -> None:
+        pair = next(pairs, None)
+        if pair is not None:
+            await _settings(factory, *pair)
+
     await _ready(factory)
     await _seed(factory, _up_to(_packaged(), 4) if v5_seeded else _live_assets())
+    await next_pair()
     async with factory.begin() as session:
         run_id = await _insert(session)
         await session.execute(
@@ -460,6 +474,7 @@ async def _scenario(
             gateway=build_gateway(llm, llm_client, factory),
             attempt_deadline=timedelta(minutes=10),
         )
+        await next_pair()
         outcomes.append(await process.handle_run.execute(run_id))
         if retry:
             if rag:
@@ -494,10 +509,12 @@ async def _scenario(
                             },
                         )
                 await _make_due(session, run_id)
+            await next_pair()
             outcomes.append(await process.handle_run.execute(run_id))
         for _ in range(redeliveries):
             async with factory.begin() as session:
                 await _make_due(session, run_id)
+            await next_pair()
             outcomes.append(await process.handle_run.execute(run_id))
     actions: dict[str, list[tuple[Any, Any]]] = {}
     tools: list[str] = []
@@ -590,6 +607,7 @@ def _observe(
     verifier_kinds: tuple[str, ...] = ("verifier",),
     files: tuple[dict[str, Any], ...] | None = None,
     redeliveries: int = 0,
+    settings: tuple[tuple[str, int], ...] = (),
 ) -> Observed:
     async def scenario() -> Observed:
         engine = env.engine()
@@ -605,6 +623,7 @@ def _observe(
                 verifier_kinds=verifier_kinds,
                 files=files,
                 redeliveries=redeliveries,
+                settings=settings,
             )
         finally:
             await engine.dispose()
@@ -859,6 +878,36 @@ def test_a_v4_run_in_flight_when_v5_is_seeded_keeps_the_v4_prompt(portal_env: En
     assert (rag_request["index_status"], rag_request["indexed_commit_sha"]) == ("ready", C1)
     assert rag_response == {"outcome": "not_ready", "reason": "prompt_version"}
     _assert_snapshot_path(observed, attempt=1, rag=True)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("version", [4, 5])
+def test_a_snapshot_path_run_publishes_with_the_pair_of_its_creation(
+    portal_env: Env, version: int, retry: bool
+) -> None:
+    # The run is created under warning/1, not the defaults all/10. The Repository moves to
+    # critical/3 before the first attempt, which prepares the snapshot, and to all/2 before
+    # the retry. review.postprocess takes the run's pair on the attempt that publishes: the
+    # threshold through the review prompt input, the cap through the post-processing input.
+    observed = _observe(
+        portal_env,
+        version=version,
+        retry=retry,
+        settings=(("warning", 1), ("critical", 3), ("all", 2)),
+    )
+
+    [(postprocess, _)] = observed.actions["review.postprocess"]
+    assert (postprocess["severity_threshold"], postprocess["max_inline"]) == ("warning", 1)
+    assert observed.outcomes == ["ack"] * (2 if retry else 1)
+    assert len(observed.queue.retries) == (1 if retry else 0)
+    _assert_snapshot_path(
+        observed,
+        attempt=2 if retry else 1,
+        earlier=("policy.load", "vcs.fetch_diff") if retry else (),
+        review_fallback=retry,
+        version=version,
+    )
 
 
 @dataclass(frozen=True)
