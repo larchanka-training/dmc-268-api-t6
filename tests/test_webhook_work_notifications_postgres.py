@@ -16,13 +16,7 @@ import psycopg
 import pytest
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
 from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
@@ -36,28 +30,10 @@ from app.modules.workspaces.application.link_github_installations import (
 from app.modules.workspaces.infrastructure.github_installation_links import (
     SqlAlchemyGitHubInstallationLinkUnitOfWork,
 )
-from tests.template_database import MigratedDatabase
+from tests.webhook_notifications_postgres import Database
 
-pytest_plugins = ("tests.migrated_postgres",)
+pytest_plugins = ("tests.webhook_notifications_postgres",)
 pytestmark = pytest.mark.integration
-
-
-@dataclass(frozen=True)
-class Database:
-    url: str
-    schema: str
-
-    def engine(self) -> AsyncEngine:
-        return create_async_engine(
-            self.url,
-            connect_args={"options": f"-csearch_path={self.schema}"},
-            poolclass=NullPool,
-        )
-
-
-@pytest.fixture
-def database(migrated_db: MigratedDatabase) -> Database:
-    return Database(migrated_db.url, migrated_db.schema)
 
 
 @contextmanager

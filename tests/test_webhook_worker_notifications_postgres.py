@@ -35,26 +35,20 @@ from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts im
 )
 from app.modules.workspaces.application.link_github_installations import LinkGitHubInstallations
 from app.webhook_worker import sweep_forever
-from tests.template_database import MigratedDatabase
 from tests.test_webhook_work_notifications_postgres import (
     DEFERRED_AT,
     RETRY_AT,
     ControlledLinkUnitOfWork,
-    Database,
     LinkedInstallationGitHub,
     ReconciliationControl,
     receipt_retry_state,
     recorded_backends,
     seed_deferred_receipt,
 )
+from tests.webhook_notifications_postgres import Database
 
-pytest_plugins = ("tests.migrated_postgres",)
+pytest_plugins = ("tests.webhook_notifications_postgres",)
 pytestmark = pytest.mark.integration
-
-
-@pytest.fixture
-def database(migrated_db: MigratedDatabase) -> Database:
-    return Database(migrated_db.url, migrated_db.schema)
 
 
 class OwnHintsConnection:
