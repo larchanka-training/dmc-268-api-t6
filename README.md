@@ -278,7 +278,7 @@ uv run pytest -m integration -rs
 
 | Variable | Needed by | Notes |
 |---|---|---|
-| `TEST_DATABASE_URL` | every integration test | Most tests get a database of their own, a copy of a template that each pytest process migrates once (`tests/template_database.py`); the rest, the tests of the migrations among them, create a random schema in this database and migrate it. Each test drops only what it created, so the database of the local stack is safe to use. The user needs `CREATEDB` and `CREATE SCHEMA`. |
+| `TEST_DATABASE_URL` | every integration test | Most tests get a database of their own, a copy of a template that each pytest process migrates once (`tests/template_database.py`); the rest, the tests of the migrations among them, create a random schema in this database and migrate it. Each test drops only what it created, so the database of the local stack is safe to use. A run killed by SIGKILL or the OOM killer cannot: it leaves its `tmpl_*` and `test_*` databases, which you drop by hand with `DROP DATABASE … WITH (FORCE)` once no other run uses the server. The user needs `CREATEDB` and `CREATE SCHEMA`. |
 | `TEST_RABBITMQ_URL` | worker, index queue, rerun and cancel tests | The tests delete and redeclare the review and index topologies. Give them their own virtual host (`/test` above), never `/`, where the compose `worker` consumes. |
 
 The tests outside `-m integration` need no services and run in parallel:
