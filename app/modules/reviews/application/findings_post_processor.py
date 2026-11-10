@@ -68,11 +68,17 @@ _EXECUTIVE_BLOCK_CHAR_LIMIT = 1500
 _CHECKLIST_NAME_LIMITS = (5, 3, 1, 0)
 # CVS §8.2: the change summary agent's text is a signed description, never a finding.
 _CHANGE_SUMMARY_SIGNATURE = "**What changed** (автоописание, не замечание):"
-# Its input is the PR's own title and diff, and no verifier checks it: a backslash keeps the
-# characters of links, images, HTML and entities literal, and a zero-width space after "@",
-# in "://" and after "www" keeps mentions and autolinks from forming.
-_CHANGE_SUMMARY_MARKUP = re.compile(r"[\\\[\]<>&]")
-_CHANGE_SUMMARY_LINK_START = re.compile(r"@|(?<=:)(?=//)|(?i:(?<=\bwww)(?=\.))")
+# Its input is the PR's own title and diff, and no verifier checks it. A zero-width space
+# where a mention, a reference, a link, an image, HTML or an entity would start keeps the text
+# literal on GitHub, GitLab and Bitbucket alike; a backslash escape is not read by all three.
+_CHANGE_SUMMARY_LINK_STARTS = re.compile(
+    r"[@<&]"  # mentions, e-mail addresses, HTML tags, <autolinks>, entities, GitLab epics
+    r"|[#!~%$](?=\w)"  # issue, merge request, label, milestone and snippet references
+    r"|(?<=\])(?=\()"  # inline links and images
+    r"|(?<=:)(?=//)"  # URLs with a scheme
+    r"|(?i:(?<=www)(?=\.))"  # www. autolinks, also after _, * or (
+    r"|(?i:(?<=gh-)(?=\d))"  # GH-N references
+)
 _ZERO_WIDTH_SPACE = "\u200b"
 _DISPLAYED_NAME_CHARS = 120
 # CVS §8.2: such a name is unusable or unproven, so only its reason and count are public.
@@ -697,10 +703,12 @@ def _executive_block(
 
 
 def _plain_text(text: str) -> str:
-    """The agent's sentence as literal text: no mention, link, image, HTML or entity."""
-    escaped = _CHANGE_SUMMARY_MARKUP.sub(lambda match: f"\\{match.group()}", text)
-    return _CHANGE_SUMMARY_LINK_START.sub(
-        lambda match: f"{match.group()}{_ZERO_WIDTH_SPACE}", escaped
+    """The agent's sentence as literal text: no mention, reference, link, image, HTML or entity.
+
+    A bare commit SHA may still link to that commit of the same repository, as on any page.
+    """
+    return _CHANGE_SUMMARY_LINK_STARTS.sub(
+        lambda match: f"{match.group()}{_ZERO_WIDTH_SPACE}", text
     )
 
 

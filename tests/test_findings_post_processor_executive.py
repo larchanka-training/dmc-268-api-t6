@@ -6,6 +6,7 @@ from dataclasses import replace
 from uuid import UUID
 
 import pytest
+from markdown_it import MarkdownIt
 
 from app.modules.reviews.application.findings_post_processor import (
     FindingsPostProcessor,
@@ -703,21 +704,50 @@ def test_executive_change_summary_without_room_for_one_sentence_is_left_out() ->
     ("sentence", "shown"),
     [
         ("Pings @octo-org/admins about it.", "Pings @\u200bocto-org/admins about it."),
+        ("Mails ops@evil.test now.", "Mails ops@\u200bevil.test now."),
         (
             "Links [the docs](https://evil.test/x).",
-            "Links \\[the docs\\](https:\u200b//evil.test/x).",
+            "Links [the docs]\u200b(https:\u200b//evil.test/x).",
         ),
         (
             "Adds ![x](http://t.test/p.png) to it.",
-            "Adds !\\[x\\](http:\u200b//t.test/p.png) to it.",
+            "Adds ![x]\u200b(http:\u200b//t.test/p.png) to it.",
         ),
-        ("Adds <img src=x> here.", "Adds \\<img src=x\\> here."),
-        ("Adds &#64;octo here.", "Adds \\&#64;octo here."),
-        ("Moves the docs to WWW.evil.test now.", "Moves the docs to WWW\u200b.evil.test now."),
-        ("Keeps a \\[ escape.", "Keeps a \\\\\\[ escape."),
-        ("Moves purge_stale_runs to app/jobs.py.", "Moves purge_stale_runs to app/jobs.py."),
+        ("Adds <img src=x> here.", "Adds <\u200bimg src=x> here."),
+        ("See <https://evil.test> now.", "See <\u200bhttps:\u200b//evil.test> now."),
+        ("Adds &#64;octo here.", "Adds &\u200b#\u200b64;octo here."),
+        ("Moves it to WWW.evil.test now.", "Moves it to WWW\u200b.evil.test now."),
+        ("Moves it to _www.evil.test_ now.", "Moves it to _www\u200b.evil.test_ now."),
+        ("Moves it to (www.evil.test) now.", "Moves it to (www\u200b.evil.test) now."),
+        ("Moves it to *www.evil.test* now.", "Moves it to *www\u200b.evil.test* now."),
+        ("Fixes #12 and octo/other#3.", "Fixes #\u200b12 and octo/other#\u200b3."),
+        ("Closes GH-12 today.", "Closes GH-\u200b12 today."),
+        (
+            "Merges !7 with ~bug, %v1 and $9.",
+            "Merges !\u200b7 with ~\u200bbug, %\u200bv1 and $\u200b9.",
+        ),
+        (
+            "Moves purge_stale_runs to app/jobs.py, done!",
+            "Moves purge_stale_runs to app/jobs.py, done!",
+        ),
     ],
-    ids=["mention", "link", "image", "html", "entity", "www", "backslash", "plain"],
+    ids=[
+        "mention",
+        "email",
+        "link",
+        "image",
+        "html",
+        "autolink",
+        "entity",
+        "www",
+        "www-after-underscore",
+        "www-after-parenthesis",
+        "www-after-asterisk",
+        "issue-references",
+        "gh-reference",
+        "gitlab-references",
+        "plain",
+    ],
 )
 def test_executive_change_summary_shows_no_mention_link_image_or_markup(
     sentence: str, shown: str
@@ -725,3 +755,6 @@ def test_executive_change_summary_shows_no_mention_link_image_or_markup(
     result = _process_snapshots([_text_change()], change_summary=(sentence,))
 
     assert result.executive_block.endswith(f"{_SIGNED}{shown}")
+    rendered = MarkdownIt("commonmark").render(result.executive_block)
+    assert "<a " not in rendered
+    assert "<img" not in rendered
