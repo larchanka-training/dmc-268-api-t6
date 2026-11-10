@@ -37,13 +37,10 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.bootstrap.reviews_api import (
     ReviewsApiResources,
     get_github_webhook_receipt_uow_factory,
@@ -57,6 +54,7 @@ from app.modules.reviews.application.prompt_builder import file_block_id
 from app.modules.reviews.infrastructure.amqp import amqp_channels
 from app.worker import WorkerSettings, run_worker
 from tests.github_raw_blobs import blob_answer
+from tests.template_database import migrated_database
 from tests.worker_queue_postgres import (
     _APP_PEM,
     LLM_ENV,
@@ -598,7 +596,7 @@ _PROMPTS: dict[Seed, tuple[dict[str, Any], ...]] = {
 
 @pytest.fixture(scope="module")
 def stack() -> Iterator[Stack]:
-    """One migrated schema for the module; ``_reset`` empties and re-seeds it per case."""
+    """One migrated database for the module; ``_reset`` empties and re-seeds it per case."""
     database_url = os.environ.get("TEST_DATABASE_URL")
     # CI sets only RABBITMQ_URL; the zero-skips integration step must not skip here.
     rabbitmq_url = os.environ.get("TEST_RABBITMQ_URL") or (
@@ -607,25 +605,8 @@ def stack() -> Iterator[Stack]:
     if database_url is None or rabbitmq_url is None:
         pytest.skip("set TEST_DATABASE_URL and TEST_RABBITMQ_URL to run the rules.md E2E tests")
     schema = f"test_rules_e2e_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                config = Config("alembic.ini")
-                config.attributes["connection"] = connection
-                command.upgrade(config, "head")
-                connection.commit()
-                yield Stack(database_url, rabbitmq_url, schema)
-            finally:
-                connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
-    finally:
-        engine.dispose()
+    with migrated_database(database_url, schema) as clone_url:
+        yield Stack(clone_url, rabbitmq_url, schema)
 
 
 @pytest.fixture(params=list(Seed), ids=str)

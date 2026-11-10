@@ -18,20 +18,18 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import ReviewsApiResources
 from app.main import app
 from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.run_failures import RetryDelays
 from app.modules.reviews.infrastructure.amqp import LazyAmqpPublisher, amqp_channels, run_queue
+from tests.template_database import migrated_database
 from tests.worker_queue_postgres import _reset_topology
 
 WS_A = UUID("00000000-0000-4000-8000-00000000000a")
@@ -188,24 +186,17 @@ def portal_schema(database_url: str, rabbitmq_url: str | None) -> Iterator[Env]:
     if rabbitmq_url is not None:
         asyncio.run(_reset_topology(rabbitmq_url))
     schema = f"test_rest_{uuid4().hex}"
-    engine = create_engine(database_url)
     try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
-            _seed(connection)
-            connection.commit()
-            yield Env(database_url, schema, rabbitmq_url)
-            connection.rollback()
-            connection.execute(text("SET search_path TO public"))
-            connection.execute(DropSchema(schema, cascade=True))
-            connection.commit()
+        with migrated_database(database_url, schema) as clone_url:
+            engine = create_engine(clone_url, poolclass=NullPool)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(text(f'SET search_path TO "{schema}"'))
+                    _seed(connection)
+            finally:
+                engine.dispose()
+            yield Env(clone_url, schema, rabbitmq_url)
     finally:
-        engine.dispose()
         if rabbitmq_url is not None:
             asyncio.run(_reset_topology(rabbitmq_url))
 
