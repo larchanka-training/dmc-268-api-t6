@@ -67,13 +67,8 @@ from app.worker import (
 )
 from tests.code_index_postgres import C1, C2, _build, _enable, _Index
 from tests.portal_postgres import REPO_A, REPO_B, Env, portal_schema
-from tests.test_github_vcs_provider import _pull_payload
-from tests.test_llm_gateway import FALLBACK, PRIMARY, completion
-from tests.test_prompt_seeding import _up_to
-from tests.test_rag_review_context_postgres import _USER, _USER_NOTED, _user_file
-from tests.test_retired_installation_postgres import DiscardTokenCache
-from tests.test_review_context import _GREET_PATCH, _MODELS, _SERVICE
-from tests.test_review_prompt_pins_postgres import (
+from tests.rag_review_context_fakes import _USER, _USER_NOTED, _user_file
+from tests.review_prompt_pins_postgres import (
     _V4_CONTENT,
     _V5_CONTENT,
     _V7_CONTENT,
@@ -81,6 +76,11 @@ from tests.test_review_prompt_pins_postgres import (
     _bind_v5,
     _bind_v7,
 )
+from tests.test_github_vcs_provider import _pull_payload
+from tests.test_llm_gateway import FALLBACK, PRIMARY, completion
+from tests.test_prompt_seeding import _up_to
+from tests.test_retired_installation_postgres import DiscardTokenCache
+from tests.test_review_context import _GREET_PATCH, _MODELS, _SERVICE
 from tests.test_run_prompt_pins_postgres import _packaged, _seed
 from tests.test_run_publication_settings_postgres import _insert, _ready
 from tests.test_snapshot_path_live_pin import _live_assets

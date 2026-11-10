@@ -25,14 +25,19 @@ from app.modules.reviews.application.review_context import RetrievedBlock
 from app.modules.reviews.application.review_path import SNAPSHOT_REVIEW_PROMPT_VERSIONS
 from app.modules.reviews.infrastructure.llm.answers import review_answer_contract
 from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
-from tests.test_review_prompt_v4 import HEAD, PROMPTS, REPO_ROOT, V3_SHA256, _context, _file
-from tests.test_review_prompt_v5 import (
+from tests.review_prompt_fakes import (
     BASE,
+    HEAD,
     INPUT_TAGS,
+    PROMPTS,
+    REPO_ROOT,
+    V3_SHA256,
     V4_SHA256,
     V5_PATH,
     _blocks,
     _body,
+    _context,
+    _file,
     _front_matter,
     _retrieved,
     _v5,
