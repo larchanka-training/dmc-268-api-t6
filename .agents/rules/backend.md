@@ -141,7 +141,8 @@ from a missing scope.
   and no DB setup. One exception: the `pytest.register_assert_rewrite` call, which keeps
   the asserts of a shared module rewritten. It takes a module that its test files import
   before pytest loads it as a plugin, or a plain module whose helpers assert (today
-  `tests.worker_queue_postgres`, `tests.rules_md_e2e`, `tests.deploy_host_fakes`,
+  `tests.worker_queue_postgres`, `tests.webhook_notifications_postgres`,
+  `tests.rules_md_e2e`, `tests.deploy_host_fakes`,
   `tests.deploy_prod_workflow_fakes`, `tests.monitoring_deploy_host`,
   `tests.code_index_postgres`, `tests.portal_postgres` and
   `tests.code_index_indexer_support`).
