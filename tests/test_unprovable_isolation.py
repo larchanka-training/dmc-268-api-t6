@@ -11,11 +11,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import String
 
-from app.modules.reviews.application.get_run_diff import (
-    MAX_STORED_NAME_LENGTH,
-    DiffSnapshot,
-    holds_without_loss,
-)
+from app.modules.reviews.application.get_run_diff import DiffSnapshot, holds_without_loss
 from app.modules.reviews.infrastructure.models import CodeChangeDiff
 
 
@@ -48,9 +44,10 @@ def test_a_name_is_held_only_when_it_can_be_stored_unchanged(name: str, held: bo
     assert holds_without_loss(renamed) is held
 
 
-def test_the_held_length_is_the_width_of_the_stored_name_columns() -> None:
+def test_both_stored_name_columns_hold_1024_characters() -> None:
+    # The width the 1024/1025 rows above hold a name to (RFS §4.2).
     columns = CodeChangeDiff.__table__.c
 
     for column in (columns.filename, columns.previous_filename):
         assert isinstance(column.type, String)
-        assert column.type.length == MAX_STORED_NAME_LENGTH
+        assert column.type.length == 1024
