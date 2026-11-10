@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from uuid import UUID
 
 import httpx
@@ -33,6 +34,7 @@ from app.modules.reviews.application.verdict import findings_hash
 from app.modules.reviews.infrastructure.github_review_publication import (
     GitHubPullRequestReviewGateway,
 )
+from app.modules.reviews.infrastructure.models import FinalReviewResult
 from app.modules.reviews.infrastructure.review_output_unit_of_work import (
     SqlAlchemyReviewOutputUnitOfWork,
 )
@@ -54,8 +56,7 @@ _PLAIN = UUID(int=46502)
 _SUMMARY = ReviewSummary(problem="A bug.", done_well="Small change.", effort="small")
 
 
-@pytest.mark.integration
-def test_the_hash_of_the_store_matches_the_hash_of_the_stored_rows(portal_env: Env) -> None:
+def _linked_review() -> tuple[ReviewFinding, ProcessedReviewOutput]:
     finding = ReviewFinding(
         path="a.py",
         line=3,
@@ -79,6 +80,12 @@ def test_the_hash_of_the_store_matches_the_hash_of_the_stored_rows(portal_env: E
             reasons=(CoverageItem(None, "classification_unavailable"),),
         ),
     )
+    return finding, processed
+
+
+@pytest.mark.integration
+def test_the_hash_of_the_store_matches_the_hash_of_the_stored_rows(portal_env: Env) -> None:
+    finding, processed = _linked_review()
 
     async def exercise() -> None:
         engine = portal_env.engine()
@@ -104,6 +111,52 @@ def test_the_hash_of_the_store_matches_the_hash_of_the_stored_rows(portal_env: E
             assert context.findings_hash == (
                 "2ccd1990ecb3787a9bad7316ae2c193220f2df841bd29d6d2c90e1e74fd31380"
             )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.integration
+def test_finalized_plan_preserves_the_github_rule_link(portal_env: Env) -> None:
+    _, processed = _linked_review()
+    expected_hash = "2ccd1990ecb3787a9bad7316ae2c193220f2df841bd29d6d2c90e1e74fd31380"
+    source_hash = findings_hash(hashed_findings(processed))
+
+    async def exercise() -> None:
+        engine = portal_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory.begin() as session:
+                await session.execute(
+                    text("UPDATE runs SET state='running' WHERE id=:run"),
+                    {"run": RUN_ATTEMPTED},
+                )
+            async with SqlAlchemyReviewOutputUnitOfWork(factory) as uow:
+                await uow.reviews.finalize_review(
+                    RUN_ATTEMPTED,
+                    model_output=None,
+                    processed=processed,
+                    result={"findings_hash": source_hash},
+                    review_event="COMMENT",
+                    findings_hash=source_hash,
+                    verify_request=None,
+                    verify_response=None,
+                    started_at=datetime.now(UTC),
+                    duration_ms=0,
+                )
+                await uow.commit()
+            async with factory() as session:
+                saved = await session.get(FinalReviewResult, RUN_ATTEMPTED)
+                context = await SqlAlchemyRunLifecycleStore(session).publish_context(RUN_ATTEMPTED)
+            assert saved is not None
+            assert saved.publication_plan["findings_hash"] == expected_hash
+            assert len(saved.publication_plan["findings"]) == 1
+            assert saved.publication_plan["findings"][0]["rule_link"] == _LINK
+            assert context is not None
+            assert len(context.findings) == 1
+            assert context.findings[0].rule_link == _LINK
+            assert context.findings_hash == expected_hash
         finally:
             await engine.dispose()
 
