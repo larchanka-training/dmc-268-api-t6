@@ -138,6 +138,53 @@ _CASES = (
         {"missing_patch": 1},
     ),
 )
+# Per case and version: the stage's signal, ``context.build`` status and reason, the
+# summary-only flag of the rows, the check-run report and the API, and the report's reason.
+# A v5 run of the residual set is no-text partial (CVS §2.2, #497); legacy v2 is not.
+_EXPECTED: dict[tuple[str, int], tuple[type[Exception], str, str, bool, str | None]] = {
+    ("diff_too_large", 2): (
+        SummaryOnlyReview,
+        "summary_only",
+        "diff_too_large",
+        True,
+        "diff_too_large",
+    ),
+    ("diff_too_large", 5): (
+        SummaryOnlyReview,
+        "summary_only",
+        "diff_too_large",
+        True,
+        "diff_too_large",
+    ),
+    ("diff_inventory_incomplete", 2): (
+        SummaryOnlyReview,
+        "summary_only",
+        "diff_inventory_incomplete",
+        True,
+        "diff_inventory_incomplete",
+    ),
+    ("diff_inventory_incomplete", 5): (
+        SummaryOnlyReview,
+        "summary_only",
+        "diff_inventory_incomplete",
+        True,
+        "diff_inventory_incomplete",
+    ),
+    ("no_reviewable_files", 2): (
+        SummaryOnlyReview,
+        "summary_only",
+        "no_reviewable_files",
+        True,
+        "no_reviewable_files",
+    ),
+    ("no_reviewable_files", 5): (
+        NoReviewableText,
+        "no_reviewable_text",
+        "no_reviewable_text",
+        False,
+        None,
+    ),
+}
 
 
 @pytest.fixture
@@ -162,8 +209,9 @@ def test_masked_file_and_lock_keep_published_coverage(env: Env, version: int) ->
             await _seed(factory, _packaged())
             for index, (reason, files, files_changed, reasons) in enumerate(_CASES):
                 head = f"{index + 1:040x}"
-                summary_only = not (version == 5 and reason == "no_reviewable_files")
-                status = "summary_only" if summary_only else "no_reviewable_text"
+                signal, status, build_reason, summary_only, report_reason = _EXPECTED[
+                    (reason, version)
+                ]
                 async with factory.begin() as session:
                     await session.execute(
                         text("UPDATE code_changes SET head_sha=:head WHERE id=:pr"),
@@ -209,7 +257,7 @@ def test_masked_file_and_lock_keep_published_coverage(env: Env, version: int) ->
                     payloads=trace,
                     builtin_excluded=is_generated_path,
                 )
-                with pytest.raises(SummaryOnlyReview if summary_only else NoReviewableText):
+                with pytest.raises(signal):
                     await stage.run(run_id)
                 async with factory() as session:
                     rows = (
@@ -232,7 +280,7 @@ def test_masked_file_and_lock_keep_published_coverage(env: Env, version: int) ->
                 }
                 assert isinstance(build, dict)
                 assert build["status"] == status
-                assert build["reason"] == (reason if summary_only else status)
+                assert build["reason"] == build_reason
                 assert build["coverage"]["status"] == "partial"
                 assert build["coverage"]["reviewed_files"] == 0
                 assert build["coverage"]["reason_counts"] == reasons
@@ -265,7 +313,7 @@ def test_masked_file_and_lock_keep_published_coverage(env: Env, version: int) ->
                     report = await SqlAlchemyRunLifecycleStore(session).check_run_report(run_id)
                 assert report is not None
                 assert report.summary_only is summary_only
-                assert report.summary_reason == (reason if summary_only else None)
+                assert report.summary_reason == report_reason
                 assert report.coverage_status == "partial"
                 published.append((run_id, summary_only))
         finally:
