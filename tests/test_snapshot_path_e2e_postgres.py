@@ -22,7 +22,8 @@ requirement of its rule, earns the attempt's one free slot: the fallback, or a b
 without a fallback model; the recovered answer publishes. A changed-file name the run cannot
 store unchanged leaves its source unisolable: the v4 run fails on its first attempt before the
 diff is written and before any model call (RFS §11, #497); a v3 run with such a name keeps the
-retried internal error.
+retried internal error. A v4 run whose only file has no patch is published as no-text partial:
+coverage partial, not summary-only, without a model call (CVS §2.2).
 """
 
 from __future__ import annotations
@@ -1301,3 +1302,68 @@ def test_a_long_name_keeps_the_v3_run_on_the_retried_internal_error(env: Env) ->
     # The diff write refuses the name, not the GitHub answer: nothing of the diff is stored.
     assert diff_rows == 0
     assert error_message.startswith("DataError: ")
+
+
+def _summary_only(env: Env, run_id: UUID) -> bool:
+    """The run's ``summaryOnly`` as the runs API reads it."""
+
+    async def read() -> bool:
+        engine = env.engine()
+        try:
+            runs = SqlAlchemyRunRepository(async_sessionmaker(engine), allow_unscoped=True)
+            item = await runs.get_run(run_id)
+            assert item is not None
+            return item.summary_only
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(read())
+
+
+@pytest.mark.integration
+def test_a_v4_run_without_text_is_published_partial_without_a_model_call(env: Env) -> None:
+    # The service file without a patch, its blob ordinary text: a complete inventory of three
+    # counted lines and no analysable text. CVS §2.2 no-text partial: the backend result,
+    # not summary-only, and no model call.
+    missing = {
+        "filename": _PATH,
+        "status": "modified",
+        "sha": _SERVICE_SHA,
+        "additions": 3,
+        "deletions": 0,
+        "changes": 3,
+    }
+    observed = _observe(env, version=4, files=(missing,))
+
+    usage_events, diff_rows, error_message = _stored(env, observed.run_id)
+    assert observed.outcomes == ["ack"]
+    assert observed.state == ("publishing", None, 1)
+    assert observed.tools == [
+        "policy.load",
+        "vcs.fetch_diff",
+        "context.build",
+        "review.postprocess",
+    ]
+    assert observed.manifests == []
+    assert observed.bodies == []
+    assert usage_events == 0
+    assert (diff_rows, error_message) == (1, None)
+    [(_, build)] = observed.actions["context.build"]
+    assert build["status"] == "no_reviewable_text"
+    assert build["coverage"]["status"] == "partial"
+    assert build["coverage"]["reviewed_files"] == 0
+    assert build["coverage"]["reason_counts"] == {"missing_patch": 1}
+    # The attempt's one context.build is also its context_payloads row (schema 2).
+    assert observed.payloads == [(2, build)]
+    [(_, postprocess)] = observed.actions["review.postprocess"]
+    # Restored from the context.build row, not the classification_unavailable fallback.
+    assert postprocess["coverage"] == build["coverage"]
+    assert postprocess["verdict"] is None
+    assert postprocess["inline"] == 0
+    assert postprocess["summary"]["problem"] == (
+        "Подтверждённых замечаний нет; Проверка неполная: Отсутствует подтверждённый patch (1)."
+    )
+    assert _summary_only(env, observed.run_id) is False
+    [pointer] = observed.queue.published
+    assert pointer.run_id == observed.run_id
+    assert pointer.review_event == "COMMENT"

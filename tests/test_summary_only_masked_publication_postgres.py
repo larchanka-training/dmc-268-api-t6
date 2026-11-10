@@ -4,7 +4,9 @@ The stage uses the worker's built-in exclusions and ``TransactionalRunTrace``. C
 is the reload inside ``save_summary_only_stop``, then the publication input and the
 stored review result. Legacy ``review.system`` v2 and snapshot-path v5 both count the
 lock as ``ignored``: the worker withholds it before the generated-omission exclusion.
-A proven empty file stays unmarked, so the stop does not cancel that proof.
+A proven empty file stays unmarked, so the stop does not cancel that proof. On the snapshot
+path the residual set (a missing patch beside exclusions) is no-text partial (CVS §2.2,
+#497): the same coverage is published without the summary-only flag.
 """
 
 from __future__ import annotations
@@ -21,7 +23,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.get_run_diff import DiffSnapshot, StoreDiffSnapshot
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
-from app.modules.reviews.application.review_context import BuildReviewContext, SummaryOnlyReview
+from app.modules.reviews.application.review_context import (
+    BuildReviewContext,
+    NoReviewableText,
+    SummaryOnlyReview,
+)
 from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
     ReviewContextStage,
@@ -146,16 +152,18 @@ def env() -> Iterator[Env]:
 @pytest.mark.integration
 @pytest.mark.parametrize("version", [2, 5])
 def test_masked_file_and_lock_keep_published_coverage(env: Env, version: int) -> None:
-    async def exercise() -> list[UUID]:
+    async def exercise() -> list[tuple[UUID, bool]]:
         engine = env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         scope = AuthScope(42, (WS_A,))
-        published: list[UUID] = []
+        published: list[tuple[UUID, bool]] = []
         try:
             await _ready(factory)
             await _seed(factory, _packaged())
             for index, (reason, files, files_changed, reasons) in enumerate(_CASES):
                 head = f"{index + 1:040x}"
+                summary_only = not (version == 5 and reason == "no_reviewable_files")
+                status = "summary_only" if summary_only else "no_reviewable_text"
                 async with factory.begin() as session:
                     await session.execute(
                         text("UPDATE code_changes SET head_sha=:head WHERE id=:pr"),
@@ -201,7 +209,7 @@ def test_masked_file_and_lock_keep_published_coverage(env: Env, version: int) ->
                     payloads=trace,
                     builtin_excluded=is_generated_path,
                 )
-                with pytest.raises(SummaryOnlyReview):
+                with pytest.raises(SummaryOnlyReview if summary_only else NoReviewableText):
                     await stage.run(run_id)
                 async with factory() as session:
                     rows = (
@@ -217,14 +225,14 @@ def test_masked_file_and_lock_keep_published_coverage(env: Env, version: int) ->
                 checked = "src/note.txt" if reason == "no_reviewable_files" else "src/app.py"
                 flags = {row.filename: (row.summary_only, row.review_patch is None) for row in rows}
                 assert flags == {
-                    checked: (True, True),
-                    "package-lock.json": (True, True),
+                    checked: (summary_only, True),
+                    "package-lock.json": (summary_only, True),
                     "generated/notes.py": (False, True),
                     "pkg/__init__.py": (False, True),
                 }
                 assert isinstance(build, dict)
-                assert build["status"] == "summary_only"
-                assert build["reason"] == reason
+                assert build["status"] == status
+                assert build["reason"] == (reason if summary_only else status)
                 assert build["coverage"]["status"] == "partial"
                 assert build["coverage"]["reviewed_files"] == 0
                 assert build["coverage"]["reason_counts"] == reasons
@@ -256,20 +264,20 @@ def test_masked_file_and_lock_keep_published_coverage(env: Env, version: int) ->
                 async with factory() as session:
                     report = await SqlAlchemyRunLifecycleStore(session).check_run_report(run_id)
                 assert report is not None
-                assert report.summary_only is True
-                assert report.summary_reason == reason
+                assert report.summary_only is summary_only
+                assert report.summary_reason == (reason if summary_only else None)
                 assert report.coverage_status == "partial"
-                published.append(run_id)
+                published.append((run_id, summary_only))
         finally:
             await engine.dispose()
         return published
 
     published = asyncio.run(exercise())
     with api(env, AuthScope(42, (WS_A,))) as (client, _factory):
-        for run_id in published:
+        for run_id, summary_only in published:
             detail = client.get(f"/api/runs/{run_id}")
             assert detail.status_code == 200
             body = detail.json()
             assert body["status"] == "succeeded"
-            assert body["summaryOnly"] is True
+            assert body["summaryOnly"] is summary_only
             assert body["verdict"] is None
