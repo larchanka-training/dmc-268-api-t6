@@ -1270,8 +1270,8 @@ manual workflow:
    prompt each arm takes.
 3. Select the prompt with `review_prompt`, or with `review_prompt_file` for a file the choice does
    not list. That input takes a file directly in `review/prompts/` with `key: review.system`. It
-   overrides `review_prompt` and is refused with corpus `rag`, whose arms fix v5. Left empty, it
-   changes nothing.
+   overrides `review_prompt` and is refused with corpus `rag`, whose arms take their prompt from
+   `review_prompt` (v5 or v7). Left empty, it changes nothing.
 4. Aggregate the downloaded reports. Name the arms after the prompts: a label that is a policy
    arm must match the arm the report was captured with.
 
