@@ -263,11 +263,13 @@ def _packaged_review(version: int) -> PromptAsset:
     )
 
 
-# The packaged review.system v4 (F2) and v5 (#144), as the seed stores them.
+# The packaged review.system v4 (F2), v5 (#144) and v7 (#498), as the seed stores them.
 _V4 = _packaged_review(4)
 _V4_CONTENT = _V4.content
 _V5 = _packaged_review(5)
 _V5_CONTENT = _V5.content
+_V7 = _packaged_review(7)
+_V7_CONTENT = _V7.content
 
 
 async def _bind_review(
@@ -302,6 +304,10 @@ async def _bind_v4(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> U
 
 async def _bind_v5(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> UUID:
     return await _bind_review(factory, run_id, _V5)
+
+
+async def _bind_v7(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> UUID:
+    return await _bind_review(factory, run_id, _V7)
 
 
 def _stage(factory: async_sessionmaker[AsyncSession]) -> ReviewContextStage:
