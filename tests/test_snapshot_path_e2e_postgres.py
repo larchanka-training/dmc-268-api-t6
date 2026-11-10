@@ -28,9 +28,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import os
 import re
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -64,7 +62,7 @@ from app.worker import (
     review_context_stage_factory,
 )
 from tests.code_index_postgres import C1, C2, _build, _enable, _Index
-from tests.portal_postgres import REPO_A, REPO_B, Env, portal_schema
+from tests.portal_postgres import REPO_A, REPO_B, Env
 from tests.test_github_vcs_provider import _pull_payload
 from tests.test_llm_gateway import FALLBACK, PRIMARY, completion
 from tests.test_prompt_seeding import _up_to
@@ -76,6 +74,8 @@ from tests.test_run_prompt_pins_postgres import _packaged, _seed
 from tests.test_run_publication_settings_postgres import _insert, _ready
 from tests.test_snapshot_path_live_pin import _live_assets
 from tests.worker_queue_postgres import SETTINGS, GitHub
+
+pytest_plugins = ("tests.portal_postgres",)
 
 _HEAD = "f" * 40  # the head of PR_NEW after ``_ready``
 _REVIEW_TREE = "1" * 40
@@ -118,15 +118,6 @@ _EVIDENCE = [{"block_id": file_block_id(_PATH), "start_line": _ADDED_LINE, "end_
 _ROTATED = "---\nkey: review.conventions\nversion: 99\n---\nA rotated conventions prompt.\n"
 _ROTATED_REVIEW = "---\nkey: review.system\nversion: 98\n---\nA rotated review prompt.\n"
 _ROTATED_VERIFIER = "---\nkey: review.verifier\nversion: 97\n---\nA rotated verifier prompt.\n"
-
-
-@pytest.fixture
-def env() -> Iterator[Env]:
-    url = os.environ.get("TEST_DATABASE_URL")
-    if url is None:
-        pytest.skip("set TEST_DATABASE_URL to run the snapshot path end to end")
-    with portal_schema(url, None) as schema:
-        yield schema
 
 
 @dataclass
@@ -788,8 +779,8 @@ def _assert_snapshot_path(
 
 
 @pytest.mark.integration
-def test_a_v4_run_takes_the_snapshot_path_through_the_worker_composition(env: Env) -> None:
-    observed = _observe(env, version=4)
+def test_a_v4_run_takes_the_snapshot_path_through_the_worker_composition(portal_env: Env) -> None:
+    observed = _observe(portal_env, version=4)
 
     assert observed.outcomes == ["ack"]
     assert observed.queue.retries == []
@@ -797,12 +788,12 @@ def test_a_v4_run_takes_the_snapshot_path_through_the_worker_composition(env: En
 
 
 @pytest.mark.integration
-def test_a_retried_v4_attempt_keeps_the_snapshot_and_the_pins(env: Env) -> None:
+def test_a_retried_v4_attempt_keeps_the_snapshot_and_the_pins(portal_env: Env) -> None:
     # The first attempt stores the snapshot, then the diff read fails and the run is retried.
     # Newer conventions, review and verifier rows go live in between: the second attempt keeps
     # the stored snapshot and the run's pinned prompts. Its review call fails once at the
     # provider, after the conventions call, and the fallback answers.
-    observed = _observe(env, version=4, retry=True)
+    observed = _observe(portal_env, version=4, retry=True)
 
     assert observed.outcomes == ["ack", "ack"]
     assert len(observed.queue.retries) == 1
@@ -818,8 +809,8 @@ def test_a_retried_v4_attempt_keeps_the_snapshot_and_the_pins(env: Env) -> None:
 
 
 @pytest.mark.integration
-def test_a_v3_run_stays_on_the_legacy_path_in_the_same_composition(env: Env) -> None:
-    observed = _observe(env, version=3)
+def test_a_v3_run_stays_on_the_legacy_path_in_the_same_composition(portal_env: Env) -> None:
+    observed = _observe(portal_env, version=3)
 
     assert observed.outcomes == ["ack"]
     assert observed.state == ("publishing", None, 1)
@@ -845,10 +836,10 @@ def test_a_v3_run_stays_on_the_legacy_path_in_the_same_composition(env: Env) -> 
 
 
 @pytest.mark.integration
-def test_a_v5_run_without_rag_shows_an_empty_retrieved_section(env: Env) -> None:
+def test_a_v5_run_without_rag_shows_an_empty_retrieved_section(portal_env: Env) -> None:
     # RAG is off for the repository: no ``context.rag`` step, and the bound v5 prompt still
     # shows its retrieved section, empty.
-    observed = _observe(env, version=5)
+    observed = _observe(portal_env, version=5)
 
     assert observed.outcomes == ["ack"]
     assert observed.queue.retries == []
@@ -856,11 +847,11 @@ def test_a_v5_run_without_rag_shows_an_empty_retrieved_section(env: Env) -> None
 
 
 @pytest.mark.integration
-def test_a_v4_run_in_flight_when_v5_is_seeded_keeps_the_v4_prompt(env: Env) -> None:
+def test_a_v4_run_in_flight_when_v5_is_seeded_keeps_the_v4_prompt(portal_env: Env) -> None:
     # The run is created under the live v4 row; the v5 seed makes v5 live before the worker
     # takes it. RAG is on with a ready index: the run keeps its v4 pin and body, shows no
     # retrieved section, and ``context.rag`` records the usable index as not used.
-    observed = _observe(env, version=4, rag=True, v5_seeded=True)
+    observed = _observe(portal_env, version=4, rag=True, v5_seeded=True)
 
     assert observed.outcomes == ["ack"]
     assert observed.queue.retries == []
@@ -974,8 +965,10 @@ def _assert_retrieved_and_shown_again(
 
 
 @pytest.mark.integration
-def test_a_v5_run_shows_the_retrieved_section_through_the_worker_composition(env: Env) -> None:
-    observed = _observe(env, version=5, rag=True)
+def test_a_v5_run_shows_the_retrieved_section_through_the_worker_composition(
+    portal_env: Env,
+) -> None:
+    observed = _observe(portal_env, version=5, rag=True)
 
     assert observed.outcomes == ["ack"]
     assert observed.queue.retries == []
@@ -1006,12 +999,12 @@ def test_a_v5_run_shows_the_retrieved_section_through_the_worker_composition(env
 
 
 @pytest.mark.integration
-def test_a_retry_before_the_accepted_answer_retrieves_from_the_newer_index(env: Env) -> None:
+def test_a_retry_before_the_accepted_answer_retrieves_from_the_newer_index(portal_env: Env) -> None:
     # D8: the candidate checkpoint is the stored manifest. The first attempt retrieves at C1,
     # then its review call fails on both models before any answer is accepted. A newer
     # publication of the index (C2) lands, and the retry retrieves again: its review and
     # its verifier show the same block, recorded with C2.
-    observed = _observe(env, version=5, retry=True, rag=True)
+    observed = _observe(portal_env, version=5, retry=True, rag=True)
 
     assert observed.outcomes == ["ack", "ack"]
     assert len(observed.queue.retries) == 1
@@ -1077,7 +1070,7 @@ _NO_FALLBACK = LlmSettings(primary=PRIMARY, fallback=None)
     ids=["unshown-range", "rule-without-requirement"],
 )
 def test_an_invalid_verifier_reference_earns_the_bounded_recovery(
-    env: Env,
+    portal_env: Env,
     llm: LlmSettings,
     recovery: str,
     recovery_model: str,
@@ -1090,7 +1083,7 @@ def test_an_invalid_verifier_reference_earns_the_bounded_recovery(
     # citing what its manifest does not show earns the bounded repair/fallback of §4.5 within
     # the attempt's slots before verification_invalid_output; the accepted answer publishes.
     observed = _observe(
-        env, version=4, llm=llm, review_kind=review_kind, verifier_kinds=(invalid, valid)
+        portal_env, version=4, llm=llm, review_kind=review_kind, verifier_kinds=(invalid, valid)
     )
 
     assert observed.state == ("publishing", None, 1)
@@ -1182,13 +1175,13 @@ def _stored(env: Env, run_id: UUID) -> tuple[Any, ...]:
     ids=["nul-new-name", "nul-old-name", "long-new-name", "long-old-name"],
 )
 def test_a_name_the_run_cannot_store_fails_the_v4_run_before_any_model_call(
-    env: Env, change: dict[str, str], name: str
+    portal_env: Env, change: dict[str, str], name: str
 ) -> None:
     # Next to the allowed service file, a change under a name with a NUL or over the 1024
     # characters a stored name holds: the source has no stored identity to withhold.
-    observed = _observe(env, version=4, files=_next_to_the_service(change))
+    observed = _observe(portal_env, version=4, files=_next_to_the_service(change))
 
-    usage_events, diff_rows, error_message = _stored(env, observed.run_id)
+    usage_events, diff_rows, error_message = _stored(portal_env, observed.run_id)
     # The first attempt ends the run: the code is not retried.
     assert observed.outcomes == ["ack"]
     assert observed.state == ("failed", "policy_snapshot_integrity_error", 1)
@@ -1206,18 +1199,18 @@ def test_a_name_the_run_cannot_store_fails_the_v4_run_before_any_model_call(
 
 
 @pytest.mark.integration
-def test_a_long_name_keeps_the_v3_run_on_the_retried_internal_error(env: Env) -> None:
+def test_a_long_name_keeps_the_v3_run_on_the_retried_internal_error(portal_env: Env) -> None:
     # The legacy path withholds no file by its stored names: a new name over the 1024
     # characters a stored name holds still fails the diff write, a retried internal error,
     # until the attempts run out. No attempt reaches a model.
     observed = _observe(
-        env,
+        portal_env,
         version=3,
         files=_next_to_the_service({"filename": _LONG_NAME, "status": "added"}),
         redeliveries=2,
     )
 
-    usage_events, diff_rows, error_message = _stored(env, observed.run_id)
+    usage_events, diff_rows, error_message = _stored(portal_env, observed.run_id)
     assert observed.outcomes == ["ack", "ack", "dead_letter"]
     assert observed.state == ("failed", "internal_error", 3)
     assert observed.tools == ["policy.load", "vcs.fetch_diff"] * 3
