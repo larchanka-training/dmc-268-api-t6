@@ -34,6 +34,7 @@ from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRun
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyReviewOutputRepository
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunStore
 from tests.portal_postgres import NOW, PR_NEW, REPO_A, RUN_ATTEMPTED, Env, portal_schema
+from tests.publication_settings_postgres import _settings
 from tests.test_prepare_policy_snapshot import Source
 from tests.test_severity_threshold_postgres import RecordingQueue
 
@@ -48,17 +49,6 @@ def env() -> Iterator[Env]:
         pytest.skip("set TEST_DATABASE_URL to test publication pins")
     with portal_schema(url, None) as schema:
         yield schema
-
-
-async def _settings(factory: async_sessionmaker[AsyncSession], threshold: str, cap: int) -> None:
-    async with factory.begin() as session:
-        await session.execute(
-            text(
-                "UPDATE repositories SET severity_threshold=:threshold, "
-                "max_comments=:cap WHERE id=:repo"
-            ),
-            {"threshold": threshold, "cap": cap, "repo": REPO_A},
-        )
 
 
 async def _ready(factory: async_sessionmaker[AsyncSession]) -> None:
