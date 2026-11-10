@@ -3,53 +3,27 @@
 from __future__ import annotations
 
 import asyncio
-import os
-from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from alembic.config import Config
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.modules.auth.application.exchange_github_code import AuthenticatedUser
 from app.modules.auth.infrastructure.models import AuthRefreshSession, GitHubUserProfile
 from app.modules.auth.infrastructure.sessions import SqlAlchemyAuthSessionUnitOfWork
+from tests.template_database import MigratedDatabase
 
-
-@pytest.fixture
-def auth_schema() -> Iterator[tuple[str, str]]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_auth_session_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
-            yield database_url, schema
-            connection.rollback()
-            connection.execute(text("SET search_path TO public"))
-            connection.execute(DropSchema(schema, cascade=True))
-            connection.commit()
-    finally:
-        engine.dispose()
+pytest_plugins = ("tests.migrated_postgres",)
 
 
 @pytest.mark.integration
 def test_auth_session_uow_persists_profile_and_hash_only(
-    auth_schema: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
-    database_url, schema = auth_schema
+    database_url, schema = migrated_db.url, migrated_db.schema
     engine = create_async_engine(
         database_url,
         connect_args={"options": f"-csearch_path={schema}"},
@@ -92,7 +66,7 @@ def test_auth_session_uow_persists_profile_and_hash_only(
 
 @pytest.mark.integration
 def test_repeated_http_callback_expands_scope_and_repository_access_without_logout(
-    auth_schema: tuple[str, str],
+    migrated_db: MigratedDatabase,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import json
@@ -113,7 +87,7 @@ def test_repeated_http_callback_expands_scope_and_repository_access_without_logo
     from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
     from app.modules.workspaces.infrastructure.models import GitHubUserRepositoryAccess
 
-    database_url, schema = auth_schema
+    database_url, schema = migrated_db.url, migrated_db.schema
     engine = create_async_engine(
         database_url, connect_args={"options": f"-csearch_path={schema}"}, poolclass=NullPool
     )

@@ -125,8 +125,9 @@ uv run pytest tests/test_deploy_staging_workflow.py -k worker_stop_grace
 ```
 
 Set `TEST_DATABASE_URL` and `TEST_RABBITMQ_URL` to disposable local PostgreSQL and
-RabbitMQ services before real-stack verification. The fixtures migrate isolated
-schemas and may delete/redeclare review broker topology; use test services.
+RabbitMQ services before real-stack verification. The fixtures create isolated
+databases from a migrated template and may delete/redeclare review broker topology; use
+test services.
 
 ```sh
 uv run pytest tests/test_review_shutdown.py tests/test_worker_shutdown.py tests/test_worker_queue_postgres.py tests/test_worker_queue_main_postgres.py tests/test_worker_queue_delivery_postgres.py

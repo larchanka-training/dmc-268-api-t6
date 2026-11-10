@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
@@ -13,15 +12,12 @@ from uuid import UUID, uuid4
 import aio_pika
 import httpx
 import pytest
-from alembic.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 from starlette.types import Message, Scope
 
-from alembic import command
 from app.bootstrap.gitlab import (
     GitLabWebhookResources,
     build_gitlab_webhook_resources,
@@ -36,6 +32,9 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
 )
 from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
 from tests.gitlab_webhook_fakes import Acceptor, Authenticator
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 CONNECTION = UUID("00000000-0000-0000-0000-000000000071")
 SECRET = "synthetic-webhook-secret-canary-0001"
@@ -376,81 +375,65 @@ class Database:
 
 
 @pytest.fixture
-def database() -> Iterator[Database]:
-    url = os.environ.get("TEST_DATABASE_URL")
-    if url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_gitlab_webhook_delivery_{uuid4().hex}"
-    engine = create_engine(url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
-            for number, origin, secret, provider in (
-                (71, CONNECTION, SECRET, "gitlab"),
-                (72, OTHER, OTHER_SECRET, "gitlab"),
-                (71, GITHUB, SECRET, "github"),
-            ):
-                workspace = uuid4()
+def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
+    url = migrated_db.url
+    schema = migrated_db.schema
+    with migrated_db.connect() as connection:
+        for number, origin, secret, provider in (
+            (71, CONNECTION, SECRET, "gitlab"),
+            (72, OTHER, OTHER_SECRET, "gitlab"),
+            (71, GITHUB, SECRET, "github"),
+        ):
+            workspace = uuid4()
+            connection.execute(
+                text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'T7b', 7)"),
+                {"id": workspace},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO provider_installations "
+                    "(id, workspace_id, provider, external_id, metadata) "
+                    "VALUES (:id, :workspace, :provider, :number, '{}')"
+                ),
+                {"id": origin, "workspace": workspace, "number": number, "provider": provider},
+            )
+            if provider == "gitlab":
+                instance = f"https://gitlab{number}.example"
                 connection.execute(
                     text(
-                        "INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'T7b', 7)"
+                        "INSERT INTO gitlab_connections "
+                        "(provider_installation_id, workspace_id, instance_origin, "
+                        "token_ciphertext, credential_key_id, webhook_secret_digest, "
+                        "intake_enabled) VALUES (:id, :workspace, :instance, "
+                        ":envelope, 'missing-pat-key', :digest, true)"
                     ),
-                    {"id": workspace},
+                    {
+                        "id": origin,
+                        "workspace": workspace,
+                        "instance": instance,
+                        "envelope": b"synthetic-pat-envelope-canary",
+                        "digest": digest_webhook_secret(secret),
+                    },
+                )
+                repository = uuid4()
+                connection.execute(
+                    text(
+                        "INSERT INTO repositories (id, provider_installation_id, "
+                        "external_id, full_name, default_branch, web_url) VALUES "
+                        "(:id, :origin, 17, 'team/repo', 'main', :url)"
+                    ),
+                    {"id": repository, "origin": origin, "url": instance + "/team/repo"},
                 )
                 connection.execute(
                     text(
-                        "INSERT INTO provider_installations "
-                        "(id, workspace_id, provider, external_id, metadata) "
-                        "VALUES (:id, :workspace, :provider, :number, '{}')"
+                        "INSERT INTO gitlab_project_bindings (repository_id, "
+                        "provider_installation_id, instance_origin, project_external_id) "
+                        "VALUES (:id, :origin, :instance, 17)"
                     ),
-                    {"id": origin, "workspace": workspace, "number": number, "provider": provider},
+                    {"id": repository, "origin": origin, "instance": instance},
                 )
-                if provider == "gitlab":
-                    instance = f"https://gitlab{number}.example"
-                    connection.execute(
-                        text(
-                            "INSERT INTO gitlab_connections "
-                            "(provider_installation_id, workspace_id, instance_origin, "
-                            "token_ciphertext, credential_key_id, webhook_secret_digest, "
-                            "intake_enabled) VALUES (:id, :workspace, :instance, "
-                            ":envelope, 'missing-pat-key', :digest, true)"
-                        ),
-                        {
-                            "id": origin,
-                            "workspace": workspace,
-                            "instance": instance,
-                            "envelope": b"synthetic-pat-envelope-canary",
-                            "digest": digest_webhook_secret(secret),
-                        },
-                    )
-                    repository = uuid4()
-                    connection.execute(
-                        text(
-                            "INSERT INTO repositories (id, provider_installation_id, "
-                            "external_id, full_name, default_branch, web_url) VALUES "
-                            "(:id, :origin, 17, 'team/repo', 'main', :url)"
-                        ),
-                        {"id": repository, "origin": origin, "url": instance + "/team/repo"},
-                    )
-                    connection.execute(
-                        text(
-                            "INSERT INTO gitlab_project_bindings (repository_id, "
-                            "provider_installation_id, instance_origin, project_external_id) "
-                            "VALUES (:id, :origin, :instance, 17)"
-                        ),
-                        {"id": repository, "origin": origin, "instance": instance},
-                    )
-            connection.commit()
-        yield Database(url, schema)
-    finally:
-        with engine.begin() as cleanup:
-            cleanup.execute(DropSchema(schema, cascade=True, if_exists=True))
-        engine.dispose()
+        connection.commit()
+    yield Database(url, schema)
 
 
 @pytest.mark.integration

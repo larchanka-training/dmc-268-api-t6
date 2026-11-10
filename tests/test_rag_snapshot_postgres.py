@@ -5,24 +5,21 @@ importer paths whose order depends on the collation of the database (``__init__`
 lowercase letter, an uppercase path, ``-`` and ``_``); their hints must be equal. The frozen
 one orders by code point, so this is where a database with another collation shows.
 
-Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
-Each test migrates its own schema to head and drops it afterwards.
+Opt-in: TEST_DATABASE_URL must target a test database whose user can create databases.
+Each test gets a clone of a database migrated to head, dropped afterwards.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Iterator
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.modules.code_index.application.index_store import IndexedEdge, IndexedFile
 from app.modules.code_index.infrastructure.graph_retriever import SqlAlchemyGraphRetriever
 from app.modules.reviews.application.graph_retriever import GraphTarget
@@ -40,11 +37,13 @@ from tests.code_index_postgres import (
     _enable,
     _imports,
     _Index,
-    _migration_config,
     _module,
     _repository,
     _uses,
 )
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 _FOO = GraphTarget("a.py", "foo")
 _MODULE = GraphTarget("a.py", "")
@@ -64,41 +63,25 @@ _IMPORTERS = (
 
 
 @pytest.fixture
-def index() -> Iterator[_Index]:
+def index(migrated_db: MigratedDatabase) -> Iterator[_Index]:
     """One repository with RAG on."""
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_code_index_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                command.upgrade(_migration_config(connection), "head")
-                repository_a = UUID(_repository(connection, installation_external_id=17))
-                repository_b = UUID(_repository(connection, installation_external_id=18))
-                connection.execute(text("UPDATE repositories SET rag_enabled = true"))
-                connection.commit()
-                async_engine = create_async_engine(
-                    database_url,
-                    connect_args={"options": f"-csearch_path={schema}"},
-                    poolclass=NullPool,
-                )
-                try:
-                    factory = async_sessionmaker(async_engine, expire_on_commit=False)
-                    yield _Index(factory, repository_a, repository_b)
-                finally:
-                    asyncio.run(async_engine.dispose())
-            finally:
-                connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
-    finally:
-        engine.dispose()
+    database_url = migrated_db.url
+    schema = migrated_db.schema
+    with migrated_db.connect() as connection:
+        repository_a = UUID(_repository(connection, installation_external_id=17))
+        repository_b = UUID(_repository(connection, installation_external_id=18))
+        connection.execute(text("UPDATE repositories SET rag_enabled = true"))
+        connection.commit()
+        async_engine = create_async_engine(
+            database_url,
+            connect_args={"options": f"-csearch_path={schema}"},
+            poolclass=NullPool,
+        )
+        try:
+            factory = async_sessionmaker(async_engine, expire_on_commit=False)
+            yield _Index(factory, repository_a, repository_b)
+        finally:
+            asyncio.run(async_engine.dispose())
 
 
 def _importer(path: str) -> IndexedFile:

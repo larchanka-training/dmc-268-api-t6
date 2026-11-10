@@ -13,6 +13,7 @@ import pytest
 # monitoring fakes are plain modules whose helpers assert.
 pytest.register_assert_rewrite(
     "tests.worker_queue_postgres",
+    "tests.webhook_notifications_postgres",
     "tests.rules_md_e2e",
     "tests.deploy_host_fakes",
     "tests.deploy_prod_workflow_fakes",

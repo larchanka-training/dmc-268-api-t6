@@ -1,10 +1,10 @@
 """Shared PostgreSQL fixtures and helpers of the code index tests (#141, #142, #143).
 
-The `code_index_database` and `index` fixtures migrate a schema of their own to head;
-a test file loads them with `pytest_plugins = ("tests.code_index_postgres",)`. The store
-harness writes, claims and publishes through `SqlAlchemyCodeIndexStore`; the purge
-helpers publish an index, count its stored rows and run the GC leader task as the
-worker leader runs it.
+The `code_index_database` and `index` fixtures get a database of their own at head
+(`tests/template_database.py`); a test file loads them with
+`pytest_plugins = ("tests.code_index_postgres",)`. The store harness writes, claims and
+publishes through `SqlAlchemyCodeIndexStore`; the purge helpers publish an index, count its
+stored rows and run the GC leader task as the worker leader runs it.
 """
 
 from __future__ import annotations
@@ -21,12 +21,10 @@ from uuid import UUID, uuid4
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import Connection, create_engine, text
+from sqlalchemy import Connection, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.modules.code_index.application.index_store import (
     ClaimRefusal,
     ClaimRefused,
@@ -57,6 +55,7 @@ from app.modules.code_index.infrastructure.maintenance import (
 )
 from app.modules.reviews.application.ast_resolution import ImportResolution
 from app.modules.reviews.application.ast_symbols import SymbolKind
+from tests.template_database import migrated_connection
 
 
 @pytest.fixture
@@ -64,23 +63,8 @@ def code_index_database() -> Iterator[Connection]:
     database_url = os.environ.get("TEST_DATABASE_URL")
     if database_url is None:
         pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_code_index_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                command.upgrade(_migration_config(connection), "head")
-                yield connection
-            finally:
-                connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
-    finally:
-        engine.dispose()
+    with migrated_connection(database_url, f"test_code_index_{uuid4().hex}") as connection:
+        yield connection
 
 
 def _migration_config(connection: Connection) -> Config:
@@ -240,7 +224,7 @@ def index(code_index_database: Connection) -> Iterator[_Index]:
     connection.commit()
     schema = connection.scalar(text("SELECT current_schema()"))
     engine = create_async_engine(
-        os.environ["TEST_DATABASE_URL"],
+        connection.engine.url,
         connect_args={"options": f"-csearch_path={schema}"},
         poolclass=NullPool,
     )

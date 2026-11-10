@@ -1,4 +1,4 @@
-"""Isolated PostgreSQL schema and repository for Bitbucket index checkpoint tests."""
+"""Isolated PostgreSQL database and repository for Bitbucket index checkpoint tests."""
 
 from __future__ import annotations
 
@@ -7,11 +7,9 @@ from collections.abc import Iterator
 from uuid import UUID, uuid4
 
 import pytest
-from alembic.config import Config
-from sqlalchemy import Connection, create_engine, text
-from sqlalchemy.schema import CreateSchema, DropSchema
+from sqlalchemy import Connection, text
 
-from alembic import command
+from tests.template_database import migrated_connection
 
 
 @pytest.fixture
@@ -20,24 +18,8 @@ def code_index_database() -> Iterator[Connection]:
     if database_url is None:
         pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
     schema = f"test_bitbucket_checkpoint_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                config = Config("alembic.ini")
-                config.attributes["connection"] = connection
-                command.upgrade(config, "head")
-                yield connection
-            finally:
-                connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
-    finally:
-        engine.dispose()
+    with migrated_connection(database_url, schema) as connection:
+        yield connection
 
 
 @pytest.fixture

@@ -1,4 +1,4 @@
-"""What the worker queue tests share: the topology reset, a migrated schema, the fakes (#34).
+"""What the worker queue tests share: the topology reset, a migrated database, the fakes (#34).
 
 The ``env`` fixture reaches a test file through ``pytest_plugins``; the rest is imported.
 
@@ -22,7 +22,6 @@ import aio_pika
 import httpx
 import psycopg
 import pytest
-from alembic.config import Config
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import (
     Encoding,
@@ -37,10 +36,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
 import app.modules.code_index.infrastructure.amqp as index_amqp
-from alembic import command
 from app.modules.reviews.application.check_runs import (
     CheckRunTarget,
     CheckRunView,
@@ -75,6 +72,7 @@ from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunLifecycleUnitOfWork,
 )
 from app.worker import WorkerSettings
+from tests.template_database import migrated_database
 
 HEAD = "e" * 40
 BASE = "b" * 40
@@ -145,15 +143,8 @@ def env() -> Iterator[Env]:
     schema = f"test_worker_{uuid4().hex}"
     workspace_id, installation_id, repository_id = uuid4(), uuid4(), uuid4()
     pr_id, rule_id, prompt_id = uuid4(), uuid4(), uuid4()
-    engine = create_engine(database_url)
     try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
+        with migrated_database(database_url, schema) as clone_url:
             statements: list[tuple[str, dict[str, Any]]] = [
                 (
                     "INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'W', 0)",
@@ -197,18 +188,16 @@ def env() -> Iterator[Env]:
                     {"id": pr_id, "repository": repository_id, "base": BASE, "head": HEAD},
                 ),
             ]
-            for statement, values in statements:
-                connection.execute(text(statement), values)
-            connection.commit()
-            yield Env(
-                installation_id, database_url, schema, rabbitmq_url, pr_id, rule_id, prompt_id
-            )
-            connection.rollback()
-            connection.execute(text("SET search_path TO public"))
-            connection.execute(DropSchema(schema, cascade=True))
-            connection.commit()
+            engine = create_engine(clone_url, poolclass=NullPool)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(text(f'SET search_path TO "{schema}"'))
+                    for statement, values in statements:
+                        connection.execute(text(statement), values)
+            finally:
+                engine.dispose()
+            yield Env(installation_id, clone_url, schema, rabbitmq_url, pr_id, rule_id, prompt_id)
     finally:
-        engine.dispose()
         asyncio.run(_reset_topology(rabbitmq_url))
 
 

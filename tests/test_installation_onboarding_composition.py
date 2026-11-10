@@ -7,7 +7,7 @@ import hashlib
 import hmac
 import json
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -16,18 +16,15 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from alembic.config import Config
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.bootstrap.installation_onboarding import InstallationOnboarding
 from app.bootstrap.reviews_api import (
     ReviewsApiResources,
@@ -75,6 +72,9 @@ from app.modules.repositories.infrastructure.models import (
 )
 from app.modules.workspaces.infrastructure.models import Workspace
 from tests.github_webhook_fixtures import load_github_webhook_fixture, removal_of
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 
 @dataclass
@@ -117,31 +117,6 @@ class UnusedDetailsProvider(InstallationRepositoryDetailsProvider):
         full_name: str,
     ) -> RepositoryDetails:
         raise AssertionError("complete repositories need no details request")
-
-
-@pytest.fixture
-def migrated_onboarding_database() -> Iterator[tuple[str, str]]:
-    """Provide an isolated migrated PostgreSQL schema when configured."""
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_installation_onboarding_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
-            yield database_url, schema
-            connection.rollback()
-            connection.execute(text("SET search_path TO public"))
-            connection.execute(DropSchema(schema, cascade=True))
-            connection.commit()
-    finally:
-        engine.dispose()
 
 
 def test_composition_accepts_typed_event_and_internal_installation_id(
@@ -350,10 +325,10 @@ def test_runtime_dispatcher_creates_label_only_for_linked_added_repositories(
 
 @pytest.mark.integration
 def test_migrated_database_onboarding_creates_one_active_rule_version_and_replay_preserves_it(
-    migrated_onboarding_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
     """The callable app boundary persists the language-selected initial version once."""
-    database_url, schema = migrated_onboarding_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     installation_id = uuid4()
 
     async def execute_and_read() -> tuple[Repository, list[RuleVersion]]:
@@ -439,10 +414,10 @@ def test_migrated_database_onboarding_creates_one_active_rule_version_and_replay
 
 @pytest.mark.integration
 def test_signed_runtime_delivery_onboards_replays_removes_and_ignores_unknown_installation(
-    migrated_onboarding_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
     """The endpoint uses real resolver/onboarding while GitHub I/O stays injectable."""
-    database_url, schema = migrated_onboarding_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     installation_id = uuid4()
     secret = "runtime-webhook-secret"
     tree_requests: list[str] = []
@@ -576,7 +551,7 @@ def test_signed_runtime_delivery_onboards_replays_removes_and_ignores_unknown_in
     ],
 )
 def test_real_delivery_fixture_is_onboarded_with_branch_and_url_read_from_github(
-    migrated_onboarding_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
     event_name: str,
     fixture: str,
     external_id: int,
@@ -588,7 +563,7 @@ def test_real_delivery_fixture_is_onboarded_with_branch_and_url_read_from_github
     the values of the stubbed ``GET /repos/{full_name}``, and the tree request must
     use that branch, proving the details were fetched before the tree.
     """
-    database_url, schema = migrated_onboarding_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     installation_id = uuid4()
     repository_path = f"/repos/{full_name}"
     requests: list[tuple[str, str]] = []
@@ -703,7 +678,7 @@ def test_real_delivery_fixture_is_onboarded_with_branch_and_url_read_from_github
 
 @pytest.mark.integration
 def test_empty_repository_is_saved_with_the_backend_rules_through_the_real_tree_adapter(
-    migrated_onboarding_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
     """GitHub's 409 for a repository without a commit is an empty tree, not an error.
 
@@ -711,7 +686,7 @@ def test_empty_repository_is_saved_with_the_backend_rules_through_the_real_tree_
     delivery is onboarded and the saved repository gets the rule set of no recognised
     language, ``backend`` (WEBHOOK_WORKER.md, "Empty repositories").
     """
-    database_url, schema = migrated_onboarding_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     installation_id = uuid4()
     repository_path = "/repos/example-owner/example-repo-two"
     requests: list[tuple[str, str]] = []
@@ -818,7 +793,7 @@ def test_empty_repository_is_saved_with_the_backend_rules_through_the_real_tree_
 
 @pytest.mark.integration
 def test_unreadable_repository_details_defer_the_delivery_and_write_no_row(
-    migrated_onboarding_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
     """``GET /repos`` answering 404 defers the delivery instead of raising (api#71 AC2).
 
@@ -826,7 +801,7 @@ def test_unreadable_repository_details_defer_the_delivery_and_write_no_row(
     deferred path that ``wake_receipts`` can revive, and nothing may reach
     ``repositories``: no tree fetch, no label, no transaction.
     """
-    database_url, schema = migrated_onboarding_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     installation_id = uuid4()
     repository_path = "/repos/example-owner/example-repo-two"
     requests: list[tuple[str, str]] = []
@@ -902,7 +877,7 @@ def test_unreadable_repository_details_defer_the_delivery_and_write_no_row(
 
 @pytest.mark.integration
 def test_unreadable_second_repository_defers_but_the_readable_first_one_is_persisted(
-    migrated_onboarding_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
     """One 404 among two repositories defers the delivery without discarding the other row.
 
@@ -910,7 +885,7 @@ def test_unreadable_second_repository_defers_but_the_readable_first_one_is_persi
     revived, and a replay is idempotent), but the readable repository is connected with its
     default rules in the same run.
     """
-    database_url, schema = migrated_onboarding_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     installation_id = uuid4()
     readable_path = "/repos/example-owner/example-repo-two"
     unreadable_path = "/repos/example-owner/example-repo-three"

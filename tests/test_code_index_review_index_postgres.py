@@ -11,30 +11,27 @@ an hour, so a TTL purge spares an index reviews still read. A `failed`, a remove
 disabled index and a missing row take no write; with RAG off or a GitLab installation the
 state is not read.
 
-Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
-Each test migrates its own schema to head and drops it afterwards.
+Opt-in: TEST_DATABASE_URL must target a test database whose user can create databases.
+Each test gets a clone of a database migrated to head, dropped afterwards.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 from typing import Any, cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.modules.code_index.domain.enums import PurgeReason
 from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeIndexStore
 from app.modules.code_index.infrastructure.models import CodeIndexState
@@ -51,7 +48,6 @@ from tests.code_index_postgres import (
     _enable,
     _Index,
     _mark_failed,
-    _migration_config,
     _module,
     _purge,
     _purge_unused,
@@ -60,6 +56,9 @@ from tests.code_index_postgres import (
     _unused_for_31_days,
     _wait_until_blocked,
 )
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 
 @dataclass(frozen=True)
@@ -71,43 +70,27 @@ class _Reviews:
 
 
 @pytest.fixture
-def reviews() -> Iterator[_Reviews]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_code_index_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                command.upgrade(_migration_config(connection), "head")
-                ids = tuple(
-                    UUID(_repository(connection, installation_external_id=17 + number))
-                    for number in range(4)
-                )
-                # `_repository` leaves the toggle off.
-                connection.execute(text("UPDATE repositories SET rag_enabled = true"))
-                connection.commit()
-                async_engine = create_async_engine(
-                    database_url,
-                    connect_args={"options": f"-csearch_path={schema}"},
-                    poolclass=NullPool,
-                )
-                try:
-                    factory = async_sessionmaker(async_engine, expire_on_commit=False)
-                    yield _Reviews(_Index(factory, ids[0], ids[1]), ids)
-                finally:
-                    asyncio.run(async_engine.dispose())
-            finally:
-                connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
-    finally:
-        engine.dispose()
+def reviews(migrated_db: MigratedDatabase) -> Iterator[_Reviews]:
+    database_url = migrated_db.url
+    schema = migrated_db.schema
+    with migrated_db.connect() as connection:
+        ids = tuple(
+            UUID(_repository(connection, installation_external_id=17 + number))
+            for number in range(4)
+        )
+        # `_repository` leaves the toggle off.
+        connection.execute(text("UPDATE repositories SET rag_enabled = true"))
+        connection.commit()
+        async_engine = create_async_engine(
+            database_url,
+            connect_args={"options": f"-csearch_path={schema}"},
+            poolclass=NullPool,
+        )
+        try:
+            factory = async_sessionmaker(async_engine, expire_on_commit=False)
+            yield _Reviews(_Index(factory, ids[0], ids[1]), ids)
+        finally:
+            asyncio.run(async_engine.dispose())
 
 
 async def _review(index: _Index, repository_id: UUID) -> RagReadiness:
@@ -699,7 +682,9 @@ def test_rag_on_waits_for_a_writer_of_the_repository_only_until_the_lock_timeout
 
 
 @pytest.mark.integration
-def test_the_review_lock_timeout_ends_with_the_gate_transaction(reviews: _Reviews) -> None:
+def test_the_review_lock_timeout_ends_with_the_gate_transaction(
+    reviews: _Reviews, migrated_db: MigratedDatabase
+) -> None:
     async def scenario() -> None:
         index = reviews.index
         for repository_id in (index.a, index.b):
@@ -708,7 +693,7 @@ def test_the_review_lock_timeout_ends_with_the_gate_transaction(reviews: _Review
             schema = await session.scalar(text("SELECT current_schema()"))
         # One pooled connection: a setting that outlives the gate transaction stays on it.
         engine = create_async_engine(
-            os.environ["TEST_DATABASE_URL"],
+            migrated_db.url,
             connect_args={"options": f"-csearch_path={schema}"},
             pool_size=1,
             max_overflow=0,
