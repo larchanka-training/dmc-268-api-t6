@@ -29,12 +29,6 @@ def _up_to(assets: tuple[PromptAsset, ...], version: int) -> tuple[PromptAsset, 
     )
 
 
-@pytest.fixture
-def migrated_prompt_database(migrated_db: MigratedDatabase) -> tuple[str, str]:
-    """Provide a disposable, migrated PostgreSQL database when explicitly configured."""
-    return migrated_db.url, migrated_db.schema
-
-
 def test_load_prompt_assets_preserves_full_file_and_checksum() -> None:
     prompts_dir = REPO_ROOT / "review" / "prompts"
 
@@ -141,9 +135,9 @@ def test_load_prompt_assets_rejects_filename_version_mismatch(tmp_path: Path) ->
 
 @pytest.mark.integration
 def test_first_seed_makes_the_newest_version_of_each_prompt_active(
-    migrated_prompt_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
-    database_url, schema = migrated_prompt_database
+    database_url, schema = migrated_db.url, migrated_db.schema
 
     async def seed_and_read_active_versions() -> list[tuple[str, int]]:
         engine = create_async_engine(
@@ -178,10 +172,10 @@ def test_first_seed_makes_the_newest_version_of_each_prompt_active(
 
 @pytest.mark.integration
 def test_seeding_review_summary_into_a_seeded_database_leaves_the_other_rows_unchanged(
-    migrated_prompt_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
     """#316 AC8: the deploy that adds ``review.summary`` inserts its row and nothing else."""
-    database_url, schema = migrated_prompt_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     assets = load_prompt_assets(REPO_ROOT / "review" / "prompts")
     before_summary = tuple(asset for asset in assets if asset.key != "review.summary")
     every_column = select(
@@ -226,10 +220,10 @@ def test_seeding_review_summary_into_a_seeded_database_leaves_the_other_rows_unc
 
 @pytest.mark.integration
 def test_seed_activates_version_two_after_deactivating_version_one(
-    migrated_prompt_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
     """PostgreSQL's partial unique index permits only one active version per key."""
-    database_url, schema = migrated_prompt_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     version_one = PromptAsset(
         key="review.system",
         version=1,
@@ -271,9 +265,9 @@ def test_seed_activates_version_two_after_deactivating_version_one(
 
 @pytest.mark.integration
 def test_full_seed_upgrades_v2_to_v3_once_and_preserves_old_content(
-    migrated_prompt_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
-    database_url, schema = migrated_prompt_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     # The v2 -> v3 upgrade as it ran before F2 packaged v4.
     assets = _up_to(load_prompt_assets(REPO_ROOT / "review/prompts"), 3)
     legacy_assets = tuple(
@@ -332,9 +326,9 @@ def test_full_seed_upgrades_v2_to_v3_once_and_preserves_old_content(
 
 @pytest.mark.integration
 def test_seed_rejects_changed_v2_without_overwriting_its_persisted_content(
-    migrated_prompt_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
-    database_url, schema = migrated_prompt_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     assets = load_prompt_assets(REPO_ROOT / "review/prompts")
     old = next(asset for asset in assets if (asset.key, asset.version) == ("review.system", 2))
     tampered = replace(old, content="changed v2", checksum=sha256(b"changed v2").hexdigest())
@@ -380,10 +374,10 @@ def test_seed_rejects_changed_v2_without_overwriting_its_persisted_content(
 
 @pytest.mark.integration
 def test_full_seed_upgrades_v3_to_v4_once_and_preserves_v3(
-    migrated_prompt_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
     """The F2 deploy: the bootstrap seed finds v3 active and the packaged v4 new."""
-    database_url, schema = migrated_prompt_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     assets = load_prompt_assets(REPO_ROOT / "review/prompts")
     v3_content = (REPO_ROOT / "review/prompts/review.system.v3.md").read_text(encoding="utf-8")
     v4_content = (REPO_ROOT / "review/prompts/review.system.v4.md").read_text(encoding="utf-8")
@@ -422,10 +416,10 @@ def test_full_seed_upgrades_v3_to_v4_once_and_preserves_v3(
 
 @pytest.mark.integration
 def test_full_seed_upgrades_v4_to_v5_once_and_preserves_v4(
-    migrated_prompt_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
     """The #144 deploy: the bootstrap seed finds v4 active and the packaged v5 new."""
-    database_url, schema = migrated_prompt_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     assets = load_prompt_assets(REPO_ROOT / "review/prompts")
     v4_content = (REPO_ROOT / "review/prompts/review.system.v4.md").read_text(encoding="utf-8")
     v5_content = (REPO_ROOT / "review/prompts/review.system.v5.md").read_text(encoding="utf-8")
@@ -464,12 +458,12 @@ def test_full_seed_upgrades_v4_to_v5_once_and_preserves_v4(
 
 @pytest.mark.integration
 def test_an_older_seed_after_v5_inserts_nothing_and_keeps_v5_active(
-    migrated_prompt_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
     """An F2 image (files up to v4) or an F1 image (up to v3) seeding after #144 never
     demotes v5. So the rollback floor is the #144 PR3b image: an F2 image keeps v5 active
     and, not knowing v5, would send v5-pinned runs to the legacy path."""
-    database_url, schema = migrated_prompt_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     assets = load_prompt_assets(REPO_ROOT / "review/prompts")
 
     async def exercise() -> None:

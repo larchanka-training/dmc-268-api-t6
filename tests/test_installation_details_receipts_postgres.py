@@ -51,17 +51,6 @@ REPOSITORY_PATH = f"/repos/{FULL_NAME}"
 _RECEIVER_LOGGER = "app.modules.integrations.webhooks.application.receive_github_delivery"
 
 
-@dataclass(frozen=True)
-class Database:
-    url: str
-    schema: str
-
-
-@pytest.fixture
-def database(migrated_db: MigratedDatabase) -> Database:
-    return Database(migrated_db.url, migrated_db.schema)
-
-
 @dataclass
 class GitHub:
     """GitHub as the worker sees it; the ``GET /repos`` answer changes between sweeps."""
@@ -164,7 +153,7 @@ class Worker:
 
 
 @asynccontextmanager
-async def _worker(database: Database, github: GitHub) -> AsyncIterator[Worker]:
+async def _worker(database: MigratedDatabase, github: GitHub) -> AsyncIterator[Worker]:
     engine = create_async_engine(
         database.url,
         connect_args={"options": f"-csearch_path={database.schema}"},
@@ -214,14 +203,14 @@ async def _worker(database: Database, github: GitHub) -> AsyncIterator[Worker]:
 
 @pytest.mark.integration
 def test_unreadable_details_are_deferred_after_three_attempts_and_a_login_revives_the_receipt(
-    database: Database, caplog: pytest.LogCaptureFixture
+    migrated_db: MigratedDatabase, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A 404 on ``GET /repos`` survives attempt exhaustion; the next login gives it a retry."""
     github = GitHub()
 
     async def scenario() -> dict[str, object]:
         seen: dict[str, object] = {}
-        async with _worker(database, github) as worker:
+        async with _worker(migrated_db, github) as worker:
             await worker.receive()
             for step in (1, 2, 3):
                 seen[f"handled_{step}"] = await worker.sweep()
@@ -283,14 +272,14 @@ def test_unreadable_details_are_deferred_after_three_attempts_and_a_login_revive
 
 @pytest.mark.integration
 def test_a_details_response_without_branch_or_url_fails_for_good_and_a_login_does_not_revive_it(
-    database: Database,
+    migrated_db: MigratedDatabase,
 ) -> None:
     """A permanent fault stays on the failed-dispatch path: bounded, terminal, never woken."""
     github = GitHub(details_status=200, details_body={"id": 1000005, "full_name": FULL_NAME})
 
     async def scenario() -> dict[str, object]:
         seen: dict[str, object] = {}
-        async with _worker(database, github) as worker:
+        async with _worker(migrated_db, github) as worker:
             await worker.receive()
             for step in (1, 2, 3):
                 seen[f"handled_{step}"] = await worker.sweep()
@@ -329,14 +318,14 @@ def test_a_details_response_without_branch_or_url_fails_for_good_and_a_login_doe
 
 @pytest.mark.integration
 def test_unreadable_details_are_revived_by_the_hourly_tick_without_a_login(
-    database: Database,
+    migrated_db: MigratedDatabase,
 ) -> None:
     """A GitHub outage that outlasts three attempts heals through the hourly revival alone."""
     github = GitHub()
 
     async def scenario() -> dict[str, object]:
         seen: dict[str, object] = {}
-        async with _worker(database, github) as worker:
+        async with _worker(migrated_db, github) as worker:
             await worker.receive()
             await worker.received_at(START)
             for _ in (1, 2, 3):
@@ -382,14 +371,14 @@ def test_unreadable_details_are_revived_by_the_hourly_tick_without_a_login(
 
 @pytest.mark.integration
 def test_a_receipt_that_keeps_failing_is_revived_again_at_the_next_hourly_tick(
-    database: Database,
+    migrated_db: MigratedDatabase,
 ) -> None:
     """A revived cycle is spent within the hour, so every hourly tick revives the receipt."""
     github = GitHub()
 
     async def scenario() -> dict[str, object]:
         seen: dict[str, object] = {}
-        async with _worker(database, github) as worker:
+        async with _worker(migrated_db, github) as worker:
             await worker.receive()
             await worker.received_at(START)
             for _ in (1, 2, 3):
@@ -424,14 +413,14 @@ def test_a_receipt_that_keeps_failing_is_revived_again_at_the_next_hourly_tick(
 
 @pytest.mark.integration
 def test_a_receipt_received_eight_days_before_the_revival_tick_stays_deferred(
-    database: Database,
+    migrated_db: MigratedDatabase,
 ) -> None:
     """Outside the seven-day window only a login or a new delivery revives the receipt."""
     github = GitHub()
 
     async def scenario() -> dict[str, object]:
         seen: dict[str, object] = {}
-        async with _worker(database, github) as worker:
+        async with _worker(migrated_db, github) as worker:
             await worker.receive()
             await worker.received_at(START)
             for _ in (1, 2, 3):

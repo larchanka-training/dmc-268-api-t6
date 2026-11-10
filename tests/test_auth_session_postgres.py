@@ -19,16 +19,11 @@ from tests.template_database import MigratedDatabase
 pytest_plugins = ("tests.migrated_postgres",)
 
 
-@pytest.fixture
-def auth_schema(migrated_db: MigratedDatabase) -> tuple[str, str]:
-    return migrated_db.url, migrated_db.schema
-
-
 @pytest.mark.integration
 def test_auth_session_uow_persists_profile_and_hash_only(
-    auth_schema: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
-    database_url, schema = auth_schema
+    database_url, schema = migrated_db.url, migrated_db.schema
     engine = create_async_engine(
         database_url,
         connect_args={"options": f"-csearch_path={schema}"},
@@ -71,7 +66,7 @@ def test_auth_session_uow_persists_profile_and_hash_only(
 
 @pytest.mark.integration
 def test_repeated_http_callback_expands_scope_and_repository_access_without_logout(
-    auth_schema: tuple[str, str],
+    migrated_db: MigratedDatabase,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import json
@@ -92,7 +87,7 @@ def test_repeated_http_callback_expands_scope_and_repository_access_without_logo
     from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
     from app.modules.workspaces.infrastructure.models import GitHubUserRepositoryAccess
 
-    database_url, schema = auth_schema
+    database_url, schema = migrated_db.url, migrated_db.schema
     engine = create_async_engine(
         database_url, connect_args={"options": f"-csearch_path={schema}"}, poolclass=NullPool
     )

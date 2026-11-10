@@ -431,16 +431,11 @@ def test_github_adapter_accepts_zero_installations() -> None:
     assert asyncio.run(exercise()) == AuthenticatedGitHubInstallations(41, ())
 
 
-@pytest.fixture
-def migrated_link_database(migrated_db: MigratedDatabase) -> tuple[str, str]:
-    return migrated_db.url, migrated_db.schema
-
-
 @pytest.mark.integration
 def test_concurrent_authenticated_links_share_workspace_and_replay_prior_receipt(
-    migrated_link_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
-    database_url, schema = migrated_link_database
+    database_url, schema = migrated_db.url, migrated_db.schema
 
     @dataclass
     class Onboarding:
@@ -558,9 +553,9 @@ def test_concurrent_authenticated_links_share_workspace_and_replay_prior_receipt
 
 @pytest.mark.integration
 def test_concurrent_reversed_multi_installation_callbacks_do_not_deadlock(
-    migrated_link_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
-    database_url, schema = migrated_link_database
+    database_url, schema = migrated_db.url, migrated_db.schema
 
     async def exercise() -> None:
         engine = create_async_engine(
@@ -602,9 +597,9 @@ def test_concurrent_reversed_multi_installation_callbacks_do_not_deadlock(
 
 @pytest.mark.integration
 def test_database_newer_snapshot_prevents_older_callback_from_restoring_access(
-    migrated_link_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
-    database_url, schema = migrated_link_database
+    database_url, schema = migrated_db.url, migrated_db.schema
 
     async def exercise() -> None:
         engine = create_async_engine(
@@ -793,9 +788,9 @@ def test_linking_rejects_malformed_numeric_account_evidence(account_id: object) 
 
 @pytest.mark.integration
 def test_database_numeric_account_survives_rename_and_conflict_rolls_back_grants(
-    migrated_link_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
-    database_url, schema = migrated_link_database
+    database_url, schema = migrated_db.url, migrated_db.schema
 
     async def exercise() -> None:
         engine = create_async_engine(
@@ -845,9 +840,9 @@ def test_database_numeric_account_survives_rename_and_conflict_rolls_back_grants
 
 @pytest.mark.integration
 def test_database_fresh_oauth_establishes_only_exact_legacy_installation_identity(
-    migrated_link_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
-    database_url, schema = migrated_link_database
+    database_url, schema = migrated_db.url, migrated_db.schema
 
     async def exercise() -> None:
         engine = create_async_engine(

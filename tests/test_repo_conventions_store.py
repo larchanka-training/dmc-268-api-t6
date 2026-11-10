@@ -44,12 +44,6 @@ CONVENTIONS_V2_ID = UUID("00000000-0000-0000-0000-000000000506")
 AGENTS_SHA = "a" * 40
 
 
-@pytest.fixture
-def migrated_conventions_database(migrated_db: MigratedDatabase) -> tuple[str, str]:
-    """Provide a disposable migrated PostgreSQL database when explicitly configured."""
-    return migrated_db.url, migrated_db.schema
-
-
 async def _seed_repository_with_two_runs(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -176,9 +170,9 @@ async def _seed_repository_with_two_runs(
 
 @pytest.mark.integration
 def test_sqlalchemy_store_returns_cached_conventions_for_repeated_same_key(
-    migrated_conventions_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
-    database_url, schema = migrated_conventions_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     expected = CachedConventions(
         repository_id=REPOSITORY_ID,
         agents_md_sha=AGENTS_SHA,
@@ -265,9 +259,9 @@ async def _wait_until_blocked_by(
 
 @pytest.mark.integration
 def test_a_save_that_loses_the_race_reuses_the_row_of_the_winner(
-    migrated_conventions_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
-    database_url, schema = migrated_conventions_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     winner = CachedConventions(
         repository_id=REPOSITORY_ID,
         agents_md_sha=None,

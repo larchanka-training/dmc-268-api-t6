@@ -7,7 +7,6 @@ schema; receipts are seeded directly. Opt-in with ``TEST_DATABASE_URL``.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -38,17 +37,6 @@ GITLAB_ONLY = 1000003
 # Deferred two hours before NOW and received a day before it: otherwise eligible.
 DEFERRED = datetime(2026, 10, 6, 10, 0, tzinfo=UTC)
 RECEIVED = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
-
-
-@dataclass(frozen=True)
-class Database:
-    url: str
-    schema: str
-
-
-@pytest.fixture
-def database(migrated_db: MigratedDatabase) -> Database:
-    return Database(migrated_db.url, migrated_db.schema)
 
 
 def _receipt(
@@ -108,12 +96,12 @@ def _seed() -> list[WebhookEvent]:
 
 @pytest.mark.integration
 def test_revival_resets_only_old_enough_recent_installation_events_of_linked_installations(
-    database: Database,
+    migrated_db: MigratedDatabase,
 ) -> None:
     async def scenario() -> dict[str, Any]:
         engine = create_async_engine(
-            database.url,
-            connect_args={"options": f"-csearch_path={database.schema}"},
+            migrated_db.url,
+            connect_args={"options": f"-csearch_path={migrated_db.schema}"},
             poolclass=NullPool,
         )
         factory: async_sessionmaker[AsyncSession] = async_sessionmaker(

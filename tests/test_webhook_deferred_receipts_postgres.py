@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -39,17 +38,6 @@ pytest_plugins = ("tests.migrated_postgres",)
 START = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 
 
-@dataclass(frozen=True)
-class Database:
-    url: str
-    schema: str
-
-
-@pytest.fixture
-def database(migrated_db: MigratedDatabase) -> Database:
-    return Database(migrated_db.url, migrated_db.schema)
-
-
 class UnknownInstallation:
     """The dispatcher answer for a delivery of an installation nobody linked yet."""
 
@@ -76,12 +64,12 @@ def _delivery() -> WebhookReceipt:
 
 @pytest.mark.integration
 def test_deferred_delivery_is_final_after_three_attempts_and_wakes_on_linking(
-    database: Database,
+    migrated_db: MigratedDatabase,
 ) -> None:
     async def scenario() -> dict[str, Any]:
         engine = create_async_engine(
-            database.url,
-            connect_args={"options": f"-csearch_path={database.schema}"},
+            migrated_db.url,
+            connect_args={"options": f"-csearch_path={migrated_db.schema}"},
             poolclass=NullPool,
         )
         factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
@@ -155,7 +143,7 @@ def test_deferred_delivery_is_final_after_three_attempts_and_wakes_on_linking(
 
 
 def _receiver(
-    database: Database, dispatcher: UnknownInstallation, clock: list[datetime]
+    database: MigratedDatabase, dispatcher: UnknownInstallation, clock: list[datetime]
 ) -> tuple[ReceiveGitHubDelivery, async_sessionmaker[AsyncSession], Any]:
     engine = create_async_engine(
         database.url,
@@ -173,11 +161,11 @@ def _receiver(
 
 @pytest.mark.integration
 def test_sweep_summary_counts_deliveries_deferred_for_good(
-    database: Database, caplog: pytest.LogCaptureFixture
+    migrated_db: MigratedDatabase, caplog: pytest.LogCaptureFixture
 ) -> None:
     async def scenario() -> None:
         clock = [START]
-        receiver, _, engine = _receiver(database, UnknownInstallation(), clock)
+        receiver, _, engine = _receiver(migrated_db, UnknownInstallation(), clock)
         await receiver.execute(_delivery())
         for _ in range(3):
             await receiver.replay_pending()
@@ -204,11 +192,11 @@ def test_sweep_summary_counts_deliveries_deferred_for_good(
 
 @pytest.mark.integration
 def test_purge_counts_projected_failed_and_deferred_receipts_past_retention(
-    database: Database,
+    migrated_db: MigratedDatabase,
 ) -> None:
     async def scenario() -> tuple[int, list[str]]:
         clock = [START]
-        receiver, factory, engine = _receiver(database, UnknownInstallation(), clock)
+        receiver, factory, engine = _receiver(migrated_db, UnknownInstallation(), clock)
         old = START - timedelta(days=31)
         fresh = START - timedelta(days=29)
         async with factory() as session:
@@ -280,12 +268,12 @@ def test_purge_counts_projected_failed_and_deferred_receipts_past_retention(
     ],
 )
 def test_linking_wakes_a_pr_or_ci_delivery_deferred_for_good(
-    database: Database, event: str, payload: dict[str, Any]
+    migrated_db: MigratedDatabase, event: str, payload: dict[str, Any]
 ) -> None:
     async def scenario() -> tuple[tuple[Any, ...], tuple[Any, ...], int]:
         clock = [START]
         dispatcher = UnknownInstallation()
-        receiver, factory, engine = _receiver(database, dispatcher, clock)
+        receiver, factory, engine = _receiver(migrated_db, dispatcher, clock)
         await receiver.execute(VerifiedGitHubDelivery("delivery-1", event, payload).to_receipt())
         for _ in range(3):
             await receiver.replay_pending()
@@ -323,10 +311,10 @@ def test_linking_wakes_a_pr_or_ci_delivery_deferred_for_good(
 @pytest.mark.integration
 @pytest.mark.parametrize("commit", [False, True])
 def test_removal_markers_follow_receipt_retention_atomically(
-    database: Database, commit: bool
+    migrated_db: MigratedDatabase, commit: bool
 ) -> None:
     async def scenario() -> None:
-        receiver, factory, engine = _receiver(database, UnknownInstallation(), [START])
+        receiver, factory, engine = _receiver(migrated_db, UnknownInstallation(), [START])
         cutoff = START - timedelta(days=30)
         old = cutoff - timedelta(seconds=1)
         marker_ids = [
