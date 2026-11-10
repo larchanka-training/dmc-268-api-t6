@@ -169,7 +169,9 @@ VCS-only DiffMap/digest. Все backend-ветки обходят conventions, c
 и verifier, сохраняют закреплённые severity_threshold/max_comments и
 below_severity_threshold_count=0; summary сообщает фактическое отсутствие анализа.
 Для no-text partial известный reviewed_changed_lines=0, неизвестные исходные
-статистики — null. Backend-результаты идут в общий путь сохранения результата/плана
+статистики — null. Поля reviewed_changed_lines в коде пока нет (FinalReviewResult §8.1 —
+цель #107): no-text partial на snapshot path (#497 ч.3) закрепляет coverage.reviewed_files=0.
+Backend-результаты идут в общий путь сохранения результата/плана
 и публикации; skipped завершается без публикации.
 
 Выбор доказанного binary как E сохраняет текстовый scope: сервис не анализирует
@@ -2118,7 +2120,7 @@ review. Подтверждённый legacy-object связывается с run
 | Too_large-only; too_large >20 000 строк + 50 строк кода; маска assets/** + слишком большой assets/a.txt | Соответственно none; обычное ревью 50 строк с partial; skipped/ignored, так как маска побеждает too_large. Пока строки T входят в счётчик 3 000, too_large больше 3 000 строк — summary-only `diff_too_large`, coverage partial: соседние строки не ревьюятся |
 | Identity_unresolved, submodule либо доказанный pure rename/mode-only, отдельно и с ignored, incomplete нет | T с каноническими исходами none/partial; отсутствие строк не превращается в clean |
 | Неполный inventory либо неизвестные relevant counters; отдельно missing-patch-only 4 000 known строк | Сначала summary-only/partial, summaryOnly=true, 0 LLM; none/skipped и no-text partial неприменимы |
-| Только incomplete без hunks (missing/malformed/truncated patch), а также I+E, I+T и I+E+T; полный inventory, known counters 0/3 000, текста нет | Backend partial, summaryOnly=false, findings=[], verdict=null, 0 LLM включая conventions/verifier; pins и below_severity_threshold_count=0 сохранены, reviewed_changed_lines=0, неизвестная статистика null; publishing → succeeded/neutral. Построен на snapshot path (v4+) с #497 ч.3; legacy (≤ v3) публикует этот набор как summary-only `no_reviewable_files`, coverage partial, 0 LLM |
+| Только incomplete без hunks (missing/malformed/truncated patch), а также I+E, I+T и I+E+T; полный inventory, known counters 0/3 000, текста нет | Backend partial, summaryOnly=false, findings=[], verdict=null, 0 LLM включая conventions/verifier; pins и below_severity_threshold_count=0 сохранены, reviewed_changed_lines=0 (поле — цель #107; сейчас тест закрепляет coverage.reviewed_files=0), неизвестная статистика null; publishing → succeeded/neutral. Построен на snapshot path (v4+) с #497 ч.3; legacy (≤ v3) публикует этот набор как summary-only `no_reviewable_files`, coverage partial, 0 LLM |
 | Truncated-only с сохранившимися разрешёнными hunks вне E/T, также с E/T; полный inventory, known counted allowed ≤3 000 | Hunks поступают в L1: обычное ревью с partial, blocking возможен; ограничения координат incomplete сохраняются. Оба триггера summary-only проверяются раньше (§2.2/§2.3); без hunks — backend partial по предыдущей строке. |
 | Доказанный empty_file (`100644`/`100755`) + проверенный код; empty-only | Complete/clean без supported warning/error; соответственно skipped/all_changes_ignored, 0 LLM |
 | Пустое added без полного proof; удалённая картинка без blob/независимого binary evidence | missing_patch/incomplete; рядом с кодом partial/null с причиной; metadata_only не E/T |
