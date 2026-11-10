@@ -749,6 +749,8 @@ _TOO_LARGE = VcsFile(
         ((_missing(3),), {"missing_patch": 1}, {}),
         ((_missing(0),), {"missing_patch": 1}, {}),
         ((_missing(3_000),), {"missing_patch": 1}, {}),
+        # A hunk shorter than its header: GitHub sends it, the parser cannot read it.
+        ((_missing(3, "@@ -1,2 +1,2 @@\n-a\n+b"),), {"patch_malformed": 1}, {}),
         # The parser keeps a truncated patch only with a hunk; this one has no line.
         ((_missing(3, "@@ -0,0 +0,0 @@"),), {"patch_truncated": 1}, {}),
         ((_missing(3), _LOCK), {"missing_patch": 1}, {"generated": 1}),
@@ -763,6 +765,7 @@ _TOO_LARGE = VcsFile(
         "missing",
         "zero-counters",
         "three-thousand-lines",
+        "malformed",
         "empty-hunk",
         "with-exclusion",
         "with-technical-skip",
