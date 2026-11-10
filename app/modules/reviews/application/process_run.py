@@ -136,9 +136,9 @@ class ReviewContextStagePort(Protocol):
     async def run(self, run_id: UUID) -> object:
         """Enforce the attempt's policy, then build its context.
 
-        On the snapshot path a change of technical skips only raises ``NoReviewableText``
-        after its ``context.build`` (#130 F5). ``prepare`` lets it through; only
-        ``ExecuteReviewRun`` handles it, around ``prepare``.
+        On the snapshot path a change without analysable text raises ``NoReviewableText``
+        after its ``context.build`` (coverage none, #130 F5, or no-text partial). ``prepare``
+        lets it through; only ``ExecuteReviewRun`` handles it, around ``prepare``.
         """
         ...
 
@@ -185,7 +185,7 @@ class ReviewRunProcessor:
         """Fetch and snapshot the exact head associated with a durable run.
 
         The worker never calls it: ``ExecuteReviewRun`` calls ``prepare``. With a context
-        stage, ``NoReviewableText`` (a snapshot-path change of technical skips only, #130 F5)
+        stage, ``NoReviewableText`` (a snapshot-path change without analysable text, CVS §2.2)
         leaves this method unhandled; only ``ExecuteReviewRun`` handles it, around
         ``prepare``, and ``classify_failure`` would make it a retryable ``internal_error``.
         """

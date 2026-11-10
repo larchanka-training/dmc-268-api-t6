@@ -118,6 +118,11 @@ def _text(lines: int) -> VcsFile:
     return VcsFile("src/app.py", "added", _TEXT_BLOB, None, lines, 0, lines, _added_patch(lines))
 
 
+def _missing(lines: int, patch: str | None = None) -> VcsFile:
+    """One allowed text file with ``lines`` changed lines and no usable patch hunk."""
+    return VcsFile("src/note.txt", "modified", _TEXT_BLOB, None, lines, 0, lines, patch)
+
+
 @dataclass
 class GitHub(Vcs):
     files: tuple[VcsFile, ...] = ()
@@ -524,9 +529,11 @@ def _assert_summary_only_trace(trace: Trace) -> None:
     ]
 
 
+@pytest.mark.parametrize("file", [_text(3_001), _missing(3_001)], ids=["text", "missing-patch"])
 @pytest.mark.parametrize("version", ["v2", "v5"])
-def test_three_thousand_one_allowed_lines_make_no_model_call(version: str) -> None:
-    outcome = _run((_text(3_001),), files_changed=1, version=version)
+def test_three_thousand_one_allowed_lines_make_no_model_call(version: str, file: VcsFile) -> None:
+    # A missing patch still counts its lines (CVS §2.3): over the limit it is not no-text partial.
+    outcome = _run((file,), files_changed=1, version=version)
     build = _context(outcome.trace)
 
     assert outcome.skipped is None
@@ -720,6 +727,99 @@ def test_residual_unreviewable_file_makes_no_model_call() -> None:
     _assert_no_model_call(outcome.trace)
     _assert_published_without_a_model(outcome.published)
     _assert_named_summary(build["reason"])
+
+
+_LOCK = VcsFile("package-lock.json", "modified", None, None, 4, 0, 4, "@@ -1 +1 @@\n-a\n+b")
+_TOO_LARGE = VcsFile(
+    "data/large.txt",
+    "modified",
+    _TEXT_BLOB,
+    None,
+    1,
+    0,
+    1,
+    None,
+    omission_reason=OmissionReason.TOO_LARGE,
+)
+
+
+@pytest.mark.parametrize(
+    ("files", "reasons", "exclusions"),
+    [
+        ((_missing(3),), {"missing_patch": 1}, {}),
+        ((_missing(0),), {"missing_patch": 1}, {}),
+        ((_missing(3_000),), {"missing_patch": 1}, {}),
+        # The parser keeps a truncated patch only with a hunk; this one has no line.
+        ((_missing(3, "@@ -0,0 +0,0 @@"),), {"patch_truncated": 1}, {}),
+        ((_missing(3), _LOCK), {"missing_patch": 1}, {"generated": 1}),
+        ((_missing(3), _TOO_LARGE), {"missing_patch": 1, "too_large": 1}, {}),
+        (
+            (_missing(3), _LOCK, _TOO_LARGE),
+            {"missing_patch": 1, "too_large": 1},
+            {"generated": 1},
+        ),
+    ],
+    ids=[
+        "missing",
+        "zero-counters",
+        "three-thousand-lines",
+        "empty-hunk",
+        "with-exclusion",
+        "with-technical-skip",
+        "with-both",
+    ],
+)
+def test_a_snapshot_run_without_text_is_partial_without_summary_only_or_a_model_call(
+    files: tuple[VcsFile, ...], reasons: dict[str, int], exclusions: dict[str, int]
+) -> None:
+    # CVS §2.2: complete inventory, at most 3 000 counted lines, incomplete files and
+    # no analysable text. A v5 run is published with the backend result, not summary-only.
+    outcome = _run(files, files_changed=len(files), version="v5")
+    build = _context(outcome.trace)
+
+    assert outcome.skipped is None
+    assert outcome.result is True
+    assert build["diff"]["file_list_complete"] is True
+    assert build["status"] == "no_reviewable_text"
+    assert build["reason"] == "no_reviewable_text"
+    assert build["blocks"] == []
+    assert build["coverage"]["status"] == "partial"
+    assert build["coverage"]["reviewed_files"] == 0
+    assert build["coverage"]["reason_counts"] == reasons
+    assert build["coverage"]["exclusion_counts"] == exclusions
+    assert outcome.stored and not any(row.summary_only for row in outcome.stored)
+    assert [tool for tool, _, _ in outcome.trace.steps] == [
+        "policy.load",
+        "vcs.fetch_diff",
+        "context.build",
+    ]
+    _assert_no_model_call(outcome.trace)
+    _assert_published_without_a_model(outcome.published)
+
+
+def test_a_truncated_patch_with_rows_is_not_no_text_partial() -> None:
+    # Its rows are analysable text (CVS §2.2), which no-text partial never takes. Until the
+    # builder reads them, the set keeps the residual summary-only stop.
+    outcome = _run((_missing(3, "@@ -0,0 +1 @@\n+x\n"),), files_changed=1, version="v5")
+    build = _context(outcome.trace)
+
+    assert build["status"] == "summary_only"
+    assert build["reason"] == "no_reviewable_files"
+    assert outcome.stored and all(row.summary_only for row in outcome.stored)
+    _assert_no_model_call(outcome.trace)
+
+
+def test_a_second_attempt_without_text_stays_partial_without_summary_only() -> None:
+    outcome = _run((_missing(3),), files_changed=1, attempts=2, version="v5")
+    builds = _builds(outcome.trace)
+
+    assert [item["status"] for item in builds] == ["no_reviewable_text", "no_reviewable_text"]
+    assert builds[0]["coverage"] == builds[1]["coverage"]
+    assert builds[0]["coverage"]["status"] == "partial"
+    assert outcome.stored and not any(row.summary_only for row in outcome.stored)
+    assert len(outcome.published) == 2
+    assert all(isinstance(item, NoModelAnswer) for item in outcome.published)
+    _assert_no_model_call(outcome.trace)
 
 
 @pytest.mark.parametrize("version", ["v2", "v5"])

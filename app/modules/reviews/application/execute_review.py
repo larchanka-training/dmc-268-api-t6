@@ -285,8 +285,8 @@ class ExecuteReviewRun:
         try:
             conventions = await self._processor.prepare(run_id)
         except (NoReviewableText, SummaryOnlyReview):
-            # Nothing is shown to a model. Coverage none (#130 F5) and summary-only (#313)
-            # both publish the backend result.
+            # Nothing is shown to a model. Coverage none (#130 F5), no-text partial (CVS
+            # §2.2) and summary-only (#313) publish the backend result.
             return await self._publisher.execute(run_id, NoModelAnswer())
         if not isinstance(conventions, GeneratedConventions):
             return False
