@@ -282,3 +282,33 @@ def clean_review_result(head: str) -> str:
             },
         }
     )
+
+
+async def copy_seeded_run(
+    session: object,
+    run_id: UUID,
+    code_change_id: UUID,
+    state: str,
+    created_at: datetime,
+    finished_at: datetime,
+    idempotency_key: str,
+) -> None:
+    """A Run on ``code_change_id`` with the first seeded Run's refs, engine and versions."""
+    await session.execute(  # type: ignore[attr-defined]
+        text(
+            "INSERT INTO runs (id, code_change_id, base_sha, base_ref, head_sha, state, trigger, "
+            "idempotency_key, engine, rule_version_id, prompt_version_id, available_at, attempt, "
+            "created_at, finished_at, origin_provider_installation_id) "
+            "SELECT :id, :pr, base_sha, base_ref, head_sha, :state, 'manual', :key, engine, "
+            "rule_version_id, prompt_version_id, :created, 1, :created, :finished, "
+            "origin_provider_installation_id FROM runs LIMIT 1"
+        ),
+        {
+            "id": run_id,
+            "pr": code_change_id,
+            "state": state,
+            "key": idempotency_key,
+            "created": created_at,
+            "finished": finished_at,
+        },
+    )

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.list_runs import ListRuns
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
-from tests.portal_postgres import PR_CLOSED, PR_OPEN, WS_A, Env
+from tests.portal_postgres import PR_CLOSED, PR_OPEN, WS_A, Env, copy_seeded_run
 
 pytest_plugins = ("tests.portal_postgres",)
 pytestmark = pytest.mark.integration
@@ -43,17 +43,8 @@ def test_pages_of_one_walk_runs_with_one_created_at_by_id_without_gaps(portal_en
                     (_EARLIER, PR_OPEN, datetime(2026, 10, 27, 8, tzinfo=UTC), "p"),
                     (_TIED[2], PR_CLOSED, _SAME, "q"),
                 ):
-                    await session.execute(
-                        text(
-                            "INSERT INTO runs (id, code_change_id, base_sha, base_ref, head_sha, "
-                            "state, trigger, idempotency_key, engine, rule_version_id, "
-                            "prompt_version_id, available_at, attempt, created_at, finished_at, "
-                            "origin_provider_installation_id) "
-                            "SELECT :id, :pr, base_sha, base_ref, head_sha, 'failed', 'manual', "
-                            ":key, engine, rule_version_id, prompt_version_id, :created, 1, "
-                            ":created, :created, origin_provider_installation_id FROM runs LIMIT 1"
-                        ),
-                        {"id": run_id, "pr": pr, "created": created_at, "key": key * 64},
+                    await copy_seeded_run(
+                        session, run_id, pr, "failed", created_at, created_at, key * 64
                     )
             runs = ListRuns(SqlAlchemyRunRepository(factory, scope=AuthScope(42, (WS_A,))))
             walked: list[UUID] = []

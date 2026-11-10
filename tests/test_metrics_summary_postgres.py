@@ -29,6 +29,7 @@ from tests.portal_postgres import (
     WS_B,
     Env,
     clean_review_result,
+    copy_seeded_run,
 )
 
 pytest_plugins = ("tests.portal_postgres",)
@@ -64,7 +65,7 @@ def test_metrics_summary_counts_visible_runs_and_todays_spend(portal_env: Env) -
                         "finished_at = '2020-01-01T00:00:00Z'"
                     )
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     _RUN_OK,
                     PR_OPEN,
@@ -73,7 +74,7 @@ def test_metrics_summary_counts_visible_runs_and_todays_spend(portal_env: Env) -
                     datetime(2026, 10, 26, 11, tzinfo=UTC),
                     "a" * 64,
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     _RUN_BAD,
                     PR_NEW,
@@ -82,7 +83,7 @@ def test_metrics_summary_counts_visible_runs_and_todays_spend(portal_env: Env) -
                     datetime(2026, 10, 28, 8, 30, tzinfo=UTC),
                     "b" * 64,
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     _RUN_HIDDEN,
                     PR_B,
@@ -146,7 +147,7 @@ def test_metrics_summary_counts_visible_runs_and_todays_spend(portal_env: Env) -
                 ).execute(scope, range="7d", repo=None)
                 first_selects = len(statements)
                 async with factory.begin() as session:
-                    await _insert_run(
+                    await copy_seeded_run(
                         session,
                         UUID("00000000-0000-4000-8000-000000003220"),
                         PR_CLOSED,
@@ -224,7 +225,7 @@ def test_a_day_sums_runs_of_every_state_with_and_without_usage(portal_env: Env) 
                     (cancelled_with_usage, PR_CLOSED, "cancelled", (27, 11, 0), (27, 11, 5), "h"),
                     (uuid4(), PR_OPEN, "failed", (28, 8, 0), (28, 8, 10), "i"),
                 ):
-                    await _insert_run(
+                    await copy_seeded_run(
                         session,
                         run_id,
                         pr,
@@ -289,7 +290,7 @@ def test_a_day_counts_each_category_across_severities(portal_env: Env) -> None:
                         "finished_at = '2020-01-01T00:00:00Z'"
                     )
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     first,
                     PR_OPEN,
@@ -298,7 +299,7 @@ def test_a_day_counts_each_category_across_severities(portal_env: Env) -> None:
                     datetime(2026, 10, 26, 11, tzinfo=UTC),
                     "j" * 64,
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     second,
                     PR_NEW,
@@ -361,7 +362,7 @@ def test_a_summary_only_head_has_no_verdict_and_its_result_is_not_read(portal_en
                     )
                 )
                 for run_id, pr, key in ((clean, PR_OPEN, "l"), (stopped, PR_NEW, "m")):
-                    await _insert_run(
+                    await copy_seeded_run(
                         session,
                         run_id,
                         pr,
@@ -515,7 +516,7 @@ def test_metrics_summary_matches_pull_verdicts_and_published_findings(
                         "finished_at = '2020-01-01T00:00:00Z'"
                     )
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     old,
                     PR_OPEN,
@@ -524,7 +525,7 @@ def test_metrics_summary_matches_pull_verdicts_and_published_findings(
                     datetime(2026, 10, 26, 10, tzinfo=UTC),
                     "f" * 64,
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     latest,
                     PR_OPEN,
@@ -533,7 +534,7 @@ def test_metrics_summary_matches_pull_verdicts_and_published_findings(
                     datetime(2026, 10, 26, 12, tzinfo=UTC),
                     "g" * 64,
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     failed,
                     PR_CLOSED,
@@ -542,7 +543,7 @@ def test_metrics_summary_matches_pull_verdicts_and_published_findings(
                     datetime(2026, 10, 26, 12, tzinfo=UTC),
                     "h" * 64,
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     clean,
                     PR_NEW,
@@ -659,7 +660,7 @@ def test_metrics_summary_filters_repo_and_pauses_on_the_worker_rule(portal_env: 
                         "updated": datetime(2026, 10, 26, tzinfo=UTC),
                     },
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     own,
                     PR_OPEN,
@@ -668,7 +669,7 @@ def test_metrics_summary_filters_repo_and_pauses_on_the_worker_rule(portal_env: 
                     datetime(2026, 10, 26, 11, tzinfo=UTC),
                     "j" * 64,
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     extra_run,
                     extra_pr,
@@ -742,35 +743,6 @@ def test_metrics_summary_filters_repo_and_pauses_on_the_worker_rule(portal_env: 
     asyncio.run(
         exercise(),
         loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
-    )
-
-
-async def _insert_run(
-    session: object,
-    run_id: UUID,
-    code_change_id: UUID,
-    state: str,
-    created_at: datetime,
-    finished_at: datetime,
-    idempotency_key: str,
-) -> None:
-    await session.execute(  # type: ignore[attr-defined]
-        text(
-            "INSERT INTO runs (id, code_change_id, base_sha, base_ref, head_sha, state, trigger, "
-            "idempotency_key, engine, rule_version_id, prompt_version_id, available_at, attempt, "
-            "created_at, finished_at, origin_provider_installation_id) "
-            "SELECT :id, :pr, base_sha, base_ref, head_sha, :state, 'manual', :key, engine, "
-            "rule_version_id, prompt_version_id, :created, 1, :created, :finished, "
-            "origin_provider_installation_id FROM runs LIMIT 1"
-        ),
-        {
-            "id": run_id,
-            "pr": code_change_id,
-            "state": state,
-            "key": idempotency_key,
-            "created": created_at,
-            "finished": finished_at,
-        },
     )
 
 
