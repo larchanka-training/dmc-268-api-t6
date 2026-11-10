@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from tests.ci_workflow import REPO_ROOT, REQUIRED_CHECKS, ci_workflow, git, job_step
+from tests.ci_workflow import REPO_ROOT, REQUIRED_CHECKS, ci_workflow, git, git_env, job_step
 
 SCRIPT = REPO_ROOT / "scripts/skylos_quality.sh"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
@@ -31,17 +31,23 @@ FAKE_UVX = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "${FAKE_UVX_LOG}"
 codes=(${FAKE_UVX_EXIT})
 call="$(wc -l < "${FAKE_UVX_LOG}")"
+if [[ -n "${FAKE_UVX_SNAPSHOTS:-}" ]]; then
+  cp -a . "${FAKE_UVX_SNAPSHOTS}/${call}"
+fi
 report='{"code_health": []}'
-if [[ -n "${FAKE_UVX_REPORT:-}" ]]; then
+per_call="FAKE_UVX_REPORT_${call}"
+if [[ -n "${!per_call:-}" ]]; then
+  report="${!per_call}"
+elif [[ -n "${FAKE_UVX_REPORT:-}" ]]; then
   report="${FAKE_UVX_REPORT}"
 fi
 while (($#)); do
   if [[ "$1" == -o ]]; then
-    printf '%s' "${report}" > "$2"
+    printf '%s' "${report//@PWD@/${PWD}}" > "$2"
   fi
   shift
 done
-exit "${codes[$((call - 1))]}"
+exit "${codes[$((call - 1))]:-0}"
 """
 # Logs the command line, then runs the real uv: the checker's verdict stays end to end.
 FAKE_UV = """#!/usr/bin/env bash
@@ -60,13 +66,35 @@ def _pinned_version() -> str:
     return version
 
 
-def _run_script(
-    tmp_path: Path, *args: str, exits: str = "0 0", report: str = ""
-) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-    """Run the script with a fake ``uvx``; returns the result and the logged command lines.
+def _script_repo(tmp_path: Path) -> Path:
+    """A git repository with a copy of the gate's scripts and config; ``origin/main`` is HEAD."""
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    for source in (SCRIPT, CHECKER):
+        shutil.copy2(source, repo / "scripts" / source.name)
+    shutil.copy2(PYPROJECT, repo / "pyproject.toml")
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "base")
+    git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    return repo
 
-    ``uv`` is logged to ``uv.log`` in ``tmp_path`` and runs for real.
+
+def _run_script(
+    tmp_path: Path,
+    *args: str,
+    exits: str = "0 0",
+    report: str = "",
+    repo: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run the script in ``repo`` (default: ``_script_repo``) with a fake ``uvx``.
+
+    Returns the result and the logged Skylos command lines. ``uv`` is logged to ``uv.log`` in
+    ``tmp_path`` and runs for real. The script gets no git identity: it sets its own.
     """
+    if repo is None:
+        repo = _script_repo(tmp_path)
     real_uv = shutil.which("uv")
     assert real_uv, "uv must be on PATH"
     bin_dir = tmp_path / "bin"
@@ -76,11 +104,17 @@ def _run_script(
         (bin_dir / name).chmod(0o755)
     log = tmp_path / "uvx.log"
     log.touch()
+    no_identity = {
+        key: value
+        for key, value in git_env().items()
+        if not key.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))
+    }
     result = subprocess.run(
-        [str(SCRIPT), *args],
+        [str(repo / "scripts/skylos_quality.sh"), *args],
         cwd=tmp_path,
         env={
-            **os.environ,
+            **no_identity,
+            **(env or {}),
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
             "FAKE_UVX_LOG": str(log),
             "FAKE_UVX_EXIT": exits,
@@ -138,7 +172,7 @@ def test_the_checker_runs_on_the_project_python_through_uv(tmp_path: Path) -> No
     [("1 0", 1), ("0 1", 1), ("1 1", 1), ("1 2", 2), ("2 1", 2), ("2 0", 2)],
 )
 def test_the_worst_pass_decides_and_both_passes_run(tmp_path: Path, exits: str, code: int) -> None:
-    result, calls = _run_script(tmp_path, "abc123", str(tmp_path / "reports"), exits=exits)
+    result, calls = _run_script(tmp_path, "origin/main", str(tmp_path / "reports"), exits=exits)
 
     assert result.returncode == code
     assert len(calls) == 2, calls
