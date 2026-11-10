@@ -123,7 +123,7 @@ provider-проекциях; повторный проход не меняет t
 
 **Порядок попытки на `main`** (production-композиция worker; inline `PublishReviewOutput` без очереди не пишет ни `llm.verify`, ни `review.postprocess`):
 
-После F2 новый run закрепляет активную версию review prompt (v4, с #350 — v5), если
+После F2 новый run закрепляет активную версию review prompt (v4, с #350 — v5, с #498 — v7), если
 репозиторий не закрепил собственную (`repositories.prompt_version_id`). Закреплённый v3
 или ниже сохраняет legacy-путь: его порядок — пункты cache miss, cache hit и retry ниже;
 snapshot-путь (v4 и v5, `SNAPSHOT_REVIEW_PROMPT_VERSIONS`) описывают два отдельных пункта.
@@ -191,7 +191,7 @@ verifier insufficient_context остаются за lifecycle #107/#130; их о
 на coverage не объявляется реализованным в #213.
 
 После #130 F1 worker собирает Reflection Pass; F2 seed активировал
-`review.system:v4`, а после #350 новые runs закрепляют общий v5. Snapshot-путь выбирается по
+`review.system:v4`, а после #350 новые runs закрепляют общий v5, после #498 — v7. Snapshot-путь выбирается по
 закреплённому v4 или v5; runs с v3 или ниже, созданные до F2 seed либо с pins до 0039,
 сохраняют legacy-путь без verifier. Адаптер ревью
 выполняет fit/guard/manifest один раз: snapshot-ответ `ReviewReply` несёт
@@ -881,14 +881,14 @@ Snapshot без `reflection_pass` даёт `internal_error` — ошибку с�
 `reflection_pass` без snapshot пропускается молча, без предупреждения в логе.
 Main #130 F1 передаёт lazy Reflection Pass
 через production attempt provider в `app/worker.py`; legacy-версия reviewer сохраняет
-прежний путь; F2 seed активировал v4, а после #350 новые runs закрепляют v5;
+прежний путь; F2 seed активировал v4, а после #350 новые runs закрепляют v5, после #498 — v7;
 `SqlAlchemyReviewOutputRepository.get_post_processing_input` в `run_repository.py`
 передаёт `allowed_v2_rules=None` inline: у legacy-адаптера нет проверенного manifest.
 Явно собранный snapshot-путь передаёт отдельный allowlist в `VerifiedReviewOutput`;
 одно наличие строки snapshot не разрешает атрибуцию v2.
 Reflection Pass — название реализации обязательного verifier из CVS §7;
 наличие компонентов само по себе не выбирает snapshot-путь: в F1 его определяет
-закреплённая версия reviewer. F2 seed активировал v4, а после #350 новые runs закрепляют v5;
+закреплённая версия reviewer. F2 seed активировал v4, а после #350 новые runs закрепляют v5, после #498 — v7;
 это не означает внедрение полного lifecycle #107.
 GitHub, GitLab и Bitbucket Cloud runs закрепляют общую активную версию
 `review.system`; после #350 это v5, после #498 — v7. Retry существующего Run сохраняет
