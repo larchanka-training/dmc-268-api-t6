@@ -32,8 +32,8 @@ def _relative(path: object) -> str:
 def _read_findings(report: str) -> list[dict[str, object]]:
     """The ``code_health`` findings of the report; raises on an unreadable report."""
     findings = json.loads(Path(report).read_text(encoding="utf-8"))["code_health"]
-    if not isinstance(findings, list):
-        raise TypeError("code_health is not a list")
+    if not isinstance(findings, list) or not all(isinstance(item, dict) for item in findings):
+        raise TypeError("code_health is not a list of objects")
     return findings
 
 

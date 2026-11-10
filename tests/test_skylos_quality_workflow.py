@@ -201,7 +201,10 @@ def test_the_checker_lists_each_failing_function_in_the_log_and_summary(tmp_path
     assert failing in (tmp_path / "summary.md").read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("report", ["", "[]", "{}", '{"code_health": {}}'])
+@pytest.mark.parametrize(
+    "report",
+    ["", "[]", "{}", '{"code_health": {}}', '{"code_health": [null]}', '{"code_health": [{}, 1]}'],
+)
 def test_an_unreadable_report_is_incomplete(tmp_path: Path, report: str) -> None:
     result = _check(tmp_path, report)
 
