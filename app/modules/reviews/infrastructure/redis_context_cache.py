@@ -24,6 +24,9 @@ from app.modules.reviews.infrastructure.tree_sitter_facts import profile_version
 
 _LOGGER = logging.getLogger(__name__)
 AST_TTL_SECONDS = 7 * 24 * 3600
+# The JSON form of the cached facts. Form 2 adds the comment spans (#498): an entry of
+# form 1 is never read, and the index profile (``QUERY_VERSION``) stays as it is.
+_FACTS_FORM = "f2"
 TREE_TTL_SECONDS = 3600
 
 
@@ -42,7 +45,7 @@ class RedisAstFactsCache:
 
     def _key(self, blob_sha: str, language: AstLanguage) -> str:
         profile = sha256(profile_version(language).encode("utf-8")).hexdigest()[:16]
-        return f"ast:{self._repository_id}:{blob_sha}:{language.value}:{profile}"
+        return f"ast:{self._repository_id}:{blob_sha}:{language.value}:{profile}:{_FACTS_FORM}"
 
     async def get(self, blob_sha: str, language: AstLanguage) -> AstFacts | None:
         try:

@@ -19,6 +19,7 @@ for number, line in enumerate(sys.stdin):
         "package_name": None,
         "build_constrained": False,
         "has_errors": False,
+        "comments": [],
     }
     sys.stdout.write(json.dumps({"key": key, "facts": facts, "cpu": 0.1}) + "\n")
     sys.stdout.flush()

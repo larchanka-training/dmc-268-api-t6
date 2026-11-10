@@ -12,11 +12,13 @@ from app.modules.code_index.domain.enums import RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
 from app.modules.reviews.application import rag_index
 from app.modules.reviews.application.rag_index import (
+    COMMENT_FREE_PROMPT_VERSIONS,
     RETRIEVED_PROMPT_VERSIONS,
     OpenReviewIndex,
     RagReadiness,
     ReviewIndexAccess,
     has_retrieved_section,
+    hides_retrieved_comments,
 )
 
 REPOSITORY_ID = UUID("00000000-0000-0000-0000-000000000144")
@@ -110,3 +112,19 @@ def test_the_capability_set_is_read_when_the_gate_asks(monkeypatch: pytest.Monke
     # The key and the version are one pin: neither matches alone.
     assert has_retrieved_section("review.system", "v3") is False
     assert has_retrieved_section("review.verifier", "v6") is False
+
+
+def test_no_review_prompt_hides_retrieved_comments_until_v7() -> None:
+    # #498 Part 1: the blocks of a v5 run stay as they are.
+    assert frozenset() == COMMENT_FREE_PROMPT_VERSIONS
+    assert hides_retrieved_comments("review.system", "v5") is False
+
+
+def test_the_comment_set_is_read_when_the_gate_asks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        rag_index, "COMMENT_FREE_PROMPT_VERSIONS", frozenset({("review.system", "v7")})
+    )
+
+    assert hides_retrieved_comments("review.system", "v7") is True
+    assert hides_retrieved_comments("review.system", "v5") is False
+    assert hides_retrieved_comments("review.verifier", "v7") is False

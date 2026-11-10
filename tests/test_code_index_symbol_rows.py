@@ -158,6 +158,7 @@ def test_an_unnamed_symbol_outside_a_default_export_is_dropped_with_its_descenda
         package_name=None,
         build_constrained=False,
         has_errors=False,
+        comments=(),
     )
 
     assert symbol_rows("a.ts", facts) == (

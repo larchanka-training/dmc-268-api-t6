@@ -202,7 +202,7 @@ def test_class_10_binary_content() -> None:
 
 def test_class_11_decode_or_parse_error() -> None:
     exclusions = _exclusions()
-    facts = AstFacts(AstLanguage.PYTHON, "p", (), (), (), None, False, False)
+    facts = AstFacts(AstLanguage.PYTHON, "p", (), (), (), None, False, False, ())
 
     for failure in (AstFailureReason.SOURCE_DECODE_FAILED, AstFailureReason.AST_TIMEOUT):
         assert exclusions.admit_parse(failure) is ExclusionClass.PARSE_FAILED
