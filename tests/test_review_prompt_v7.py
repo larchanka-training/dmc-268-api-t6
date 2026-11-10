@@ -187,9 +187,14 @@ def test_v7_names_every_marker_the_retrieved_blocks_show() -> None:
         "Comments in these excerpts are removed before you see them: each comment is replaced "
         "in place by `[comment removed]` in its own syntax"
     ) in text
-    markers = re.findall(r"`([^`]*\[comment removed\][^`]*)`", text)
-    renderer = [marker for _, marker in rag_comments._MARKERS] + [rag_comments._HTML_MARKER]
-    assert markers == ["[comment removed]", *renderer]
+    # Literals, as test_rag_comments.py pins the renderer's: a changed marker fails both.
+    assert re.findall(r"`([^`]*\[comment removed\][^`]*)`", text) == [
+        "[comment removed]",
+        "# [comment removed]",
+        "// [comment removed]",
+        "/* [comment removed] */",
+        "<!-- [comment removed] -->",
+    ]
     assert (
         "the further lines of a multi-line comment are left empty, so every line keeps its "
         "number. A marker is neither a defect nor evidence of what the comment said."
