@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-from collections.abc import Iterator
 from datetime import timedelta
 from uuid import UUID
 
@@ -33,22 +31,15 @@ from app.modules.reviews.infrastructure.review_output_unit_of_work import (
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyReviewOutputRepository
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunStore
-from tests.portal_postgres import NOW, PR_NEW, REPO_A, RUN_ATTEMPTED, Env, portal_schema
+from tests.portal_postgres import NOW, PR_NEW, REPO_A, RUN_ATTEMPTED, Env
 from tests.publication_settings_postgres import _settings
 from tests.test_prepare_policy_snapshot import Source
 from tests.test_severity_threshold_postgres import RecordingQueue
 
+pytest_plugins = ("tests.portal_postgres",)
+
 _PATH = "app/charge.py"
 _PATCH = "@@ -10,4 +10,5 @@\n context\n+added\n context\n context\n context"
-
-
-@pytest.fixture
-def env() -> Iterator[Env]:
-    url = os.environ.get("TEST_DATABASE_URL")
-    if url is None:
-        pytest.skip("set TEST_DATABASE_URL to test publication pins")
-    with portal_schema(url, None) as schema:
-        yield schema
 
 
 async def _ready(factory: async_sessionmaker[AsyncSession]) -> None:
@@ -147,10 +138,10 @@ def _answer() -> dict[str, object]:
 
 @pytest.mark.integration
 def test_webhook_creation_reads_fresh_settings_and_rolls_back_with_its_transaction(
-    env: Env,
+    portal_env: Env,
 ) -> None:
     async def scenario() -> None:
-        engine = env.engine()
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             await _ready(factory)
@@ -173,9 +164,9 @@ def test_webhook_creation_reads_fresh_settings_and_rolls_back_with_its_transacti
 
 
 @pytest.mark.integration
-def test_rerun_reads_current_settings_from_a_fresh_repository_pair(env: Env) -> None:
+def test_rerun_reads_current_settings_from_a_fresh_repository_pair(portal_env: Env) -> None:
     async def scenario() -> None:
-        engine = env.engine()
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             await _ready(factory)
@@ -205,9 +196,11 @@ def test_rerun_reads_current_settings_from_a_fresh_repository_pair(env: Env) -> 
 
 @pytest.mark.integration
 @pytest.mark.parametrize("historical", [False, True])
-def test_snapshot_prepared_after_settings_change_keeps_run_pair(env: Env, historical: bool) -> None:
+def test_snapshot_prepared_after_settings_change_keeps_run_pair(
+    portal_env: Env, historical: bool
+) -> None:
     async def scenario() -> None:
-        engine = env.engine()
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             await _ready(factory)
@@ -244,9 +237,9 @@ def test_snapshot_prepared_after_settings_change_keeps_run_pair(env: Env, histor
 
 
 @pytest.mark.integration
-def test_created_run_and_retry_keep_pins_but_rerun_uses_current_pair(env: Env) -> None:
+def test_created_run_and_retry_keep_pins_but_rerun_uses_current_pair(portal_env: Env) -> None:
     async def scenario() -> None:
-        engine = env.engine()
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             await _ready(factory)
@@ -346,9 +339,11 @@ def test_created_run_and_retry_keep_pins_but_rerun_uses_current_pair(env: Env) -
 
 
 @pytest.mark.integration
-def test_historical_null_run_keeps_live_fallback_even_after_snapshot_and_retry(env: Env) -> None:
+def test_historical_null_run_keeps_live_fallback_even_after_snapshot_and_retry(
+    portal_env: Env,
+) -> None:
     async def scenario() -> None:
-        engine = env.engine()
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             await _claim(factory, RUN_ATTEMPTED, 2)
@@ -396,13 +391,13 @@ def test_historical_null_run_keeps_live_fallback_even_after_snapshot_and_retry(e
 
 
 @pytest.mark.integration
-def test_snapshot_pins_roll_back_with_the_callers_unit_of_work(env: Env) -> None:
+def test_snapshot_pins_roll_back_with_the_callers_unit_of_work(portal_env: Env) -> None:
     from app.modules.reviews.application.prepare_policy_snapshot import build_policy_snapshot
     from app.modules.reviews.application.review_ignore import parse_review_ignore
     from tests.test_policy_snapshot_postgres import _documents
 
     async def scenario() -> None:
-        engine = env.engine()
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             await _ready(factory)
