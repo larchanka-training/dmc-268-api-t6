@@ -13,11 +13,16 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
+from app.modules.reviews.application.change_summary import (
+    ChangeSummaryModel,
+    ChangeSummaryRequest,
+)
 from app.modules.reviews.application.conventions import GeneratedConventions
 from app.modules.reviews.application.findings_post_processor import (
     FindingsPostProcessor,
     ProcessedFinding,
 )
+from app.modules.reviews.application.llm import LlmCallFailed
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import CallManifest, PolicySnapshot
 from app.modules.reviews.application.prompt_budget import (
@@ -266,6 +271,7 @@ class ExecuteReviewRun:
         publisher: ReviewOutputHandler,
         context_filter: ReviewContextFilter | None = None,
         reflection_pass: ReflectionPass | None = None,
+        change_summary: ChangeSummaryModel | None = None,
     ) -> None:
         self._processor = processor
         self._repository = repository
@@ -273,6 +279,7 @@ class ExecuteReviewRun:
         self._publisher = publisher
         self._context_filter = context_filter
         self._reflection_pass = reflection_pass
+        self._change_summary = change_summary
 
     async def execute(self, run_id: UUID) -> bool:
         try:
@@ -419,6 +426,9 @@ class ExecuteReviewRun:
             raise InvalidReviewOutput("Malformed review model JSON output") from exc
         if not isinstance(answer_payload, dict):
             raise InvalidReviewOutput("Review model output must be an object")
+        change_summary, change_summary_error = await self._summarize_change(
+            run_id, meta.title, context
+        )
         model_output = VerifiedReviewOutput(
             answer_payload,
             dropped_findings=verified.dropped_findings if verified is not None else (),
@@ -428,8 +438,37 @@ class ExecuteReviewRun:
             verify_response=verified.verify_response if verified is not None else None,
             incomplete_paths=incomplete_paths,
             rule_line_refs=verified.rule_line_refs if verified is not None else None,
+            change_summary=change_summary,
+            change_summary_error=change_summary_error,
         )
         return await self._publisher.execute(run_id, model_output)
+
+    async def _summarize_change(
+        self, run_id: UUID, title: str, context: ReviewContext
+    ) -> tuple[tuple[str, ...], str | None]:
+        """The change summary agent, after every mandatory stage of a snapshot-path run (#316).
+
+        It sees the title and the changed files the review was shown. Its failure is not the
+        run's: the review is published without the text and the error code goes to
+        ``review.postprocess``. Cancellation and any other error still end the attempt.
+        """
+        if self._change_summary is None or context.policy_snapshot is None:
+            return (), None
+        request = ChangeSummaryRequest(title=title, changed_files=context.changed_files)
+        try:
+            summary = await self._change_summary.summarize_change(request=request)
+        except LlmCallFailed as exc:
+            _LOGGER.warning(
+                "Change summary left out run_id=%s error_code=%s", run_id, exc.error_code.value
+            )
+            return (), exc.error_code.value
+        except PolicyError as exc:
+            if exc.code is not PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR:
+                raise
+            # The packaged prompt misses its pin: a deploy defect, not this run's.
+            _LOGGER.error("Change summary left out run_id=%s error_code=%s", run_id, exc.code.value)
+            return (), exc.code.value
+        return summary.sentences, None
 
     async def _run_reflection_pass(
         self,
