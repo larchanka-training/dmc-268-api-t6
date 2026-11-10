@@ -386,7 +386,7 @@ async def _scenario(
             {"id": REPO_A, "rag": rag},
         )
     if v5_seeded:
-        await _seed(factory, _packaged())
+        await _seed(factory, _up_to(_packaged(), 5))
         [pinned_and_live] = await _rows(
             factory,
             "SELECT p.version, (SELECT version FROM prompt_versions "
