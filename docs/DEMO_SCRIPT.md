@@ -101,6 +101,10 @@ T0 — момент, когда на шаге 3 поставлен лейбл. �
    - `AI Review` нет, строки демо-PR в Runs нет: Run не создан. Причины: Automatic review
      выключен, CI не зелёный, лейбл не `ai-review`, PR закрыт.
    - `AI Review` нет, строка демо-PR в Runs есть со статусом `queued`: Run создан и ждёт worker.
+   - `AI Review` нет, строка демо-PR в Runs есть со статусом `skipped` или `cancelled`: Run
+     закрыт до того, как worker его взял, и check-run не создан. Причина — в поле `Reason` на
+     странице Run. Например, Automatic review выключили после лейбла: «Automatic review was
+     switched off before the run started.» `repo_disabled`.
    - «AI-ревью пропущено»: Run пропущен, причина — в тексте check-run. Например, Branch filter не
      подходит: «Целевая ветка PR не подходит под фильтр веток репозитория.»
    - «AI-ревью выполняется»: прогон идёт дольше цели, модель отвечает медленно. В тексте
