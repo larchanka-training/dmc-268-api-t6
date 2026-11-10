@@ -8,7 +8,6 @@ still publishes, and ``review.postprocess`` says which happened.
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import replace
 from typing import Any, cast
 from uuid import UUID
@@ -30,6 +29,7 @@ from app.modules.reviews.application.reflection_pass import (
 from app.modules.reviews.application.review_context import NoReviewableText, SummaryOnlyReview
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure, RunSkipped
 from app.modules.reviews.application.store_review_output import StoreReviewOutput
+from tests.llm_fakes import SupportingVerifier
 from tests.verifier_pipeline_fakes import (
     MAIN_BLOCK_ID,
     RUN_ID,
@@ -58,42 +58,23 @@ FINDING = {
 }
 
 
-class _Verifier:
-    """Supports every candidate; ``fail`` makes the verification stage fail instead."""
-
-    def __init__(self, events: list[str], fail: bool = False) -> None:
-        self._events = events
-        self._fail = fail
-
-    async def verify(self, *, system_prompt: str, user_prompt: str, **_: object) -> VerifierReply:
-        self._events.append("verifier")
-        if self._fail:
-            raise RunFailure("verification_unavailable", "the verifier failed")
-        decisions = [
-            {
-                "candidate_id": candidate_id,
-                "status": "supported",
-                "reason": "Shown in the diff.",
-                "evidence_refs": [{"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}],
-                "requirement_refs": [],
-            }
-            for candidate_id in re.findall(r'candidate candidate_id="([^"]+)"', user_prompt)
-        ]
-        return VerifierReply(
-            output={"decisions": decisions},
-            accepted_call_id=UUID("00000000-0000-0000-0000-000000031631"),
-        )
+class _FailingVerifier:
+    async def verify(self, **_: object) -> VerifierReply:
+        raise RunFailure("verification_unavailable", "the verifier failed")
 
 
 class _ChangeSummaryModel:
-    def __init__(self, events: list[str], answer: ChangeSummary | Exception) -> None:
-        self._events = events
+    """Answers ``answer``; notes how many prompts the run's verifier had got at each call."""
+
+    def __init__(self, answer: ChangeSummary | Exception) -> None:
         self._answer = answer
+        self.verifier = SupportingVerifier(MAIN_BLOCK_ID, 10)
         self.requests: list[ChangeSummaryRequest] = []
+        self.verifier_prompts_before: list[int] = []
 
     async def summarize_change(self, *, request: ChangeSummaryRequest) -> ChangeSummary:
-        self._events.append("change_summary")
         self.requests.append(request)
+        self.verifier_prompts_before.append(len(self.verifier.prompts))
         if isinstance(self._answer, Exception):
             raise self._answer
         return self._answer
@@ -113,15 +94,14 @@ class _NoTextProcessor(FakeProcessor):
         raise self._error
 
 
-def _run(
+def _pipeline(
     agent: _ChangeSummaryModel,
     *,
-    events: list[str],
     findings: list[dict[str, Any]] | None = None,
     processor: FakeProcessor | None = None,
     repository: FakeRepository | None = None,
-    verifier: _Verifier | None = None,
-) -> FakePublishingRepository:
+    verifier: Any = None,
+) -> tuple[ExecuteReviewRun, FakePublishingRepository]:
     reviews = FakePublishingRepository()
     store = StoreReviewOutput(
         cast(Any, lambda: FakeUnitOfWork(reviews)),
@@ -134,22 +114,26 @@ def _run(
         repository or FakeRepository(),
         FakeModel([FINDING] if findings is None else findings),
         store,
-        reflection_pass=ReflectionPass(verifier or _Verifier(events)),
+        reflection_pass=ReflectionPass(verifier or agent.verifier),
         change_summary=agent,
     )
+    return pipeline, reviews
+
+
+def _run(agent: _ChangeSummaryModel, **kwargs: Any) -> FakePublishingRepository:
+    pipeline, reviews = _pipeline(agent, **kwargs)
     assert asyncio.run(pipeline.execute(RUN_ID)) is True
     return reviews
 
 
 def test_change_summary_follows_the_verifier_and_its_text_is_signed_in_the_stored_body() -> None:
-    events: list[str] = []
     agent = _ChangeSummaryModel(
-        events, ChangeSummary(("Adds a lookup by id.", "Reads the value from the query."))
+        ChangeSummary(("Adds a lookup by id.", "Reads the value from the query."))
     )
 
-    reviews = _run(agent, events=events)
+    reviews = _run(agent)
 
-    assert events == ["verifier", "change_summary"]
+    assert agent.verifier_prompts_before == [1]
     [request] = agent.requests
     assert request.title == "Title"
     assert [file.path for file in request.changed_files] == ["app/main.py"]
@@ -190,16 +174,12 @@ def test_change_summary_follows_the_verifier_and_its_text_is_signed_in_the_store
 def test_change_summary_failure_publishes_the_review_without_the_text(
     error: Exception, error_code: str
 ) -> None:
-    reference_events: list[str] = []
-    with_text = _run(
-        _ChangeSummaryModel(reference_events, ChangeSummary(("Adds a lookup by id.",))),
-        events=reference_events,
-    )
-    events: list[str] = []
+    with_text = _run(_ChangeSummaryModel(ChangeSummary(("Adds a lookup by id.",))))
+    agent = _ChangeSummaryModel(error)
 
-    reviews = _run(_ChangeSummaryModel(events, error), events=events)
+    reviews = _run(agent)
 
-    assert events == ["verifier", "change_summary"]
+    assert agent.verifier_prompts_before == [1]
     [processed] = reviews.stored
     assert "**What changed**" not in processed.review_body
     [entered] = reviews.entered
@@ -223,26 +203,13 @@ def test_change_summary_failure_publishes_the_review_without_the_text(
 def test_change_summary_cancellation_and_other_errors_still_end_the_attempt(
     error: Exception,
 ) -> None:
-    events: list[str] = []
-    reviews = FakePublishingRepository()
-    pipeline = ExecuteReviewRun(
-        FakeProcessor(),
-        FakeRepository(),
-        FakeModel([FINDING]),
-        StoreReviewOutput(
-            cast(Any, lambda: FakeUnitOfWork(reviews)),
-            FakeQueue(),
-            worker_id=WORKER_ID,
-            run_url=lambda _: None,
-        ),
-        reflection_pass=ReflectionPass(_Verifier(events)),
-        change_summary=_ChangeSummaryModel(events, error),
-    )
+    agent = _ChangeSummaryModel(error)
+    pipeline, reviews = _pipeline(agent)
 
     with pytest.raises(type(error)):
         asyncio.run(pipeline.execute(RUN_ID))
 
-    assert events == ["verifier", "change_summary"]
+    assert agent.verifier_prompts_before == [1]
     assert reviews.stored == []
 
 
@@ -258,10 +225,9 @@ def test_change_summary_cancellation_and_other_errors_still_end_the_attempt(
 def test_change_summary_is_not_called_without_a_verified_snapshot_review(
     processor: FakeProcessor | None, repository: FakeRepository | None
 ) -> None:
-    events: list[str] = []
-    agent = _ChangeSummaryModel(events, ChangeSummary(("Adds a lookup by id.",)))
+    agent = _ChangeSummaryModel(ChangeSummary(("Adds a lookup by id.",)))
 
-    reviews = _run(agent, events=events, findings=[], processor=processor, repository=repository)
+    reviews = _run(agent, findings=[], processor=processor, repository=repository)
 
     assert agent.requests == []
     [processed] = reviews.stored
@@ -271,34 +237,20 @@ def test_change_summary_is_not_called_without_a_verified_snapshot_review(
 
 
 @pytest.mark.parametrize(
-    ("processor", "verifier_fails", "error"),
+    ("processor", "verifier", "error"),
     [
-        (_NoTextProcessor(RunSkipped("no_changes")), False, RunSkipped),
-        (None, True, VerificationUnavailableError),
+        (_NoTextProcessor(RunSkipped("no_changes")), None, RunSkipped),
+        (None, _FailingVerifier(), VerificationUnavailableError),
     ],
     ids=["skipped", "verifier-failed"],
 )
 def test_change_summary_is_not_called_when_the_run_is_skipped_or_fails(
-    processor: FakeProcessor | None, verifier_fails: bool, error: type[Exception]
+    processor: FakeProcessor | None, verifier: _FailingVerifier | None, error: type[Exception]
 ) -> None:
-    events: list[str] = []
-    agent = _ChangeSummaryModel(events, ChangeSummary(("Adds a lookup by id.",)))
-    pipeline = ExecuteReviewRun(
-        processor or FakeProcessor(),
-        FakeRepository(),
-        FakeModel([FINDING]),
-        StoreReviewOutput(
-            cast(Any, lambda: FakeUnitOfWork(FakePublishingRepository())),
-            FakeQueue(),
-            worker_id=WORKER_ID,
-            run_url=lambda _: None,
-        ),
-        reflection_pass=ReflectionPass(_Verifier(events, fail=verifier_fails)),
-        change_summary=agent,
-    )
+    agent = _ChangeSummaryModel(ChangeSummary(("Adds a lookup by id.",)))
+    pipeline, _ = _pipeline(agent, processor=processor, verifier=verifier)
 
     with pytest.raises(error):
         asyncio.run(pipeline.execute(RUN_ID))
 
     assert agent.requests == []
-    assert "change_summary" not in events
