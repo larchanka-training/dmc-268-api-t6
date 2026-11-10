@@ -260,7 +260,8 @@ class GatewayChangeSummaryModel:
     Its own usage and ``llm.call`` rows, the strict ``ChangeSummaryOutput`` schema and the
     bounded repair. No policy snapshot or manifest goes to the gateway: the prompt is pinned
     in code, so ``llm.call`` records no prompt version instead of the review prompt's. The
-    input is fitted to ``CHANGE_SUMMARY_MAX_INPUT_TOKENS``, capped by the route's window.
+    input is fitted to ``CHANGE_SUMMARY_MAX_INPUT_TOKENS``, capped by the route's window. The
+    run's last call: it keeps the local completion of the attempt, as the verifier does.
     """
 
     def __init__(self, gateway: LlmGateway, run: RunCallContext) -> None:
@@ -283,6 +284,8 @@ class GatewayChangeSummaryModel:
                 ),
                 validate=validate_change_summary_answer,
                 bounded_repair=True,
+                # The run stores and hands over the review after this last call (PIPELINE §3).
+                reserved_seconds=VERIFIER_COMPLETION_RESERVE_S,
             ),
             replace(self._run, prompt_version_id=None),
         )
