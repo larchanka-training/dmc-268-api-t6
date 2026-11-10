@@ -570,7 +570,7 @@ def test_the_patch_is_read_as_bytes_so_every_line_ending_survives(tmp_path: Path
     assert case.diff == patch
 
 
-@pytest.mark.parametrize("version", ["v5", "v7"])
+@pytest.mark.parametrize("version", ["v5", "v7", "v8"])
 def test_eval_live_and_the_rag_arm_bind_the_same_prompt_pins(version: str) -> None:
     """One construction of the prompt bindings: a copy would let the arms drift apart."""
     system = (REPO_ROOT / "review" / "prompts" / f"review.system.{version}.md").read_bytes()

@@ -335,8 +335,9 @@ def _assert_selection_contract(text: str) -> None:
     # v3 by default: the default legacy arm refuses the snapshot-path v4/v5 (eval_live.py).
     assert (
         "      review_prompt:\n"
-        '        description: "Review prompt: v3, or v4, v5 or v7 (snapshot path: needs policy_arm '
-        'none, or valid or malicious with corpus rules; corpus rag needs v5 or v7)"\n'
+        '        description: "Review prompt: v3, or v4, v5, v7 or v8 (snapshot path: needs '
+        "policy_arm none, or valid or malicious with corpus rules; corpus rag needs v5, v7 or "
+        'v8)"\n'
         "        required: false\n"
         "        type: choice\n"
         "        options:\n"
@@ -344,6 +345,7 @@ def _assert_selection_contract(text: str) -> None:
         "          - v4\n"
         "          - v5\n"
         "          - v7\n"
+        "          - v8\n"
         "        default: v3\n"
     ) in text
     assert "      EVAL_CORPUS: ${{ inputs.corpus || 'main' }}\n" in text
@@ -446,6 +448,7 @@ def test_manual_workflow_security_and_selection_contract() -> None:
         ("          - v4\n", ""),
         ("          - v5\n", ""),
         ("          - v7\n", ""),
+        ("          - v8\n", ""),
         ("        default: v3\n", "        default: v4\n"),
         (
             "    type: choice\n        options:\n          - v3",
@@ -826,7 +829,7 @@ def _validate(
     return _run("Validate corpus", tmp_path, env)
 
 
-@pytest.mark.parametrize("prompt", ["v5", "v7"])
+@pytest.mark.parametrize("prompt", ["v5", "v7", "v8"])
 @pytest.mark.parametrize("arm", ["none", "graph"])
 def test_validate_runs_the_rag_profile_for_a_policy_none_rag_run(
     tmp_path: Path, arm: str, prompt: str
@@ -849,10 +852,10 @@ def test_validate_runs_the_rag_profile_for_a_policy_none_rag_run(
 @pytest.mark.parametrize(
     ("policy", "prompt", "arm", "message"),
     [
-        ("none", "v3", "none", "review_prompt v5 or v7"),
-        ("none", "v4", "graph", "review_prompt v5 or v7"),
+        ("none", "v3", "none", "review_prompt v5, v7 or v8"),
+        ("none", "v4", "graph", "review_prompt v5, v7 or v8"),
         # No v6 is packaged: its A/B drafts (#399) keep the number.
-        ("none", "v6", "graph", "review_prompt v5 or v7"),
+        ("none", "v6", "graph", "review_prompt v5, v7 or v8"),
         ("legacy", "v5", "none", "policy_arm none"),
         ("valid", "v5", "graph", "policy_arm none"),
         ("malicious", "v5", "none", "policy_arm none"),
@@ -876,7 +879,7 @@ def test_validate_refuses_a_missing_rag_arm_and_prompt(tmp_path: Path) -> None:
     assert "rag_arm none or graph" in unset_arm.stderr
     unset_prompt = _validate(tmp_path, "rag", "none", None, "none")
     assert unset_prompt.returncode == 1
-    assert "review_prompt v5 or v7" in unset_prompt.stderr
+    assert "review_prompt v5, v7 or v8" in unset_prompt.stderr
     assert not (tmp_path / "args").exists()
 
 

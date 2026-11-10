@@ -23,13 +23,13 @@ usage of every paid call. --responses-dir keeps arms and repeated runs apart.
 
 Every arm except ``legacy`` binds the version and SHA-256 of the --system prompt it sends,
 as production binds the pinned prompt row; a version with a pin must be the pinned file and
-must have a known answer schema. ``legacy`` refuses a snapshot-path prompt (v4, v5, v7), which
-is only reviewed with a policy snapshot. All three checks run before the first call.
+must have a known answer schema. ``legacy`` refuses a snapshot-path prompt (v4, v5, v7, v8),
+which is only reviewed with a policy snapshot. All three checks run before the first call.
 
 --rag-arm (#146) records the RAG A/B over a root of RAG cases (``class: rag``): ``none`` is arm
 A, ``graph`` arm B. Both run the production context build offline (``eval_rag_context``) and
 the review.system version of ``--system`` with policy arm ``none`` on the fast engine; it must
-be the pinned file of a version with a retrieved section (v5, v7). The manifest then also
+be the pinned file of a version with a retrieved section (v5, v7, v8). The manifest then also
 records, per case, the review call's latency and an evidence record of the prompt the gateway
 really sent (rebuilt from its context and checked byte for byte against the first request),
 and for the run the RAG arm, the digest of every ``index.json`` and the synthetic revision
