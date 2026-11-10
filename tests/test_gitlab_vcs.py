@@ -159,7 +159,6 @@ def test_canonical_identity_and_pinned_refs_fail_before_source_access(
         "wrong_base",
         "duplicate_path",
         "bad_flag",
-        "bad_patch",
         "bad_type",
         "too_many",
     ],
@@ -185,11 +184,6 @@ def test_saved_version_uncertainty_never_becomes_an_empty_complete_diff(fault: s
                     data["diffs"] = [router.files[0], router.files[0]]
                 elif fault == "bad_flag":
                     data["diffs"] = [{**router.files[0], "collapsed": "true"}, router.files[1]]
-                elif fault == "bad_patch":
-                    data["diffs"] = [
-                        {**router.files[0], "diff": "@@ -1,2 +1 @@\n-old\n+new"},
-                        router.files[1],
-                    ]
                 elif fault == "bad_type":
                     data["diffs"] = [{**router.files[0], "diff": 3}, router.files[1]]
                 else:
@@ -287,6 +281,30 @@ def test_newer_flags_are_real_omissions_without_invented_size_or_line_stats(
             0,
             0,
         )
+        assert value.changed_files == ()
+
+    asyncio.run(scenario())
+
+
+def test_an_unreadable_patch_leaves_the_file_list_incomplete_instead_of_failing() -> None:
+    # GitLab's line counts come from the hunks, so an unreadable patch leaves them unknown:
+    # the file is left out and the list is incomplete (CVS §2.3), not a failed diff fetch.
+    async def scenario() -> None:
+        router = Router()
+        router.files = [
+            {**router.files[0], "diff": "@@ -1,2 +1,2 @@\n-old\n+new\n"},
+            router.files[1],
+        ]
+        async with GitLabRunHttp(
+            credentials=Credentials(),
+            origin_policy=POLICY,
+            transport=httpx.MockTransport(router.response),
+        ) as http:
+            value = await FetchVcsReviewInput(
+                HttpGitLabVcsProvider(http=http), checkpoint=checkpoint
+            ).execute(INPUT.locator, INPUT.head_sha, INPUT.base_sha)
+        assert [item.filename for item in value.files] == ["asset.dat"]
+        assert value.pull_request.meta.files_changed == 2
         assert value.changed_files == ()
 
     asyncio.run(scenario())
