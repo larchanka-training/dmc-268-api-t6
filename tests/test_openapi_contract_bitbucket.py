@@ -176,6 +176,7 @@ def test_bitbucket_error_contract_accepts_safe_application_and_request_validatio
 _BITBUCKET_WORKSPACE = UUID(int=333)
 
 
+# Zod 4 validates these response IDs as version-4 UUIDs.
 _BITBUCKET_INSTALLATION = UUID("00000000-0000-4000-8000-00000000014e")
 
 
@@ -354,15 +355,29 @@ def test_bitbucket_connection_page_contract_declares_cursor_query() -> None:
     assert cursor["schema"] == {"type": "string", "minLength": 1, "maxLength": 1024}
 
 
-def test_bitbucket_connection_page_contract_declares_cursor_error_responses() -> None:
+@pytest.mark.parametrize(
+    ("status", "reference"),
+    [
+        ("400", "BadRequest"),
+        ("409", "BitbucketConflict"),
+        ("422", "BitbucketValidationFailed"),
+    ],
+)
+def test_bitbucket_connection_page_contract_declares_cursor_error_responses(
+    status: str, reference: str
+) -> None:
     operation = _spec()["paths"][_BITBUCKET_CONNECTIONS]["get"]
-    assert {"400", "409", "422"} <= operation["responses"].keys()
+    assert operation["responses"][status] == {"$ref": f"#/components/responses/{reference}"}
 
 
 def test_bitbucket_connection_cursor_runtime_schema_matches_checked_contract() -> None:
     runtime = app.openapi()["paths"][_BITBUCKET_CONNECTIONS]["get"]
     cursor = next(parameter for parameter in runtime["parameters"] if parameter["name"] == "cursor")
-    checked = _spec()["paths"][_BITBUCKET_CONNECTIONS]["get"]["parameters"][0]
+    checked = next(
+        parameter
+        for parameter in _spec()["paths"][_BITBUCKET_CONNECTIONS]["get"]["parameters"]
+        if parameter["name"] == "cursor"
+    )
     assert (cursor["in"], cursor["required"]) == (checked["in"], checked["required"])
     assert checked["schema"] in cursor["schema"]["anyOf"]
 
