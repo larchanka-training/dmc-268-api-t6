@@ -1,11 +1,11 @@
 """The report of #146 quotes the gate script's numbers, not retyped ones.
 
 ``docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md`` is the report and
-``test-prs-dataset/rag/reports/gate.json`` the stdout of ``eval_rag_gate.py`` over the six
+``test-prs-dataset/rag/reports/146-v5/gate.json`` the stdout of ``eval_rag_gate.py`` over the six
 committed captures and the committed hallucination oracle
-(``oracle/hallucination.json``). Each number is compared with the cell of its table row and
-column, so a value moved to another row, column or arm fails. Recomputing the gate takes six
-replays (minutes) and stays with CI's capture replay.
+(``reports/146-v5/oracle/hallucination.json``). Each number is compared with the cell of its
+table row and column, so a value moved to another row, column or arm fails. Recomputing the gate
+takes six replays (minutes) and stays with CI's capture replay.
 """
 
 from __future__ import annotations
@@ -22,11 +22,13 @@ from review.scripts.eval_provenance import digest_files
 from review.scripts.validate_findings import validate_review_output_v2
 
 ROOT = Path(__file__).resolve().parents[1]
-GATE = ROOT / "test-prs-dataset" / "rag" / "reports" / "gate.json"
+ARCHIVE = ROOT / "test-prs-dataset" / "rag" / "reports" / "146-v5"  # the frozen #146 record
+GATE = ARCHIVE / "gate.json"
 REPORT = ROOT / "docs" / "test-plan" / "RAG_V1_CONTRIBUTION_REPORT.md"
-CAPTURES = ROOT / "test-prs-dataset" / "rag" / "responses"
-PROMPTS = ROOT / "test-prs-dataset" / "rag" / "oracle" / "context"
-ORACLE = ROOT / "test-prs-dataset" / "rag" / "oracle" / "hallucination.json"
+CAPTURES = ARCHIVE / "responses"
+PROMPTS = ARCHIVE / "oracle" / "context"
+PROMPT_LINK_DIR = "../../test-prs-dataset/rag/reports/146-v5/oracle/context"
+ORACLE = ARCHIVE / "oracle" / "hallucination.json"
 RUN_IDS = {  # test-prs-dataset/rag/README.md "Captures"
     "A-run1": "41720614606",
     "A-run2": "41724358586",
@@ -312,5 +314,5 @@ def test_the_report_lists_each_reviewed_finding_once_with_its_title_and_prompt()
         assert anchor == f"`{finding['path']}:{finding['line']}`", (run_id, key)
         assert title == finding["title"].replace("|", "\\|"), (run_id, key)
         assert (hallucination == "д") == ((run_id, case_id, int(index)) in confirmed), (run_id, key)
-        assert link == f"[{file_name}](../../test-prs-dataset/rag/oracle/context/{file_name})"
+        assert link == f"[{file_name}]({PROMPT_LINK_DIR}/{file_name})"
         assert (PROMPTS / file_name).is_file(), (run_id, key)

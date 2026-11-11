@@ -69,7 +69,7 @@ All content is synthetic, authored for api#146; no third-party code. Each `case.
 
 ## Captures
 
-`responses/` holds the six recorded `eval-live` runs of the gate (`corpus=rag`, `policy_arm=none`, `review_prompt=v5`, `export_raw_responses=true`, model `mistral-small-4`, all `baseline_publishable`): the raw first answers of the 24 cases plus the `manifest.json` that `eval_replay.py` reads, copied unchanged from the `eval-live-raw-rag-…` artifacts.
+`reports/146-v5/` is the frozen record of the accepted #146 eval (prompt v5): `responses/` holds the six recorded `eval-live` runs of the gate (`corpus=rag`, `policy_arm=none`, `review_prompt=v5`, `export_raw_responses=true`, model `mistral-small-4`, all `baseline_publishable`): the raw first answers of the 24 cases plus the `manifest.json` that `eval_replay.py` reads, copied unchanged from the `eval-live-raw-rag-…` artifacts. It is never edited; a new recording goes to the live `responses/` next to it and is compared against this one.
 
 | Directory | Arm (`rag_arm`) | Run id |
 | --- | --- | --- |
@@ -77,13 +77,13 @@ All content is synthetic, authored for api#146; no third-party code. Each `case.
 | `B-run1`, `B-run2`, `B-run3` | B, reverse-edge blocks (`graph`) | 41720730389, 41724449009, 41725470313 |
 
 ```sh
-for d in test-prs-dataset/rag/responses/*/; do
+for d in test-prs-dataset/rag/reports/146-v5/responses/*/; do
   uv run python review/scripts/eval_replay.py --root test-prs-dataset/rag --responses-dir "$d"
 done
 ```
 
-The recorded result and the computed gate verdict are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md); `reports/gate.json` is the gate script's output it quotes.
+The recorded result and the computed gate verdict are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md); `reports/146-v5/gate.json` is the gate script's output it quotes.
 
-`oracle/hallucination.json` is the hallucination oracle the gate takes with `--oracle`: the 34 of 76 findings of the valid answers the tech lead confirmed in the second pass over all 76 findings on 2026-11-08 (part 1 partly pre-labelled by an LLM, every mark checked by hand); the decisions are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md#оракул-галлюцинаций).
+`reports/146-v5/oracle/hallucination.json` is the hallucination oracle the gate takes with `--oracle`: the 34 of 76 findings of the valid answers the tech lead confirmed in the second pass over all 76 findings on 2026-11-08 (part 1 partly pre-labelled by an LLM, every mark checked by hand); the decisions are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md#оракул-галлюцинаций).
 
 A replay needs no network and no key; it rebuilds every case from its frozen `index.json` and takes about 40 seconds. The CI step "RAG sub-corpus" runs it for all six and fails on a non-zero exit; `tests/test_rag_captures.py` fails when a capture is missing, mislabelled or from a different model, prompt or corpus.
