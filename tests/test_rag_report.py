@@ -11,7 +11,6 @@ takes six replays (minutes) and stays with CI's capture replay.
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -20,7 +19,7 @@ import pytest
 
 from review.scripts.eval_live import _prompt_digest
 from review.scripts.eval_provenance import digest_files
-from review.scripts.validate_findings import validate_review_output_v2
+from tests.rag_report_support import carries, cells, table, valid_answers
 
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "test-prs-dataset" / "rag" / "reports" / "146-v5"  # the frozen #146 record
@@ -82,26 +81,8 @@ def _assert_row(prefix: str, cells: list[str]) -> None:
     assert any(all(cell in row for cell in cells) for row in rows), (prefix, cells, rows)
 
 
-def _cells(row: str) -> list[str]:
-    """The cells of a Markdown table row, split on the ``|`` that is not escaped."""
-    return [cell.strip() for cell in re.split(r"(?<!\\)\|", row)[1:-1]]
-
-
 def _table(header: str) -> list[list[str]]:
-    """The body rows (as cells) of the report table whose header row starts with ``header``."""
-    lines = REPORT.read_text(encoding="utf-8").splitlines()
-    start = next(index for index, line in enumerate(lines) if line.startswith(header))
-    body = []
-    for line in lines[start + 2 :]:
-        if not line.startswith("|"):
-            break
-        body.append(_cells(line))
-    return body
-
-
-def _carries(cell: str, value: str) -> bool:
-    """The cell is the value, or the value followed by a parenthesised remark."""
-    return cell == value or cell.startswith(value + " (")
+    return table(REPORT, header)
 
 
 def _gated_runs() -> list[dict[str, Any]]:
@@ -128,7 +109,7 @@ def test_each_run_row_carries_its_own_ratios_and_digest(arm_name: str) -> None:
 
         assert len(cells) == len(RUN_METRICS), (run["run_id"], cells)
         for cell, name in zip(cells, RUN_METRICS, strict=True):
-            assert _carries(cell, _ratio(run[name])), (run["run_id"], name, cell)
+            assert carries(cell, _ratio(run[name])), (run["run_id"], name, cell)
         assert digests[run["run_id"]] == f"`{run['responses_digest']}`", run["run_id"]
 
 
@@ -138,10 +119,10 @@ def test_each_arm_row_carries_the_arm_values_in_arm_order() -> None:
     for prefix, value in ARM_ROWS.items():
         rows = _rows(prefix)
         assert len(rows) == 1, (prefix, rows)
-        _, arm_a, arm_b = _cells(rows[0])
+        _, arm_a, arm_b = cells(rows[0])
 
-        assert _carries(arm_a, value(arms["rag_off"])), (prefix, arm_a)
-        assert _carries(arm_b, value(arms["rag_on"])), (prefix, arm_b)
+        assert carries(arm_a, value(arms["rag_off"])), (prefix, arm_a)
+        assert carries(arm_b, value(arms["rag_on"])), (prefix, arm_b)
 
 
 def test_each_condition_row_carries_its_value_arms_and_status() -> None:
@@ -149,12 +130,12 @@ def test_each_condition_row_carries_its_value_arms_and_status() -> None:
         condition = _gate()["conditions"][key]
         rows = _rows(prefix)
         assert len(rows) == 1, (prefix, rows)
-        _, _, value, arm_a, arm_b, status = _cells(rows[0])
+        _, _, value, arm_a, arm_b, status = cells(rows[0])
 
         if condition["exact"] is None:
             assert "n/a" in value, (key, value)
         else:
-            assert _carries(value, condition["exact"]), (key, value)
+            assert carries(value, condition["exact"]), (key, value)
         assert (arm_a, arm_b) == (condition.get("a", "-"), condition.get("b", "-")), (key, rows[0])
         assert status == condition["status"], (key, status)
 
@@ -212,22 +193,10 @@ def test_the_committed_gate_output_holds_the_recorded_result(
     assert value == expected
 
 
-def _valid_answers(directory: Path) -> list[str]:
-    """The ``<case>.json`` names the gate scores: answers the v2 validator accepts."""
-    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
-    return sorted(
-        f"{case_id}.json"
-        for case_id in manifest["responses"]
-        if not validate_review_output_v2(
-            json.loads((directory / f"{case_id}.json").read_text(encoding="utf-8"))
-        )
-    )
-
-
 def test_each_gate_digest_is_the_digest_of_the_valid_answers_of_its_capture() -> None:
     for arm in _gate()["arms"].values():
         for run in arm["runs"]:
-            names = _valid_answers(CAPTURES / run["run_id"])
+            names = valid_answers(CAPTURES / run["run_id"])
 
             assert len(names) == run["validity"]["numerator"]
             assert digest_files(CAPTURES / run["run_id"], names) == run["responses_digest"]
@@ -261,7 +230,7 @@ def test_each_oracle_entry_is_a_finding_of_a_valid_answer() -> None:
     oracle = json.loads(ORACLE.read_text(encoding="utf-8"))
 
     for run_id, entry in oracle["runs"].items():
-        valid = _valid_answers(CAPTURES / run_id)
+        valid = valid_answers(CAPTURES / run_id)
         confirmed = [(item["case_id"], item["finding_index"]) for item in entry["hallucinations"]]
         assert len(set(confirmed)) == len(confirmed), (run_id, confirmed)
         for item in entry["hallucinations"]:
@@ -285,7 +254,7 @@ def _reviewed_findings() -> set[tuple[str, str, int]]:
     return {
         (run["run_id"], name.removesuffix(".json"), index)
         for run in _gated_runs()
-        for name in _valid_answers(CAPTURES / run["run_id"])
+        for name in valid_answers(CAPTURES / run["run_id"])
         for index in range(
             len(
                 json.loads((CAPTURES / run["run_id"] / name).read_text(encoding="utf-8"))[
@@ -329,7 +298,7 @@ def _prompt_files() -> dict[str, str]:
     wanted: dict[str, str] = {}
     for run_id in sorted(RUN_IDS):
         manifest = json.loads((CAPTURES / run_id / "manifest.json").read_text(encoding="utf-8"))
-        for case_id in sorted(_valid_answers(CAPTURES / run_id)):
+        for case_id in sorted(valid_answers(CAPTURES / run_id)):
             name = case_id.removesuffix(".json")
             answer = json.loads((CAPTURES / run_id / case_id).read_text(encoding="utf-8"))
             if answer["findings"]:
