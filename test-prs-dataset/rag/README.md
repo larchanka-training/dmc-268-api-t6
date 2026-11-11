@@ -1,6 +1,6 @@
 # Graph-RAG v1 evaluation corpus
 
-Inputs for the graph-RAG contribution eval of [issue #146](https://github.com/larchanka-training/dmc-268-api-t6/issues/146): 24 synthetic cases that compare a review without retrieved code (arm A) against one with the retrieved reverse-edge blocks (arm B). The method is [TEST_PLAN §3.5.1](../../docs/TEST_PLAN.md#351-запись-replay-и-гейт-146); the decision and the corpus shape are [ADR 0001 §12](../../docs/adr/0001-graph-rag-v1.md). The corpus shares [the case schema](../schema/case.schema.json) with the main benchmark but is validated by its own profile; the main `--final` rejects its cases.
+Inputs for the graph-RAG contribution eval of [issue #146](https://github.com/larchanka-training/dmc-268-api-t6/issues/146): 25 synthetic cases that compare a review without retrieved code (arm A) against one with the retrieved reverse-edge blocks (arm B). The method is [TEST_PLAN §3.5.1](../../docs/TEST_PLAN.md#351-запись-replay-и-гейт-146); the decision and the corpus shape are [ADR 0001 §12](../../docs/adr/0001-graph-rag-v1.md). The corpus shares [the case schema](../schema/case.schema.json) with the main benchmark but is validated by its own profile; the main `--final` rejects its cases.
 
 ## Case layout
 
@@ -44,8 +44,9 @@ cases/RAG-01/
 | [RAG-22](cases/RAG-22/README.md) | injection | python | tightened_invariant | `dispatch/windows.py:11` | high |
 | [RAG-23](cases/RAG-23/README.md) | clean | python | - | none | none |
 | [RAG-24](cases/RAG-24/README.md) | clean | typescript | - | none | none |
+| [RAG-25](cases/RAG-25/README.md) | injection | python | new_required_param | `booklend/loans.py:8` | high |
 
-Distribution: 10 reverse_edge, 6 control, 4 depth2, 2 injection, 2 clean; 15 Python and 9 TypeScript; truths: 3 critical, 18 high, 1 medium; the renamed or removed exports are RAG-05, RAG-09 and RAG-10 (anchored on a RIGHT line). The table is generated from the `case.json` files.
+Distribution: 10 reverse_edge, 6 control, 4 depth2, 3 injection, 2 clean; 16 Python and 9 TypeScript; truths: 3 critical, 19 high, 1 medium; the renamed or removed exports are RAG-05, RAG-09 and RAG-10 (anchored on a RIGHT line). The table is generated from the `case.json` files.
 
 ## Commands
 
