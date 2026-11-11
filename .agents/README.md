@@ -65,7 +65,8 @@ These files are byte-identical between the two repos, marked with a
   `skills/create-issue/**`, `skills/implement-issue/**`, `skills/issue-graph/**`, `skills/pull-request/**`,
   `skills/planning-and-task-breakdown/**`, `skills/pr-review/**`, `skills/qa/**`
 - `agents/*.md`
-- outside `.agents/`: `.github/pull_request_template.md` (SYNC marker on its first line)
+- outside `.agents/`: `.github/pull_request_template.md` (SYNC marker on its first line),
+  `.github/scripts/check_md_links.py`
 
 The marker takes the form the file type allows: `.md` — the `<!-- SYNC: … -->` line
 (after the H1 in a skill file); `.py` / `.sh` — a `# SYNC: …` comment after the shebang or
@@ -93,6 +94,16 @@ above, does not count) and the JSON paths from the "JSON files under … carry n
 above, so keep that sentence's form: without it the check fails. It lists every file that differs
 or exists on one side only. Between the merge of a ui change and its api copy the check is red on
 purpose, the signal to finish the copy; it is not a required check, so it blocks no pull request.
+
+## Link check
+
+The `Markdown links` check (`.github/workflows/md-links.yml`, `.github/scripts/check_md_links.py`)
+reads the tracked `*.md` files under `docs/` and `.agents/`, `AGENTS.md` and
+`test-prs-dataset/README.md`. Each relative link outside code must name a tracked file or
+directory, and its `#anchor` on a `.md` file must be a heading id as GitHub renders it, or an
+`<a id>`; otherwise the check fails with `path:line: target: reason`. External URLs are not
+checked. It runs on every pull request, with no paths filter (moving or deleting any file can
+break a link to it), and on every push to `main`; it is not a required check.
 
 ## How to add a skill
 
