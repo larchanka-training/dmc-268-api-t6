@@ -1,0 +1,1293 @@
+{
+  "corpus_digest": "sha256-v1:167fce233b630a026927a02addeb5dac31df2edfc2d56ee9e74903796dfe73cb",
+  "model_id": "mistral-small-4",
+  "prompt_path": "review/prompts/review.system.v7.md",
+  "prompt_sha": "b5cdaac4f6185a3986942755f18f2543e5be3b41452ca2a8e4ffc8c6d0a49af9",
+  "prompt_version": "v7",
+  "responses": {
+    "RAG-01": "responses/RAG-01.json",
+    "RAG-02": "responses/RAG-02.json",
+    "RAG-03": "responses/RAG-03.json",
+    "RAG-04": "responses/RAG-04.json",
+    "RAG-05": "responses/RAG-05.json",
+    "RAG-06": "responses/RAG-06.json",
+    "RAG-07": "responses/RAG-07.json",
+    "RAG-08": "responses/RAG-08.json",
+    "RAG-09": "responses/RAG-09.json",
+    "RAG-10": "responses/RAG-10.json",
+    "RAG-11": "responses/RAG-11.json",
+    "RAG-12": "responses/RAG-12.json",
+    "RAG-13": "responses/RAG-13.json",
+    "RAG-14": "responses/RAG-14.json",
+    "RAG-15": "responses/RAG-15.json",
+    "RAG-16": "responses/RAG-16.json",
+    "RAG-17": "responses/RAG-17.json",
+    "RAG-18": "responses/RAG-18.json",
+    "RAG-19": "responses/RAG-19.json",
+    "RAG-20": "responses/RAG-20.json",
+    "RAG-21": "responses/RAG-21.json",
+    "RAG-22": "responses/RAG-22.json",
+    "RAG-23": "responses/RAG-23.json",
+    "RAG-24": "responses/RAG-24.json",
+    "RAG-25": "responses/RAG-25.json"
+  },
+  "run_metadata": {
+    "baseline_publishable": true,
+    "cases": {
+      "RAG-01": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-02": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-03": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-04": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-05": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-06": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-07": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-08": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-09": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-10": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-11": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-12": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-13": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-14": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-15": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-16": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-17": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-18": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-19": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-20": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-21": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-22": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-23": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-24": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      },
+      "RAG-25": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
+      }
+    },
+    "effective_settings": {
+      "fallback": {
+        "chars_per_token": 3.0,
+        "context_window": 128000,
+        "endpoint_digest": "sha256-v1:1053ad09eead43eb387e03ea028d936e0d3bef8220ee790071f2cec0c4c413ed",
+        "extra_body_digest": "sha256-v1:d751c4e009ff68eaf68d721b6caf8ab262b35962f15e93840b0cc5e8933856e8",
+        "input_budget_tokens": 52000,
+        "max_output_tokens": 8000,
+        "model_id": "mistral-small-3.2-24b",
+        "price_usd_per_mtok": {
+          "cache_read": "0.2245",
+          "input": "0.2245",
+          "output": "0.449"
+        },
+        "provider_digest": "sha256-v1:a92cffa1313ab59ebb202f02f13329065aec9f6b261d50e32107e183d0e5c0bc",
+        "provider_label": "eurouter",
+        "structured_output": "json_schema"
+      },
+      "policy": {
+        "call_timeout_s": 90.0,
+        "input_token_limit": 60000,
+        "max_calls_per_attempt": 4,
+        "max_jitter_s": 1.0,
+        "max_retry_after_s": 30.0,
+        "rate_limit_default_delay_s": 2.0,
+        "run_cost_limit_usd": "0.5",
+        "timeout_retry_delays_s": [
+          2.0
+        ],
+        "unavailable_retry_delays_s": [
+          2.0,
+          8.0
+        ]
+      },
+      "primary": {
+        "chars_per_token": 3.0,
+        "context_window": 262144,
+        "endpoint_digest": "sha256-v1:1053ad09eead43eb387e03ea028d936e0d3bef8220ee790071f2cec0c4c413ed",
+        "extra_body_digest": "sha256-v1:d751c4e009ff68eaf68d721b6caf8ab262b35962f15e93840b0cc5e8933856e8",
+        "input_budget_tokens": 52000,
+        "max_output_tokens": 8000,
+        "model_id": "mistral-small-4",
+        "price_usd_per_mtok": {
+          "cache_read": "0.56125",
+          "input": "0.56125",
+          "output": "2.35725"
+        },
+        "provider_digest": "sha256-v1:a92cffa1313ab59ebb202f02f13329065aec9f6b261d50e32107e183d0e5c0bc",
+        "provider_label": "eurouter",
+        "structured_output": "json_schema"
+      }
+    },
+    "engine": "fast",
+    "fallback_model_id": "mistral-small-3.2-24b",
+    "latency_ms": {
+      "RAG-01": 4860,
+      "RAG-02": 4487,
+      "RAG-03": 4854,
+      "RAG-04": 5583,
+      "RAG-05": 3501,
+      "RAG-06": 2149,
+      "RAG-07": 1613,
+      "RAG-08": 1719,
+      "RAG-09": 1841,
+      "RAG-10": 4903,
+      "RAG-11": 2258,
+      "RAG-12": 3365,
+      "RAG-13": 3801,
+      "RAG-14": 4362,
+      "RAG-15": 3115,
+      "RAG-16": 4238,
+      "RAG-17": 3541,
+      "RAG-18": 3451,
+      "RAG-19": 3881,
+      "RAG-20": 3926,
+      "RAG-21": 1638,
+      "RAG-22": 1604,
+      "RAG-23": 1806,
+      "RAG-24": 1712,
+      "RAG-25": 4820
+    },
+    "nonpublishable_case_ids": [],
+    "policy_arm": "none",
+    "policy_arm_digest": null,
+    "rag_arm": "graph",
+    "rag_evidence": {
+      "RAG-01": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:dccc66b119aa239927f16578ae383117d889e00265cd5ddda4b0c64dd2ce4d93",
+        "offline_retrieved_ids": [
+          "RAG:133714ccf4f8:9c7567d720c96d05"
+        ],
+        "prompt_digest": "sha256-v1:a1543e6fc3424e94fac58c022ba0613abd151dc5aa37472b33d323a4cff2b5c7",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:133714ccf4f8:9c7567d720c96d05",
+            "edge_kind": "uses_imported",
+            "end_line": 23,
+            "index_commit_sha": "d22f4893f05393ca688aebba25d6cfeeb96eb54e",
+            "path": "ledger/webhooks.py",
+            "side": "RIGHT",
+            "start_line": 7,
+            "tokens": 329
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-02": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:2d7f08f398068fb21357d3129642b450a1705da369b8fbebfb2367d0e58d2720",
+        "offline_retrieved_ids": [
+          "RAG:0e01321f5c1a:a05052493f8748c8"
+        ],
+        "prompt_digest": "sha256-v1:30b540372ab29dcf407e6cb75a074a640c0cfc880503a9e744337cb95a2df2b6",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:0e01321f5c1a:a05052493f8748c8",
+            "edge_kind": "uses_imported",
+            "end_line": 14,
+            "index_commit_sha": "33d478988633f6066c7fe572e1325146766b6b29",
+            "path": "stockroom/receiving.py",
+            "side": "RIGHT",
+            "start_line": 5,
+            "tokens": 225
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-03": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:0cdbbc6c01637abe1b4559ffc227a8f7ae714c2eff71e995d978bbc52506b723",
+        "offline_retrieved_ids": [
+          "RAG:8604a125a464:035b341bf979475d"
+        ],
+        "prompt_digest": "sha256-v1:f0e7c11ae18e8fa91bba6b14907c1ce2d8d501ac4cee775fd166458644bb6f22",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:8604a125a464:035b341bf979475d",
+            "edge_kind": "uses_imported",
+            "end_line": 15,
+            "index_commit_sha": "48b01c5eae82b5604f635216f0e4e7d638e6485c",
+            "path": "clinic/booking.py",
+            "side": "RIGHT",
+            "start_line": 5,
+            "tokens": 219
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-04": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:50fec77a17f06b1189211d6f04029f803074eeee1d9d9bbd9dbc8399b24f27bb",
+        "offline_retrieved_ids": [
+          "RAG:0d206fd8c649:70fd05457a156a7a"
+        ],
+        "prompt_digest": "sha256-v1:4aa2083ce0651771cf08434493aa014bc6f2e953f37e823f13ddb758b3f6691c",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:0d206fd8c649:70fd05457a156a7a",
+            "edge_kind": "uses_imported",
+            "end_line": 9,
+            "index_commit_sha": "1ce4e802cd8e511f3b6f0e1ffe1b9afb597d3922",
+            "path": "uploads/jobs.py",
+            "side": "RIGHT",
+            "start_line": 3,
+            "tokens": 153
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-05": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:de10df8fa041c5c3a9b0e7645829cdd55e3dcf04eb948e0e4db964af84524a5b",
+        "offline_retrieved_ids": [
+          "RAG:e35a6b92a654:409728e62e249141",
+          "RAG:84331145eacb:9d943ce9706080d3"
+        ],
+        "prompt_digest": "sha256-v1:3169d72eb9d68e4cb3fccef7ed1d46ddc7b4a2b0470e476751a6feaaa971c944",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:e35a6b92a654:409728e62e249141",
+            "edge_kind": "uses_imported",
+            "end_line": 13,
+            "index_commit_sha": "84331145eacb33c5f232bd252c77d3175d28acda",
+            "path": "weather/alerts.py",
+            "side": "RIGHT",
+            "start_line": 3,
+            "tokens": 173
+          },
+          {
+            "block_id": "RAG:84331145eacb:9d943ce9706080d3",
+            "edge_kind": "uses_imported",
+            "end_line": 7,
+            "index_commit_sha": "84331145eacb33c5f232bd252c77d3175d28acda",
+            "path": "weather/forecast.py",
+            "side": "LEFT",
+            "start_line": 7,
+            "tokens": 86
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-06": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:b618510eb9c6ea1db570f065e058d6edd40f6d06c74fd8b6fd0b3e2469b39a3f",
+        "offline_retrieved_ids": [
+          "RAG:ddcc8971c121:0aaa1a0bce4256ae"
+        ],
+        "prompt_digest": "sha256-v1:899f39cba6ff022d07e1222a6693fae8c3df248cd70c74d1dc17e2a2f5f27496",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:ddcc8971c121:0aaa1a0bce4256ae",
+            "edge_kind": "uses_imported",
+            "end_line": 23,
+            "index_commit_sha": "22f3caa6ff077a90efbe96ec5d2bf30e8483f5ca",
+            "path": "src/checkout.ts",
+            "side": "RIGHT",
+            "start_line": 3,
+            "tokens": 276
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-07": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:e3c98d6220590a2e88b1783b7e19c4fbe3d81e5ed25d4f0c81016b1497bdc4be",
+        "offline_retrieved_ids": [
+          "RAG:bef885085666:df36f17414df12d0"
+        ],
+        "prompt_digest": "sha256-v1:35b8b9498fd86217a8844d3a3a6d051e1a88ecf6afce0644481ce625a7162a53",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:bef885085666:df36f17414df12d0",
+            "edge_kind": "uses_imported",
+            "end_line": 8,
+            "index_commit_sha": "1bee9c4061d73a4e17e5477302b69c68733182b1",
+            "path": "src/pump.ts",
+            "side": "RIGHT",
+            "start_line": 1,
+            "tokens": 177
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-08": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:612addc2797fea33c7de5932845ac2e105ee45bf9a28c7d91c26f6d83268f27f",
+        "offline_retrieved_ids": [
+          "RAG:53d7a8c44dbd:1e6a3c2500e320ae"
+        ],
+        "prompt_digest": "sha256-v1:aa58d7f3d6c1f4364a6693bd00b206dd24455c9d1d2ff36dc79c994632ecdbf0",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:53d7a8c44dbd:1e6a3c2500e320ae",
+            "edge_kind": "uses_imported",
+            "end_line": 7,
+            "index_commit_sha": "794ddf7225c8e4a8f3cd9084ae90160fd6a9841d",
+            "path": "src/turnover.ts",
+            "side": "RIGHT",
+            "start_line": 1,
+            "tokens": 158
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-09": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:0b071463def99c7b893998480d80c87bbe3c59498322352a7506bdc8b7e8abe6",
+        "offline_retrieved_ids": [
+          "RAG:e4a7e73ef6ca:eab40c1401c6b290",
+          "RAG:aa07876ee69e:ff6895bf0adb0668"
+        ],
+        "prompt_digest": "sha256-v1:19adb17750bd2b86ff60d812a699c58c988a4f7222bb48f2dc76835c2edbdb95",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:e4a7e73ef6ca:eab40c1401c6b290",
+            "edge_kind": "uses_imported",
+            "end_line": 6,
+            "index_commit_sha": "aa07876ee69e0f1e6336995efbc7380e6aa0453b",
+            "path": "src/feed.ts",
+            "side": "RIGHT",
+            "start_line": 1,
+            "tokens": 136
+          },
+          {
+            "block_id": "RAG:aa07876ee69e:ff6895bf0adb0668",
+            "edge_kind": "uses_imported",
+            "end_line": 4,
+            "index_commit_sha": "aa07876ee69e0f1e6336995efbc7380e6aa0453b",
+            "path": "src/slug.ts",
+            "side": "LEFT",
+            "start_line": 4,
+            "tokens": 85
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-10": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:f830bb7ff464d70b66d5d86768ef6b95202b8b83fb813d1db02ac48dfb50d843",
+        "offline_retrieved_ids": [
+          "RAG:6ae7e821f0e6:3aff2c4bc1044be0",
+          "RAG:cbe3da3914ff:2493a70ab23e303a"
+        ],
+        "prompt_digest": "sha256-v1:4a3d9bb7523df9e65cb51cbac45c637383722ea6f21caf82a36b7be8f2428d28",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:6ae7e821f0e6:3aff2c4bc1044be0",
+            "edge_kind": "uses_imported",
+            "end_line": 7,
+            "index_commit_sha": "cbe3da3914ffef9cd60f185eb13468f6948dbb4b",
+            "path": "src/alerts.ts",
+            "side": "RIGHT",
+            "start_line": 2,
+            "tokens": 153
+          },
+          {
+            "block_id": "RAG:cbe3da3914ff:2493a70ab23e303a",
+            "edge_kind": "uses_imported",
+            "end_line": 4,
+            "index_commit_sha": "cbe3da3914ffef9cd60f185eb13468f6948dbb4b",
+            "path": "src/sensors.ts",
+            "side": "LEFT",
+            "start_line": 4,
+            "tokens": 87
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-11": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:2196fb9ac164ea305c907dd59df04928aa032ac376d6e643ea8020f9445dc64b",
+        "offline_retrieved_ids": [
+          "RAG:5f2c59524043:8f7733e0bfbe6b94"
+        ],
+        "prompt_digest": "sha256-v1:4dcba750dc05111500dac66c723ec99b0d44aa019603a60dcca5c570c6ae100b",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:5f2c59524043:8f7733e0bfbe6b94",
+            "edge_kind": "uses_imported",
+            "end_line": 8,
+            "index_commit_sha": "4d3d0701c1515b4886d80f0fc1dce441675bcfd4",
+            "path": "erasure/intake.py",
+            "side": "RIGHT",
+            "start_line": 3,
+            "tokens": 131
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-12": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:ffdeaad6104f11e487b6224e1fa7447fe8897da3293e1418c406b905cc8ed0bd",
+        "offline_retrieved_ids": [],
+        "prompt_digest": "sha256-v1:ffdeaad6104f11e487b6224e1fa7447fe8897da3293e1418c406b905cc8ed0bd",
+        "repair_called": false,
+        "retrieved": [],
+        "trimmed": false
+      },
+      "RAG-13": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:908140e9b0d54bfdb888fd0337984df1813b8287c8f7ca18bf032d2cd69f3577",
+        "offline_retrieved_ids": [
+          "RAG:606e8c8d5ae9:9b0f392b5c8a75f6"
+        ],
+        "prompt_digest": "sha256-v1:4daef465243ffe3e5f22203885c2fb20c11e3a427d64fcbb40f4c91686651ef3",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:606e8c8d5ae9:9b0f392b5c8a75f6",
+            "edge_kind": "uses_imported",
+            "end_line": 10,
+            "index_commit_sha": "3ffb7faffd6ac0670b85532d1d326f891e6eb412",
+            "path": "pulse/digest.py",
+            "side": "RIGHT",
+            "start_line": 4,
+            "tokens": 162
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-14": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:8098ddb270ffde132b2771146d80d12c1bcf116e27e9815a21190cdbef45454c",
+        "offline_retrieved_ids": [],
+        "prompt_digest": "sha256-v1:8098ddb270ffde132b2771146d80d12c1bcf116e27e9815a21190cdbef45454c",
+        "repair_called": false,
+        "retrieved": [],
+        "trimmed": false
+      },
+      "RAG-15": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:6de64ce1a62f38263fea1da59b55f20772ddf662e8b18e33930c3e7377b42531",
+        "offline_retrieved_ids": [],
+        "prompt_digest": "sha256-v1:6de64ce1a62f38263fea1da59b55f20772ddf662e8b18e33930c3e7377b42531",
+        "repair_called": false,
+        "retrieved": [],
+        "trimmed": false
+      },
+      "RAG-16": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:c9fcf9726ce84f0833cda6f05138236cc7b9d03dcab554cde9c94e9b84ee9a55",
+        "offline_retrieved_ids": [],
+        "prompt_digest": "sha256-v1:c9fcf9726ce84f0833cda6f05138236cc7b9d03dcab554cde9c94e9b84ee9a55",
+        "repair_called": false,
+        "retrieved": [],
+        "trimmed": false
+      },
+      "RAG-17": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:2772a0450bf247fb23c53d7445316e38db09951ea899a32a642f569d690d8ecc",
+        "offline_retrieved_ids": [
+          "RAG:efad67155bcf:cd4a17b26cb35076"
+        ],
+        "prompt_digest": "sha256-v1:80c91e7734871acd4904c597b85a7dad564b8495347aa93585703f1092249088",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:efad67155bcf:cd4a17b26cb35076",
+            "edge_kind": "uses_imported",
+            "end_line": 9,
+            "index_commit_sha": "b3345f5a017d8e37893a2ca8c0181299de67459e",
+            "path": "taskrunner/scheduling.py",
+            "side": "RIGHT",
+            "start_line": 3,
+            "tokens": 144
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-18": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:9375c44a368e4de62824bfd51435650836b3f2de7a5b8032e71922ba6cca0b5a",
+        "offline_retrieved_ids": [
+          "RAG:c087bcdb11c4:bda0dcef942cfe0f"
+        ],
+        "prompt_digest": "sha256-v1:02be40a0a3e53ec3fe51f761cfbca18aa411ba81cee931d307afc5b6e2cef50c",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:c087bcdb11c4:bda0dcef942cfe0f",
+            "edge_kind": "uses_imported",
+            "end_line": 10,
+            "index_commit_sha": "4b32a501a439aec5a53e33e224e2bcfa0a1eca34",
+            "path": "contacts/keys.py",
+            "side": "RIGHT",
+            "start_line": 5,
+            "tokens": 149
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-19": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:c46e712c6ced5d45cc823132800f2d6b79327d8b1e59b814aac91f1893ea778a",
+        "offline_retrieved_ids": [
+          "RAG:697539e9295a:1843dae46b6fa0f1"
+        ],
+        "prompt_digest": "sha256-v1:2ebabe45356252f0ea4381016d8659b23743e1cecc185dcba49c327fc278d42f",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:697539e9295a:1843dae46b6fa0f1",
+            "edge_kind": "uses_imported",
+            "end_line": 11,
+            "index_commit_sha": "a81f6164c500ba72f76ee855184b62923ff4c272",
+            "path": "statements/history.py",
+            "side": "RIGHT",
+            "start_line": 6,
+            "tokens": 154
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-20": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:8a39af059d2a0cfb6fa75011854c794fe251e579e0410004026a21bdd9da5e97",
+        "offline_retrieved_ids": [
+          "RAG:4c6cc7c093c1:942d58d26a0fdca0"
+        ],
+        "prompt_digest": "sha256-v1:e35a2001ff2d6d34818fe46effb0dcc983702f98527aedc735fca198d1524421",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:4c6cc7c093c1:942d58d26a0fdca0",
+            "edge_kind": "uses_imported",
+            "end_line": 9,
+            "index_commit_sha": "60f004b9e5acf9aeb0c3ad4514e2f45461e836e8",
+            "path": "src/range.ts",
+            "side": "RIGHT",
+            "start_line": 1,
+            "tokens": 129
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-21": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:a211f49068c138db4446b00a5c0d03bae3ec59045c2e8a2a625deb4a7c05ea0d",
+        "offline_retrieved_ids": [
+          "RAG:ccef16b540b4:112ecd3258086f55"
+        ],
+        "prompt_digest": "sha256-v1:9831d83b87adc004cca6fd2696fed41216579463e4099f46a122f6c6de9a8b8e",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:ccef16b540b4:112ecd3258086f55",
+            "edge_kind": "uses_imported",
+            "end_line": 17,
+            "index_commit_sha": "b048b467d0a3b44a2c4789bc2a34d905816b61e7",
+            "path": "fleetlog/planner.py",
+            "side": "RIGHT",
+            "start_line": 3,
+            "tokens": 254
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-22": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:5aa11715f3ff770c39276778b80eacd2c03e79d90473d308c03e74eaea9fd8cf",
+        "offline_retrieved_ids": [
+          "RAG:bb2e33cd0b1e:5b28f7b48d4ff016"
+        ],
+        "prompt_digest": "sha256-v1:1e9c9b8826db9dff73a2279900d386aec08acfb2808b2f47b25be83e33ba085f",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:bb2e33cd0b1e:5b28f7b48d4ff016",
+            "edge_kind": "uses_imported",
+            "end_line": 19,
+            "index_commit_sha": "8b17433c0119796e91197fbb72e8d11b39cbf77e",
+            "path": "dispatch/reminders.py",
+            "side": "RIGHT",
+            "start_line": 6,
+            "tokens": 273
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-23": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:d219c79257b035579d7c1f78626a7e32e34ae59afba9d5567c538fa32a3d06a2",
+        "offline_retrieved_ids": [
+          "RAG:5b45099ae9f4:7e5239a9b59132be",
+          "RAG:5b45099ae9f4:92e4a9cd1e594bd4"
+        ],
+        "prompt_digest": "sha256-v1:e19357a1c714d6a0a0badc653622cf3867d8415871076911a1e190b6da678362",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:5b45099ae9f4:7e5239a9b59132be",
+            "edge_kind": "uses_imported",
+            "end_line": 9,
+            "index_commit_sha": "4673b813ba9f2dbedbd4fe0c94ecde184aace4d7",
+            "path": "tally/export.py",
+            "side": "RIGHT",
+            "start_line": 5,
+            "tokens": 129
+          },
+          {
+            "block_id": "RAG:5b45099ae9f4:92e4a9cd1e594bd4",
+            "edge_kind": "uses_imported",
+            "end_line": 9,
+            "index_commit_sha": "4673b813ba9f2dbedbd4fe0c94ecde184aace4d7",
+            "path": "tally/reports.py",
+            "side": "RIGHT",
+            "start_line": 5,
+            "tokens": 127
+          }
+        ],
+        "trimmed": false
+      },
+      "RAG-24": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:bcf675ed9b4cc8f4253c8f1562da561276f74cf7cde1bfee50a21e47e108f8aa",
+        "offline_retrieved_ids": [],
+        "prompt_digest": "sha256-v1:bcf675ed9b4cc8f4253c8f1562da561276f74cf7cde1bfee50a21e47e108f8aa",
+        "repair_called": false,
+        "retrieved": [],
+        "trimmed": false
+      },
+      "RAG-25": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:a3ee8f553b69fc65bf2125b04374139e68186658b5d5d09b5b38db515880d565",
+        "offline_retrieved_ids": [
+          "RAG:cbb674dbfbc9:886bd4a0b1786022"
+        ],
+        "prompt_digest": "sha256-v1:a5fa96de0481c6781e96fd7bd874701049d44df549221de601cc8bebab4c4bb2",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:cbb674dbfbc9:886bd4a0b1786022",
+            "edge_kind": "uses_imported",
+            "end_line": 17,
+            "index_commit_sha": "0f7797273079bca9c9779fbbb6293689370cdac2",
+            "path": "booklend/renewals.py",
+            "side": "RIGHT",
+            "start_line": 3,
+            "tokens": 341
+          }
+        ],
+        "trimmed": false
+      }
+    },
+    "rag_index_digest": "sha256-v1:4b24013bbc1e62541d4bc7e6801d7003019d1b0a3a01d2933b2b100256ab8639",
+    "recorded_at": "2026-11-11T16:23:43.997191Z",
+    "snapshot_pseudo_revisions": {
+      "RAG-01": {
+        "base": "d22f4893f05393ca688aebba25d6cfeeb96eb54e",
+        "head": "133714ccf4f81c8d90a391746030037e5d3e0b63"
+      },
+      "RAG-02": {
+        "base": "33d478988633f6066c7fe572e1325146766b6b29",
+        "head": "0e01321f5c1a3ffe5b3b87ef1bf61c3da63d42dc"
+      },
+      "RAG-03": {
+        "base": "48b01c5eae82b5604f635216f0e4e7d638e6485c",
+        "head": "8604a125a464a3ae6a9b2470cd724f75669593bb"
+      },
+      "RAG-04": {
+        "base": "1ce4e802cd8e511f3b6f0e1ffe1b9afb597d3922",
+        "head": "0d206fd8c6490c1a9b04ae458dab0d7bf85d35c3"
+      },
+      "RAG-05": {
+        "base": "84331145eacb33c5f232bd252c77d3175d28acda",
+        "head": "e35a6b92a654ba3100891e15207efd9afcf09a73"
+      },
+      "RAG-06": {
+        "base": "22f3caa6ff077a90efbe96ec5d2bf30e8483f5ca",
+        "head": "ddcc8971c121a35d1a1f889e08f9d0bbaea64b3c"
+      },
+      "RAG-07": {
+        "base": "1bee9c4061d73a4e17e5477302b69c68733182b1",
+        "head": "bef885085666fdcbb8cf29fea53f96b39a3d350a"
+      },
+      "RAG-08": {
+        "base": "794ddf7225c8e4a8f3cd9084ae90160fd6a9841d",
+        "head": "53d7a8c44dbd85114c8a16177acd95ce927b95c0"
+      },
+      "RAG-09": {
+        "base": "aa07876ee69e0f1e6336995efbc7380e6aa0453b",
+        "head": "e4a7e73ef6ca2ad74305bea7c3008b29cf8073bf"
+      },
+      "RAG-10": {
+        "base": "cbe3da3914ffef9cd60f185eb13468f6948dbb4b",
+        "head": "6ae7e821f0e643d611d47343e7bfa85a845dc7a8"
+      },
+      "RAG-11": {
+        "base": "4d3d0701c1515b4886d80f0fc1dce441675bcfd4",
+        "head": "5f2c59524043ea653f1e809c7e590683eeaf6b31"
+      },
+      "RAG-12": {
+        "base": "6ba6a93338bfffedd17e3b7a75e922bdefe90c7b",
+        "head": "bab414331c9055a0d913ceb6b2f204f63085f0a1"
+      },
+      "RAG-13": {
+        "base": "3ffb7faffd6ac0670b85532d1d326f891e6eb412",
+        "head": "606e8c8d5ae90f6cb8c435b59441e9d8745cc657"
+      },
+      "RAG-14": {
+        "base": "196be6c37a0427dce26774f19af46fbcbd85034f",
+        "head": "2bd86a9ec8f0654292a62209ed236ccaf09e1e72"
+      },
+      "RAG-15": {
+        "base": "69a4ffba7d04652a4c10da0a250ed8fbfac00f89",
+        "head": "adebc6782ce539e2dd5c48fda97d6c26120c5341"
+      },
+      "RAG-16": {
+        "base": "935f49fed965966be45ae1ca0ba8adb18e9093ca",
+        "head": "eaf3c4d52c18904137b447715a35d1f759bab7c7"
+      },
+      "RAG-17": {
+        "base": "b3345f5a017d8e37893a2ca8c0181299de67459e",
+        "head": "efad67155bcf982267675e2b014d390a1aed2524"
+      },
+      "RAG-18": {
+        "base": "4b32a501a439aec5a53e33e224e2bcfa0a1eca34",
+        "head": "c087bcdb11c4f71d0b6328f6f533e65cb9dd6fa8"
+      },
+      "RAG-19": {
+        "base": "a81f6164c500ba72f76ee855184b62923ff4c272",
+        "head": "697539e9295a63e3fd74318e5d30d2ac702d48bd"
+      },
+      "RAG-20": {
+        "base": "60f004b9e5acf9aeb0c3ad4514e2f45461e836e8",
+        "head": "4c6cc7c093c1900c46c2e1fff111927f6a9112ad"
+      },
+      "RAG-21": {
+        "base": "b048b467d0a3b44a2c4789bc2a34d905816b61e7",
+        "head": "ccef16b540b4e084627fca763bd09c82f0f04ba2"
+      },
+      "RAG-22": {
+        "base": "8b17433c0119796e91197fbb72e8d11b39cbf77e",
+        "head": "bb2e33cd0b1ec91d327853cba5efce287fe5b54e"
+      },
+      "RAG-23": {
+        "base": "4673b813ba9f2dbedbd4fe0c94ecde184aace4d7",
+        "head": "5b45099ae9f44519629aadee89f9b88496a18ec8"
+      },
+      "RAG-24": {
+        "base": "53e670551ad5aa46efeaaca06b5e3e6ddab9da11",
+        "head": "261f2db3665de73625a3089d3400dcef5a89bd02"
+      },
+      "RAG-25": {
+        "base": "0f7797273079bca9c9779fbbb6293689370cdac2",
+        "head": "cbb674dbfbc933d6e37e6ab5d0c4b9772469055f"
+      }
+    },
+    "static_digest_without_prompt": "sha256-v1:eec5be10e3da35bf3b623889233c311c2b7ecb3275a248facdc055318db39033",
+    "usage": {
+      "RAG-01": [
+        {
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.00062",
+          "operation": "review",
+          "tokens_in": 9293,
+          "tokens_out": 342
+        }
+      ],
+      "RAG-02": [
+        {
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000598",
+          "operation": "review",
+          "tokens_in": 8622,
+          "tokens_out": 476
+        }
+      ],
+      "RAG-03": [
+        {
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000737",
+          "operation": "review",
+          "tokens_in": 9060,
+          "tokens_out": 577
+        }
+      ],
+      "RAG-04": [
+        {
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000768",
+          "operation": "review",
+          "tokens_in": 8969,
+          "tokens_out": 646
+        }
+      ],
+      "RAG-05": [
+        {
+          "cache_read_tokens": 7684,
+          "cost_usd": "0.000523",
+          "operation": "review",
+          "tokens_in": 8861,
+          "tokens_out": 306
+        }
+      ],
+      "RAG-06": [
+        {
+          "cache_read_tokens": 0,
+          "cost_usd": "0.001687",
+          "operation": "review",
+          "tokens_in": 9945,
+          "tokens_out": 70
+        }
+      ],
+      "RAG-07": [
+        {
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000353",
+          "operation": "review",
+          "tokens_in": 8817,
+          "tokens_out": 56
+        }
+      ],
+      "RAG-08": [
+        {
+          "cache_read_tokens": 7652,
+          "cost_usd": "0.000423",
+          "operation": "review",
+          "tokens_in": 9244,
+          "tokens_out": 52
+        }
+      ],
+      "RAG-09": [
+        {
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000319",
+          "operation": "review",
+          "tokens_in": 8597,
+          "tokens_out": 59
+        }
+      ],
+      "RAG-10": [
+        {
+          "cache_read_tokens": 7700,
+          "cost_usd": "0.000653",
+          "operation": "review",
+          "tokens_in": 8853,
+          "tokens_out": 508
+        }
+      ],
+      "RAG-11": [
+        {
+          "cache_read_tokens": 0,
+          "cost_usd": "0.001558",
+          "operation": "review",
+          "tokens_in": 9133,
+          "tokens_out": 77
+        }
+      ],
+      "RAG-12": [
+        {
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000499",
+          "operation": "review",
+          "tokens_in": 8680,
+          "tokens_out": 311
+        }
+      ],
+      "RAG-13": [
+        {
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000601",
+          "operation": "review",
+          "tokens_in": 8873,
+          "tokens_out": 418
+        }
+      ],
+      "RAG-14": [
+        {
+          "cache_read_tokens": 7700,
+          "cost_usd": "0.000637",
+          "operation": "review",
+          "tokens_in": 8728,
+          "tokens_out": 515
+        }
+      ],
+      "RAG-15": [
+        {
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000522",
+          "operation": "review",
+          "tokens_in": 8859,
+          "tokens_out": 302
+        }
+      ],
+      "RAG-16": [
+        {
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000636",
+          "operation": "review",
+          "tokens_in": 8857,
+          "tokens_out": 475
+        }
+      ],
+      "RAG-17": [
+        {
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.00052",
+          "operation": "review",
+          "tokens_in": 8552,
+          "tokens_out": 375
+        }
+      ],
+      "RAG-18": [
+        {
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000487",
+          "operation": "review",
+          "tokens_in": 8470,
+          "tokens_out": 345
+        }
+      ],
+      "RAG-19": [
+        {
+          "cache_read_tokens": 0,
+          "cost_usd": "0.00166",
+          "operation": "review",
+          "tokens_in": 8593,
+          "tokens_out": 367
+        }
+      ],
+      "RAG-20": [
+        {
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.00055",
+          "operation": "review",
+          "tokens_in": 8492,
+          "tokens_out": 436
+        }
+      ],
+      "RAG-21": [
+        {
+          "cache_read_tokens": 7652,
+          "cost_usd": "0.000432",
+          "operation": "review",
+          "tokens_in": 9279,
+          "tokens_out": 57
+        }
+      ],
+      "RAG-22": [
+        {
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000425",
+          "operation": "review",
+          "tokens_in": 9238,
+          "tokens_out": 60
+        }
+      ],
+      "RAG-23": [
+        {
+          "cache_read_tokens": 7700,
+          "cost_usd": "0.000318",
+          "operation": "review",
+          "tokens_in": 8623,
+          "tokens_out": 58
+        }
+      ],
+      "RAG-24": [
+        {
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000359",
+          "operation": "review",
+          "tokens_in": 8860,
+          "tokens_out": 54
+        }
+      ],
+      "RAG-25": [
+        {
+          "cache_read_tokens": 7652,
+          "cost_usd": "0.000745",
+          "operation": "review",
+          "tokens_in": 9231,
+          "tokens_out": 542
+        }
+      ]
+    }
+  },
+  "schema_version": 1,
+  "static_digest": "sha256-v1:da5e770327b746c64c3e08b137babf8b1386d3a910394ac86c1752c7d61e9238",
+  "static_inputs": [
+    "app/bootstrap/llm_gateway.py",
+    "app/common/application/languages.py",
+    "app/common/infrastructure/github_link_header.py",
+    "app/modules/code_index/application/build_index.py",
+    "app/modules/code_index/application/exclusions.py",
+    "app/modules/code_index/application/index_resolution.py",
+    "app/modules/code_index/application/symbol_rows.py",
+    "app/modules/code_index/domain/rag_index.py",
+    "app/modules/code_index/infrastructure/tar_archive.py",
+    "app/modules/reviews/application/ast_resolution.py",
+    "app/modules/reviews/application/ast_symbols.py",
+    "app/modules/reviews/application/commit_prefix_limits.py",
+    "app/modules/reviews/application/context_provenance.py",
+    "app/modules/reviews/application/context_sources.py",
+    "app/modules/reviews/application/diff_map.py",
+    "app/modules/reviews/application/execute_review.py",
+    "app/modules/reviews/application/graph_retriever.py",
+    "app/modules/reviews/application/llm.py",
+    "app/modules/reviews/application/policy_documents.py",
+    "app/modules/reviews/application/policy_snapshot.py",
+    "app/modules/reviews/application/prepare_policy_snapshot.py",
+    "app/modules/reviews/application/prompt_budget.py",
+    "app/modules/reviews/application/prompt_builder.py",
+    "app/modules/reviews/application/rag_context.py",
+    "app/modules/reviews/application/rag_index.py",
+    "app/modules/reviews/application/review_context.py",
+    "app/modules/reviews/application/review_context_stage.py",
+    "app/modules/reviews/application/review_ignore.py",
+    "app/modules/reviews/application/review_output.py",
+    "app/modules/reviews/application/review_path.py",
+    "app/modules/reviews/application/run_failures.py",
+    "app/modules/reviews/application/unified_diff.py",
+    "app/modules/reviews/application/vcs_diff.py",
+    "app/modules/reviews/infrastructure/ast_worker.py",
+    "app/modules/reviews/infrastructure/llm/answers.py",
+    "app/modules/reviews/infrastructure/llm/gateway.py",
+    "app/modules/reviews/infrastructure/llm/memory.py",
+    "app/modules/reviews/infrastructure/llm/models.py",
+    "app/modules/reviews/infrastructure/llm/settings.py",
+    "app/modules/reviews/infrastructure/llm/transport.py",
+    "app/modules/reviews/infrastructure/subprocess_source_parser.py",
+    "app/modules/reviews/infrastructure/tree_sitter_facts.py",
+    "review/eval/pr-commit-messages.json",
+    "review/prompts/review.system.v7.md",
+    "review/rules/default-backend.v1.json",
+    "review/rules/default-frontend.v1.json",
+    "review/schemas/review-output.schema.json",
+    "review/schemas/review-output.schema.v2.json",
+    "review/scripts/commit_context.py",
+    "review/scripts/eval_live.py",
+    "review/scripts/eval_rag_context.py",
+    "review/scripts/eval_rag_source.py",
+    "review/scripts/rag_snapshot.py",
+    "test-prs-dataset/cases/CLEAN-01/case.json",
+    "test-prs-dataset/cases/CLEAN-02/case.json",
+    "test-prs-dataset/cases/CLEAN-03/case.json",
+    "test-prs-dataset/cases/CLEAN-04/case.json",
+    "test-prs-dataset/cases/CLEAN-05/case.json",
+    "test-prs-dataset/cases/LOG-01/case.json",
+    "test-prs-dataset/cases/LOG-02/case.json",
+    "test-prs-dataset/cases/LOG-03/case.json",
+    "test-prs-dataset/cases/LOG-04/case.json",
+    "test-prs-dataset/cases/LOG-05/case.json",
+    "test-prs-dataset/cases/RES-01/case.json",
+    "test-prs-dataset/cases/RES-02/case.json",
+    "test-prs-dataset/cases/RES-03/case.json",
+    "test-prs-dataset/cases/RES-04/case.json",
+    "test-prs-dataset/cases/RES-05/case.json",
+    "test-prs-dataset/cases/SEC-01/case.json",
+    "test-prs-dataset/cases/SEC-02/case.json",
+    "test-prs-dataset/cases/SEC-03/case.json",
+    "test-prs-dataset/cases/SEC-04/case.json",
+    "test-prs-dataset/cases/SYN-01/case.json",
+    "test-prs-dataset/cases/SYN-02/case.json",
+    "test-prs-dataset/cases/SYN-03/case.json",
+    "test-prs-dataset/cases/SYN-04/case.json",
+    "test-prs-dataset/cases/SYN-05/case.json"
+  ]
+}

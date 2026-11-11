@@ -1,0 +1,1 @@
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The function now accepts an optional `digits` parameter to control rounding precision, improving flexibility without breaking existing callers.", "effort": "none"}}

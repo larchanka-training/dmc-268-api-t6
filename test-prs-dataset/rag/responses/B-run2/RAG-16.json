@@ -1,0 +1,1 @@
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The new `pageAtOffset` utility is implemented with a defensive check for negative offsets and uses the existing `paginate` helper.", "effort": "none"}}

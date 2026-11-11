@@ -1,0 +1,1 @@
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The new function returns both kilometers and days left until service, and the caller in planner.py already uses the tuple for comparison. The plate label docstring clarifies the expected output.", "effort": "none"}}

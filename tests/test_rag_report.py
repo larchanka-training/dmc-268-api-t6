@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from review.scripts.eval_live import _prompt_digest
 from review.scripts.eval_provenance import digest_files
 from review.scripts.validate_findings import validate_review_output_v2
 
@@ -27,6 +28,7 @@ GATE = ARCHIVE / "gate.json"
 REPORT = ROOT / "docs" / "test-plan" / "RAG_V1_CONTRIBUTION_REPORT.md"
 CAPTURES = ARCHIVE / "responses"
 PROMPTS = ARCHIVE / "oracle" / "context"
+SYSTEM_PROMPT = ROOT / "review" / "prompts" / "review.system.v5.md"  # the #146 record is v5
 PROMPT_LINK_DIR = "../../test-prs-dataset/rag/reports/146-v5/oracle/context"
 ORACLE = ARCHIVE / "oracle" / "hallucination.json"
 RUN_IDS = {  # test-prs-dataset/rag/README.md "Captures"
@@ -316,3 +318,32 @@ def test_the_report_lists_each_reviewed_finding_once_with_its_title_and_prompt()
         assert (hallucination == "д") == ((run_id, case_id, int(index)) in confirmed), (run_id, key)
         assert link == f"[{file_name}]({PROMPT_LINK_DIR}/{file_name})"
         assert (PROMPTS / file_name).is_file(), (run_id, key)
+
+
+def _prompt_files() -> dict[str, str]:
+    """File name -> recorded digest of the prompt of every (run, case) with findings to review.
+
+    The gate reviews the findings of the valid answers only; an answer the validator refuses
+    is left out, as it was for the tech lead.
+    """
+    wanted: dict[str, str] = {}
+    for run_id in sorted(RUN_IDS):
+        manifest = json.loads((CAPTURES / run_id / "manifest.json").read_text(encoding="utf-8"))
+        for case_id in sorted(_valid_answers(CAPTURES / run_id)):
+            name = case_id.removesuffix(".json")
+            answer = json.loads((CAPTURES / run_id / case_id).read_text(encoding="utf-8"))
+            if answer["findings"]:
+                digest = manifest["run_metadata"]["rag_evidence"][name]["prompt_digest"]
+                wanted[f"{name}-{digest.removeprefix('sha256-v1:')[:12]}.txt"] = digest
+    return wanted
+
+
+def test_the_oracle_holds_the_exact_prompt_of_every_valid_answer_with_findings() -> None:
+    """The user messages the tech lead read are committed byte for byte, pinned to the recording."""
+    wanted = _prompt_files()
+    system = SYSTEM_PROMPT.read_bytes().decode("utf-8")
+
+    assert {path.name for path in PROMPTS.iterdir()} == set(wanted)
+    for name, digest in wanted.items():
+        user = (PROMPTS / name).read_bytes().decode("utf-8")
+        assert _prompt_digest(system, user) == digest, name
