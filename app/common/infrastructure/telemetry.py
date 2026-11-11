@@ -8,7 +8,10 @@ attributes of ``ALLOWED_ATTRIBUTES``. Request and response bodies of ``run_actio
 review texts never reach a span, and the exporter drops any other attribute before export, so a
 library or a later span cannot widen the boundary by accident. An exception leaves the process
 as its type and its frames only (``safe_stack``), on spans and in logs alike: its message can
-quote a payload. Log records carry the formatted message, never their ``extra`` fields.
+quote a payload. Log records carry the formatted message (never their ``extra`` fields);
+``JsonFormatter`` scrubs GitHub tokens, JWTs, ``Authorization`` credentials (``Bearer``, ``Basic``,
+``token`` and quoted header values), and single-line configured process secret env values collected
+at init (multi-line PEM blocks are not scrubbed line-by-line).
 """
 
 from __future__ import annotations
@@ -105,50 +108,95 @@ def bind_run_id(run_id: UUID | str) -> Iterator[None]:
 
 # --- logs -----------------------------------------------------------------------------------
 
-_AUTH_HEADER_PATTERN = re.compile(
-    r"""(?i)(["']?Authorization["']?\s*[:=]\s*["']?(?:Bearer\s+|Basic\s+|token\s+)?)[^\s,;"'<>]+(["']?)"""
+_AUTH_QUOTED_PATTERN = re.compile(
+    r"""(?i)(["']?Authorization["']?\s*[:=]\s*)"""
+    r"""(?:(")((?:Bearer|Basic|token)\s+)?[^\r\n"\\]*(?:\\.[^\r\n"\\]*)*"|"""
+    r"""(')((?:Bearer|Basic|token)\s+)?[^\r\n'\\]*(?:\\.[^\r\n'\\]*)*')"""
+)
+_AUTH_TOKEN_PATTERN = re.compile(
+    r"""(?i)(\bAuthorization\s*[:=]\s*(?:Bearer|Basic|token)\s+)[^\s,;"'<>]+"""
 )
 _GITHUB_TOKEN_PATTERN = re.compile(
     r"\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,})\b"
 )
 _JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\b")
 
-_SECRET_ENV_SUBSTRINGS = ("SECRET", "KEY", "TOKEN", "PASSWORD", "CREDENTIAL", "AI_")
-_SECRET_IGNORE_ENV_KEYS = frozenset(
-    {"KEYMAP", "SSH_AUTH_SOCK", "TERM_PROGRAM", "TERM", "COLORTERM"}
+_MIN_SECRET_LENGTH = 8
+_SECRET_ENV_NAMES = frozenset({"AI_DMC268_T6"})
+_SECRET_ENV_SUFFIXES = (
+    "_SECRET",
+    "_SECRETS",
+    "_SECRETS_B64",
+    "_TOKEN",
+    "_PASSWORD",
+    "_API_KEY",
+    "_API_KEYS",
+    "_PRIVATE_KEY",
+    "_CREDENTIAL_KEYS",
+    "_ACCESS_KEY",
+    "_SSH_KEY",
 )
 
 
-def _get_configured_secrets(extra_secrets: Sequence[str] = ()) -> tuple[str, ...]:
-    """Collect secret values configured in the environment and process parameters (#468)."""
-    secrets: set[str] = set(extra_secrets)
+def _is_secret_env_name(name: str) -> bool:
+    upper = name.upper()
+    return upper in _SECRET_ENV_NAMES or upper.endswith(_SECRET_ENV_SUFFIXES)
+
+
+def _parse_json_dict_secrets(trimmed: str, env_name: str) -> tuple[str, ...]:
+    if not (trimmed.startswith("{") and trimmed.endswith("}")):
+        return ()
+    try:
+        data = json.loads(trimmed)
+    except json.JSONDecodeError:
+        # Malformed keyring JSON must not fail logger initialization; never log `trimmed`.
+        _LOGGER.warning("Skipping malformed JSON while collecting secret env var %s", env_name)
+        return ()
+    if not isinstance(data, dict):
+        return ()
+    return tuple(
+        cleaned
+        for val in data.values()
+        if isinstance(val, str) and len(cleaned := val.strip()) >= _MIN_SECRET_LENGTH
+    )
+
+
+def _collect_configured_secrets() -> tuple[str, ...]:
+    """Collect configured process secret values from the environment (#468)."""
+    secrets: set[str] = set()
     for key, value in os.environ.items():
-        if not value or key in _SECRET_IGNORE_ENV_KEYS:
+        if not value or not _is_secret_env_name(key):
             continue
-        if any(sub in key.upper() for sub in _SECRET_ENV_SUBSTRINGS):
-            trimmed = value.strip()
-            if trimmed.startswith("{") and trimmed.endswith("}"):
-                with suppress(Exception):
-                    data = json.loads(trimmed)
-                    if isinstance(data, dict):
-                        for val in data.values():
-                            if isinstance(val, str) and len(val.strip()) >= 4:
-                                secrets.add(val.strip())
-            for part in value.split(","):
-                cleaned = part.strip("'\" \t\r\n")
-                if len(cleaned) >= 4 and not cleaned.startswith("http"):
-                    secrets.add(cleaned)
-    return tuple(sorted([s for s in secrets if s], key=len, reverse=True))
+        trimmed = value.strip()
+        json_values = _parse_json_dict_secrets(trimmed, key)
+        if json_values:
+            secrets.update(json_values)
+            continue
+        cleaned_whole = trimmed.strip("'\" \t\r\n")
+        if len(cleaned_whole) >= _MIN_SECRET_LENGTH:
+            secrets.add(cleaned_whole)
+        for part in value.split(","):
+            cleaned = part.strip("'\" \t\r\n")
+            if len(cleaned) >= _MIN_SECRET_LENGTH:
+                secrets.add(cleaned)
+    return tuple(sorted(secrets, key=len, reverse=True))
 
 
-def scrub_secrets(text: str, extra_secrets: Sequence[str] = ()) -> str:
-    """Scrub tokens, JWTs, Authorization headers and configured process secrets (#468)."""
+def _replace_quoted_auth(match: re.Match[str]) -> str:
+    quote = match.group(2) or match.group(4)
+    scheme = match.group(3) or match.group(5) or ""
+    return f"{match.group(1)}{quote}{scheme}***{quote}"
+
+
+def _scrub_text(text: str, secrets: tuple[str, ...]) -> str:
+    """Scrub tokens, JWTs, Authorization credentials, and cached process secrets (#468)."""
     if not text:
         return text
-    text = _AUTH_HEADER_PATTERN.sub(r"\1***\2", text)
+    text = _AUTH_QUOTED_PATTERN.sub(_replace_quoted_auth, text)
+    text = _AUTH_TOKEN_PATTERN.sub(r"\1***", text)
     text = _GITHUB_TOKEN_PATTERN.sub("***", text)
     text = _JWT_PATTERN.sub("***", text)
-    for secret in _get_configured_secrets(extra_secrets):
+    for secret in secrets:
         if secret in text:
             text = text.replace(secret, "***")
     return text
@@ -157,13 +205,13 @@ def scrub_secrets(text: str, extra_secrets: Sequence[str] = ()) -> str:
 class JsonFormatter(logging.Formatter):
     """One JSON object per line: time, level, logger, message, ``run_id``, trace ids, error."""
 
-    def __init__(self, service: str, *, secrets: Sequence[str] | None = None) -> None:
+    def __init__(self, service: str) -> None:
         super().__init__()
         self._service = service
-        self._secrets: tuple[str, ...] = tuple(secrets) if secrets is not None else ()
+        self._secrets = _collect_configured_secrets()
 
     def format(self, record: logging.LogRecord) -> str:
-        message = scrub_secrets(record.getMessage(), self._secrets)
+        message = _scrub_text(record.getMessage(), self._secrets)
         entry: dict[str, Any] = {
             "ts": datetime.fromtimestamp(record.created, UTC).isoformat(timespec="milliseconds"),
             "level": record.levelname,
@@ -182,7 +230,7 @@ class JsonFormatter(logging.Formatter):
             entry["span_id"] = format(context.span_id, "016x")
         if record.exc_info and record.exc_info[1] is not None:
             entry["error_type"] = type(record.exc_info[1]).__name__
-            entry["exc_info"] = scrub_secrets(safe_stack(record.exc_info[1]), self._secrets)
+            entry["exc_info"] = safe_stack(record.exc_info[1])
         elif isinstance(record.__dict__.get("error_type"), str):
             entry["error_type"] = record.__dict__["error_type"]
         return json.dumps(entry, ensure_ascii=False, default=str)
@@ -226,9 +274,7 @@ _UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 _QUIET_LOGGERS = ("httpx", "httpcore")
 
 
-def configure_logging(
-    service: str, *, level: int = logging.INFO, secrets: Sequence[str] | None = None
-) -> None:
+def configure_logging(service: str, *, level: int = logging.INFO) -> None:
     """JSON lines on stderr from the root logger; idempotent, keeps foreign handlers (pytest)."""
     root = logging.getLogger()
     root.setLevel(level)
@@ -238,7 +284,7 @@ def configure_logging(
             root.removeHandler(handler)
     handler = logging.StreamHandler(sys.stderr)
     handler.set_name(_HANDLER_NAME)
-    handler.setFormatter(JsonFormatter(service, secrets=secrets))
+    handler.setFormatter(JsonFormatter(service))
     root.addHandler(handler)
     span_errors = SpanErrorHandler()
     span_errors.set_name(_SPAN_HANDLER_NAME)
