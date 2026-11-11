@@ -124,3 +124,30 @@ class AbstainingVerifier:
             for candidate in re.findall(r'candidate candidate_id="([^"]+)"', user_prompt)
         ]
         return VerifierReply(output={"decisions": decisions})
+
+
+@dataclass
+class SupportingVerifier:
+    """A verifier model that supports every candidate it is shown, citing one line of a block.
+
+    It records every prompt it is sent, as ``AbstainingVerifier`` does.
+    """
+
+    block_id: str
+    line: int
+    prompts: list[VerifierPrompt] = field(default_factory=list)
+
+    async def verify(self, *, system_prompt: str, user_prompt: str, **_: object) -> VerifierReply:
+        self.prompts.append(VerifierPrompt(system_prompt, user_prompt))
+        evidence = {"block_id": self.block_id, "start_line": self.line, "end_line": self.line}
+        decisions = [
+            {
+                "candidate_id": candidate,
+                "status": "supported",
+                "reason": "Shown in the diff.",
+                "evidence_refs": [evidence],
+                "requirement_refs": [],
+            }
+            for candidate in re.findall(r'candidate candidate_id="([^"]+)"', user_prompt)
+        ]
+        return VerifierReply(output={"decisions": decisions})

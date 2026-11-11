@@ -394,9 +394,10 @@ class FakeLlm:
     """An OpenAI-compatible chat endpoint; each request body is kept as sent.
 
     It answers by the response schema: conventions list the changed paths, a review flags
-    the added line of ``app/service.py`` (a v2 review cites it in the file's block), and the
-    verifier supports every candidate. A request the fake cannot answer is recorded and
-    raises, so a test reports the harness gap instead of an odd ``llm_*`` failure of the run.
+    the added line of ``app/service.py`` (a v2 review cites it in the file's block), the
+    verifier supports every candidate and the change summary agent gets one sentence. A
+    request the fake cannot answer is recorded and raises, so a test reports the harness gap
+    instead of an odd ``llm_*`` failure of the run.
     """
 
     def __init__(self) -> None:
@@ -424,6 +425,9 @@ class FakeLlm:
             answer = self._review_v2(prompt)
         elif task == "VerificationOutput":
             answer = self._verification(prompt)
+        elif task == "ChangeSummaryOutput":
+            # The change summary agent (#316): the last call of a snapshot path attempt.
+            answer = {"sentences": ["Adds a function that returns a constant string."]}
         else:
             self._fail(f"the fake has no answer for the {task} schema")
         return httpx.Response(

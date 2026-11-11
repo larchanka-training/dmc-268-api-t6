@@ -66,6 +66,21 @@ _CHECKED_FILES_WITHHELD = "(список не показывается: имен
 _EXECUTIVE_BLOCK_CHAR_LIMIT = 1500
 # Names on one checklist line, the first that keeps the block within its limit.
 _CHECKLIST_NAME_LIMITS = (5, 3, 1, 0)
+# CVS §8.2: the change summary agent's text is a signed description, never a finding.
+_CHANGE_SUMMARY_SIGNATURE = "**What changed** (автоописание, не замечание):"
+# Its input is the PR's own title and diff, and no verifier checks it. A zero-width space
+# where a mention, a reference, a link, an image, HTML or an entity would start keeps the text
+# literal on GitHub, GitLab and Bitbucket alike; a backslash escape is not read by all three.
+_CHANGE_SUMMARY_LINK_STARTS = re.compile(
+    r"[@<&]"  # mentions, e-mail addresses, HTML tags, <autolinks>, entities, GitLab epics
+    r"|[#!~%$](?=\w)"  # issue, merge request, label, milestone and snippet references
+    r"|[~%](?=\")"  # GitLab labels and milestones in quotes: ~"Needs work", %"1.0 beta"
+    r"|(?<=\])(?=\()"  # inline links and images
+    r"|(?<=:)(?=//)"  # URLs with a scheme
+    r"|(?i:(?<=www)(?=\.))"  # www. autolinks, also after _, * or (
+    r"|(?i:(?<=gh-)(?=\d))"  # GH-N references
+)
+_ZERO_WIDTH_SPACE = "\u200b"
 _DISPLAYED_NAME_CHARS = 120
 # CVS §8.2: such a name is unusable or unproven, so only its reason and count are public.
 _COUNT_ONLY_REASONS = frozenset({"unsupported_path", "identity_unresolved"})
@@ -142,6 +157,8 @@ class ProcessedReviewOutput:
     coverage: RunCoverage = field(kw_only=True)
     # Rendered once by ``process``: a store-time repack has no diff map to build it from.
     executive_block: str = field(default="", kw_only=True)
+    # How many leading sentences of the change summary the block shows (#316 Part 3).
+    change_summary_shown: int = field(default=0, kw_only=True)
     # Canonical names of files with an omission reason, never listed in the body (CVS §8.2).
     unnamed_paths: frozenset[str] = field(default=frozenset(), kw_only=True)
 
@@ -183,11 +200,13 @@ class FindingsPostProcessor:
         summary_only: bool = False,
         incomplete_paths: tuple[str, ...] = (),
         summary_reason: str | None = None,
+        change_summary: tuple[str, ...] = (),
     ) -> ProcessedReviewOutput:
         """Classify every finding once in the documented stage order.
 
         The repository severity threshold runs after lint and dedupe, before routing and the
-        inline cap (docs/PIPELINE_SPEC.md §9).
+        inline cap (docs/PIPELINE_SPEC.md §9). ``change_summary`` is the change summary
+        agent's answer, shown signed in the Executive summary and never hashed.
         """
         if coverage is None:
             coverage = RunCoverage(
@@ -287,8 +306,13 @@ class FindingsPostProcessor:
             )
             if name
         )
-        executive_block = _executive_block(
-            kept, coverage, diff_map, unnamed_paths=unnamed_paths, summary_only=summary_only
+        executive_block, change_summary_shown = _executive_block(
+            kept,
+            coverage,
+            diff_map,
+            unnamed_paths=unnamed_paths,
+            summary_only=summary_only,
+            change_summary=change_summary,
         )
         review_body, omitted_body_only_count = _pack_review_body(
             final_output,
@@ -310,6 +334,7 @@ class FindingsPostProcessor:
             summary=final_output.summary,
             coverage=coverage,
             executive_block=executive_block,
+            change_summary_shown=change_summary_shown,
             unnamed_paths=unnamed_paths,
         )
 
@@ -638,7 +663,13 @@ def _executive_block(
     *,
     unnamed_paths: frozenset[str],
     summary_only: bool,
-) -> str:
+    change_summary: tuple[str, ...],
+) -> tuple[str, int]:
+    """The block and how many leading sentences of the change summary it shows.
+
+    Over the limit, the checklist names fold first (5, 3, 1, then none), then the last
+    sentences go; the verdict and the checklist counts always stay.
+    """
     run_verdict = coverage_verdict((item.finding.severity for item in kept), coverage.status)
     unavailable_label = (
         "нет доступных для анализа изменений"
@@ -646,21 +677,40 @@ def _executive_block(
         else "проверка неполная"
     )
     risk = _risk_score(run_verdict, coverage, summary_only=summary_only)
-    header = (
+    verdict_line = (
         "## Executive summary\n\n"
         f"**Verdict:** {run_verdict or unavailable_label} · **Risk Score:** {risk}"
     )
-    block = header
-    for limit in _CHECKLIST_NAME_LIMITS:
-        lines = (
-            *_unreviewed_file_lines(coverage, limit),
-            *_blocking_finding_lines(kept, limit, unnamed_paths),
-            *_sensitive_file_lines(diff_map, coverage, limit),
+    sentences = tuple(
+        _plain_text(_hide_names(sentence.strip(), unnamed_paths)) for sentence in change_summary
+    )
+    block = verdict_line
+    for shown in range(len(sentences), -1, -1):
+        header = (
+            f"{verdict_line}\n\n{_CHANGE_SUMMARY_SIGNATURE} {' '.join(sentences[:shown])}"
+            if shown
+            else verdict_line
         )
-        block = "\n".join((f"{header}\n\n**What to check:**", *lines)) if lines else header
-        if len(block) <= _EXECUTIVE_BLOCK_CHAR_LIMIT:
-            break
-    return block
+        for limit in _CHECKLIST_NAME_LIMITS:
+            lines = (
+                *_unreviewed_file_lines(coverage, limit),
+                *_blocking_finding_lines(kept, limit, unnamed_paths),
+                *_sensitive_file_lines(diff_map, coverage, limit),
+            )
+            block = "\n".join((f"{header}\n\n**What to check:**", *lines)) if lines else header
+            if len(block) <= _EXECUTIVE_BLOCK_CHAR_LIMIT:
+                return block, shown
+    return block, 0
+
+
+def _plain_text(text: str) -> str:
+    """The agent's sentence as literal text: no mention, reference, link, image, HTML or entity.
+
+    A bare commit SHA may still link to that commit of the same repository, as on any page.
+    """
+    return _CHANGE_SUMMARY_LINK_STARTS.sub(
+        lambda match: f"{match.group()}{_ZERO_WIDTH_SPACE}", text
+    )
 
 
 def _overview_block(
