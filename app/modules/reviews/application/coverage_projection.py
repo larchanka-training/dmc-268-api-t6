@@ -65,21 +65,23 @@ def empty_addition_candidate(snapshot: DiffSnapshot) -> bool:
     return is_empty_addition_candidate(replace(snapshot_vcs_file(snapshot), patch=patch))
 
 
-def project_run_coverage(
+def project_run_coverage_with_digest(
     snapshots: list[DiffSnapshot],
     diff_map: DiffMap,
     *,
+    snapshot_digest: str,
     ignore: IgnoreResult | None = None,
     snapshot_path: bool = False,
-    snapshot_digest: str | None = None,
 ) -> RunCoverage:
-    """Classify every stored file of the attempt under its effective policy.
+    """Classify every stored file under a precomputed ``snapshot_digest``.
+
+    Public facade entry points live exclusively in ``run_coverage.py`` and supply
+    ``snapshot_coverage_digest(snapshots)`` so callers share one seam.
 
     ``snapshot_path``: the run takes the snapshot path, which ends a change of technical
     skips only without a model call, so an unsupported path and an unresolved identity
     count as technical skips (CVS §2.2). A legacy run keeps them incomplete.
     """
-    digest = snapshot_coverage_digest(snapshots) if snapshot_digest is None else snapshot_digest
     reasons: list[CoverageItem] = []
     exclusions: list[CoverageItem] = []
     reviewed = 0
@@ -164,7 +166,7 @@ def project_run_coverage(
         tuple(reasons),
         diff_map.head_sha,
         diff_map.digest,
-        digest,
+        snapshot_digest,
         len(snapshots),
         diff_map.file_list_complete,
         durable_reviewable_paths=frozenset(reviewable_paths),

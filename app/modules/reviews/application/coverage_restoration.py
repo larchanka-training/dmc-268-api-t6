@@ -11,8 +11,7 @@ from app.common.application.git_identity import is_canonical_sha1
 from app.modules.reviews.application.coverage_model import RunCoverage
 from app.modules.reviews.application.coverage_projection import (
     empty_addition_candidate,
-    project_run_coverage,
-    snapshot_coverage_digest,
+    project_run_coverage_with_digest,
 )
 from app.modules.reviews.application.coverage_schema import (
     COVERAGE_EXCLUSION_CODES,
@@ -30,7 +29,8 @@ from app.modules.reviews.application.get_run_diff import (
     is_proven_empty_snapshot,
 )
 
-_LOGGER = logging.getLogger(__name__)
+# Preserve the historical facade logger name so log filters keep matching after the split.
+_LOGGER = logging.getLogger("app.modules.reviews.application.run_coverage")
 
 
 @dataclass(frozen=True)
@@ -68,17 +68,16 @@ def read_context_coverage_pins(
     return CoverageContextPins(old_sha, coverage["file_list_complete"])
 
 
-def restore_context_coverage(
+def restore_context_coverage_with_digest(
     request: object,
     response: object,
     *,
     snapshots: list[DiffSnapshot],
     diff_map: DiffMap,
+    snapshot_digest: str,
     run_id: UUID | None = None,
-    snapshot_digest: str | None = None,
 ) -> RunCoverage:
-    """Restore effective policy only for matching durable facts; unknown names stay private."""
-    digest = snapshot_coverage_digest(snapshots) if snapshot_digest is None else snapshot_digest
+    """Restore effective policy for matching durable facts; unknown names stay private."""
     pins = read_context_coverage_pins(request, response, head_sha=diff_map.head_sha)
     if (
         pins is not None
@@ -92,30 +91,31 @@ def restore_context_coverage(
             response.get("coverage"),
             snapshots=snapshots,
             diff_map=diff_map,
-            snapshot_digest=digest,
+            snapshot_digest=snapshot_digest,
         )
         if restored is not None:
             return restored
     if request is not None or response is not None:
         _LOGGER.warning("Invalid saved context coverage run_id=%s", run_id)
-    return unavailable_run_coverage(snapshots, diff_map.head_sha, snapshot_digest=digest)
+    return unavailable_run_coverage_with_digest(
+        snapshots, diff_map.head_sha, snapshot_digest=snapshot_digest
+    )
 
 
-def restore_run_coverage(
+def restore_run_coverage_with_digest(
     value: object,
     *,
     snapshots: list[DiffSnapshot],
     diff_map: DiffMap,
+    snapshot_digest: str,
     run_id: UUID | None = None,
-    snapshot_digest: str | None = None,
 ) -> RunCoverage | None:
     """Read saved policy-effective coverage only for the exact durable inputs."""
-    digest = snapshot_coverage_digest(snapshots) if snapshot_digest is None else snapshot_digest
     result = _restore_run_coverage(
         value,
         snapshots=snapshots,
         diff_map=diff_map,
-        snapshot_digest=digest,
+        snapshot_digest=snapshot_digest,
     )
     if result is None and value is not None:
         _LOGGER.warning("Invalid saved run coverage run_id=%s", run_id)
@@ -160,7 +160,11 @@ def _restore_run_coverage(
     # Effective policy may withhold a file, but it cannot create a model patch or
     # manufacture independent empty/binary/generated proof. The no-policy projection
     # partitions actual durable capacities before any saved aggregate is accepted.
-    available = project_run_coverage(snapshots, diff_map, snapshot_digest=snapshot_digest)
+    available = project_run_coverage_with_digest(
+        snapshots,
+        diff_map,
+        snapshot_digest=snapshot_digest,
+    )
     if reviewed > available.reviewed_files:
         return None
     if any(
@@ -226,15 +230,14 @@ def _restore_run_coverage(
     )
 
 
-def unavailable_run_coverage(
+def unavailable_run_coverage_with_digest(
     snapshots: list[DiffSnapshot],
     head_sha: str,
     *,
+    snapshot_digest: str,
     metadata_only: bool = False,
-    snapshot_digest: str | None = None,
 ) -> RunCoverage:
     """Legacy or mismatched context cannot prove inventory or effective-policy coverage."""
-    digest = snapshot_coverage_digest(snapshots) if snapshot_digest is None else snapshot_digest
     reasons = [CoverageItem(None, "classification_unavailable")]
     exclusions = []
     for snapshot in snapshots:
@@ -277,6 +280,6 @@ def unavailable_run_coverage(
         exclusions=tuple(exclusions),
         reasons=tuple(reasons),
         head_sha=head_sha,
-        snapshot_digest=digest,
+        snapshot_digest=snapshot_digest,
         total_files=len(snapshots),
     )

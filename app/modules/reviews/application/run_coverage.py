@@ -5,53 +5,37 @@ from __future__ import annotations
 from uuid import UUID
 
 from app.modules.reviews.application.coverage_finalization import (
-    coverage_published_for_summary_only as coverage_published_for_summary_only,
+    coverage_published_for_summary_only,
+    finalize_run_coverage,
 )
-from app.modules.reviews.application.coverage_finalization import (
-    finalize_run_coverage as finalize_run_coverage,
-)
-from app.modules.reviews.application.coverage_model import RunCoverage as RunCoverage
+from app.modules.reviews.application.coverage_model import RunCoverage
 from app.modules.reviews.application.coverage_projection import (
-    project_run_coverage as _project_run_coverage_with_digest,
+    project_run_coverage_with_digest as _project_run_coverage_with_digest,
 )
 from app.modules.reviews.application.coverage_projection import (
-    snapshot_coverage_digest as snapshot_coverage_digest,
-)
-from app.modules.reviews.application.coverage_projection import (
-    snapshot_vcs_file as snapshot_vcs_file,
+    snapshot_coverage_digest,
+    snapshot_vcs_file,
 )
 from app.modules.reviews.application.coverage_restoration import (
-    CoverageContextPins as CoverageContextPins,
+    CoverageContextPins,
+    read_context_coverage_pins,
 )
 from app.modules.reviews.application.coverage_restoration import (
-    read_context_coverage_pins as read_context_coverage_pins,
+    restore_context_coverage_with_digest as _restore_context_coverage_with_digest,
 )
 from app.modules.reviews.application.coverage_restoration import (
-    restore_context_coverage as _restore_context_coverage_with_digest,
+    restore_run_coverage_with_digest as _restore_run_coverage_with_digest,
 )
 from app.modules.reviews.application.coverage_restoration import (
-    restore_run_coverage as _restore_run_coverage_with_digest,
-)
-from app.modules.reviews.application.coverage_restoration import (
-    unavailable_run_coverage as _unavailable_run_coverage_with_digest,
+    unavailable_run_coverage_with_digest as _unavailable_run_coverage_with_digest,
 )
 from app.modules.reviews.application.coverage_schema import (
-    COVERAGE_EXCLUSION_CODES as COVERAGE_EXCLUSION_CODES,
-)
-from app.modules.reviews.application.coverage_schema import (
-    COVERAGE_REASON_CODES as COVERAGE_REASON_CODES,
-)
-from app.modules.reviews.application.coverage_schema import (
-    CoverageItem as CoverageItem,
-)
-from app.modules.reviews.application.coverage_schema import (
-    CoverageStatus as CoverageStatus,
-)
-from app.modules.reviews.application.coverage_schema import (
-    read_coverage_counts as read_coverage_counts,
-)
-from app.modules.reviews.application.coverage_schema import (
-    read_coverage_items as read_coverage_items,
+    COVERAGE_EXCLUSION_CODES,
+    COVERAGE_REASON_CODES,
+    CoverageItem,
+    CoverageStatus,
+    read_coverage_counts,
+    read_coverage_items,
 )
 from app.modules.reviews.application.diff_map import DiffMap
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
@@ -78,6 +62,9 @@ __all__ = [
 ]
 
 
+# These four facade entry points are the sole public callers computing snapshot_coverage_digest;
+# owner modules accept a required snapshot_digest so production calls and monkeypatch seams
+# (e.g. monkeypatch.setattr(run_coverage, "snapshot_coverage_digest", ...)) share one path.
 def project_run_coverage(
     snapshots: list[DiffSnapshot],
     diff_map: DiffMap,
@@ -89,8 +76,8 @@ def project_run_coverage(
     return _project_run_coverage_with_digest(
         snapshots,
         diff_map,
-        ignore=ignore,
         snapshot_digest=snapshot_coverage_digest(snapshots),
+        ignore=ignore,
         snapshot_path=snapshot_path,
     )
 
@@ -109,8 +96,8 @@ def restore_context_coverage(
         response,
         snapshots=snapshots,
         diff_map=diff_map,
-        run_id=run_id,
         snapshot_digest=snapshot_coverage_digest(snapshots),
+        run_id=run_id,
     )
 
 
@@ -126,8 +113,8 @@ def restore_run_coverage(
         value,
         snapshots=snapshots,
         diff_map=diff_map,
-        run_id=run_id,
         snapshot_digest=snapshot_coverage_digest(snapshots),
+        run_id=run_id,
     )
 
 
@@ -138,6 +125,6 @@ def unavailable_run_coverage(
     return _unavailable_run_coverage_with_digest(
         snapshots,
         head_sha,
-        metadata_only=metadata_only,
         snapshot_digest=snapshot_coverage_digest(snapshots),
+        metadata_only=metadata_only,
     )
