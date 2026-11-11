@@ -101,9 +101,9 @@ The `Markdown links` check (`.github/workflows/md-links.yml`, `.github/scripts/c
 reads the tracked `*.md` files under `docs/` and `.agents/`, `AGENTS.md` and
 `test-prs-dataset/README.md`. Each relative link outside code must name a tracked file or
 directory, and its `#anchor` on a `.md` file must be a heading id as GitHub renders it, or an
-`<a id>`; otherwise the check fails with `path:line: target: reason`. External URLs are not
-checked. It runs on every pull request, with no paths filter (moving or deleting any file can
-break a link to it), and on every push to `main`; it is not a required check.
+`<a id>` / `<a name>`; otherwise the check fails with `path:line: target: reason`. External
+URLs are not checked. It runs on every pull request, with no paths filter (moving or deleting
+any file can break a link to it), and on every push to `main`; it is not a required check.
 
 ## How to add a skill
 
