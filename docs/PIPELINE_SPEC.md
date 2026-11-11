@@ -350,6 +350,7 @@ Legacy main ещё включает too_large в порог; указанные 
 | summary_only | краткий обзор без проверки всех строк |
 | review_input_incomplete | модель получила не весь patch |
 | unknown_path | не удалось сопоставить замечание с доступным diff |
+| `base_coverage_incomplete` (цель #306 Ч.2) | часть файлов базового ревью не была проверена |
 
 Метки оформления сводки и списка причин (не коды причин):
 
@@ -359,7 +360,7 @@ Legacy main ещё включает too_large в порог; указанные 
 | coverage=none | Текстовые изменения не проверены |
 | Остаток причин после пяти отображённых, n — их количество | Ещё причин: {n} |
 | Строчная метка verdict при partial без supported риска | проверка неполная |
-| summary.done_well; reviewed_files — проверенные текстовые файлы, excluded_files — сумма exclusions | Проанализировано файлов с текстовыми изменениями: {reviewed_files}; исключено файлов: {excluded_files}. |
+| summary.done_well; reviewed_files — проверенные текстовые файлы, excluded_files — сумма exclusions (в v2 инкремента — без `outside_incremental_delta`) | Проанализировано файлов с текстовыми изменениями: {reviewed_files}; исключено файлов: {excluded_files}. |
 | Число проверенных текстовых файлов в partial/none overview | **Проверено файлов с текстовыми изменениями:** {reviewed_files} |
 | summary.problem при наличии findings; n — число оставшихся findings | Подтверждено замечаний: {n} |
 | Строка coverage в partial/none overview; summary_problem включает точку | **Coverage:** {status} — {summary_problem} |

@@ -165,7 +165,7 @@ GitLab считает строки файла по его hunks: такой фа
 Доказанный empty-only/empty+ignored и binary-only/binary+ignored — строка «Только E»; too_large-only,
 unsupported-only, неразрешённый rename+ignored и доказанный submodule/mode-only —
 ветка none при выполнении всех её условий. E и T не считаются проверенными;
-причины E включаются в excluded_files, T — отдельно в coverage.reasons.
+причины E включаются в `excluded_files` (в coverage v2 #306 — без `outside_incremental_delta`), T — отдельно в `coverage.reasons` (включая глобальную причину `base_coverage_incomplete` для итогового `partial` при чистой дельте поверх неполной базы).
 Классификация сохраняется **до любого выхода**, включая skipped, отдельно от
 VCS-only DiffMap/digest. Все backend-ветки обходят conventions, context, reviewer
 и verifier, сохраняют закреплённые severity_threshold/max_comments и
@@ -1666,7 +1666,7 @@ hunks, невозможная нулевая координата существ
 | `too_large` | >20 000 additions+deletions, >20 000 LF-строк patch (включая context/заголовки), >1 048 576 UTF-8 байт patch или >1 048 576 сырых байт blob / достоверного blob size; либо явный provider too_large / остановка чтения на лимите; technical |
 | `missing_patch` / `truncated_patch` / `malformed_patch` | Нет полного достоверного patch обычного файла и нет доказательства предыдущих причин; incomplete, не разрешает none |
 
-В coverage v2 инкрементального Run есть отдельное доказанное исключение `outside_incremental_delta`: строка полного сохранённого diff не входит в закреплённый scope дельты (INC §6.4). Это не `file_omissions.reason` и не `drop_reason = 'out_of_incremental_diff_scope'` для кандидата модели. Исключение не входит в сумму для `all_excluded`; при наличии вернувшихся к базе путей (`delta_absent_paths`) Run должен дойти до T14, чтобы разрешить прежние треды.
+В coverage v2 инкрементального Run есть отдельное доказанное исключение `outside_incremental_delta`: строка полного сохранённого diff не входит в закреплённый scope дельты (INC §6.4). Это не `file_omissions.reason` и не `drop_reason = 'out_of_incremental_diff_scope'` для кандидата модели. Контракт швов для v2: (1) `outside_incremental_delta` входит в partition инварианта `valid_coverage_status` (`reviewed + sum(reasons) + sum(exclusions) == total + global_reasons`), тогда как `valid_coverage_status` проверяет `delta_coverage_status` (и глобальную причину `base_coverage_incomplete` в `REASON_TEXT`, когда дельта чиста, а база `partial`); (2) `_project_run_coverage` строит проекцию без compare scope, поэтому `_restore_run_coverage` сверяет ёмкость `outside_incremental_delta` с числом строк полного снимка вне scope дельты; (3) `RunCoverage.all_excluded`, `RunCoverage.technical_only` и счётчик `excluded_files` в сводке учитывают только реальные исключения дельты (исключая `outside_incremental_delta`). При наличии вернувшихся к базе путей (`delta_absent_paths`) Run должен дойти до T14, чтобы разрешить прежние треды.
 
 `empty_file` — доказанное исключение E только для `added` с поддерживаемым
 каноническим точным путём, без предыдущего пути (`previous_filename is None`, логический `old_path=null`),
