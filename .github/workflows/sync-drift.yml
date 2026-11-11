@@ -1,0 +1,51 @@
+name: SYNC drift
+
+# The files shared with dmc-268-ui-t6 (.agents/README.md § Sync map) must stay byte-identical (#270).
+# ui is the source: this check compares this tree with ui `main`, so it is red between the merge of
+# a ui change and its api copy, on purpose. Not a required check of ruleset `main`: that window must
+# not block every api PR.
+on:
+  pull_request:
+    paths:
+      - ".agents/**"
+      - ".github/**"
+      - "scripts/check_sync_drift.py"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sync-drift:
+    name: SYNC drift vs ui main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # ui is public: no token. Checked out after this repo, whose checkout cleans the workspace.
+      - name: Checkout ui main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: larchanka-training/dmc-268-ui-t6
+          ref: main
+          path: ui-main
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.11"
+          python-version: "3.13"
+
+      # The script is stdlib only: --no-project runs it without syncing the project environment.
+      - name: Compare files with a SYNC marker
+        run: uv run --no-project python scripts/check_sync_drift.py markers --ui ui-main --api .
+
+      - name: Compare the marker-less JSON paths of the sync map
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python scripts/check_sync_drift.py json-dirs --ui ui-main --api .
