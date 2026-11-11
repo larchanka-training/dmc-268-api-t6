@@ -5,12 +5,16 @@ The script reads the tracked ``*.md`` files under ``docs/`` and ``.agents/``, ``
 ``test-prs-dataset/README.md``, and lists every relative link whose file is not tracked or whose
 heading anchor does not exist, as ``path:line: target: reason``. External URLs are not checked.
 The anchors below are the ids GitHub renders for these headings (taken from the rendered pages of
-this repository and of ui); the last two headings of ``TARGET`` follow the GFM spec instead (a code
-span keeps its underscores, ``_note_`` is emphasis), no page here has one.
+this repository and of ui). The headings of ``TARGET`` from ``_private_`` on follow the GFM spec
+instead, no page here has one: a code span keeps its underscores, ``_note_`` is emphasis,
+escaped ``\\_`` and ``\\[`` are text, an entity is its character, inline HTML and an image
+add no text, an autolink adds its URL, closing ``#`` are not text, and a heading inside a fence
+is code.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -49,23 +53,56 @@ TARGET = f"""# B
 ## `_private_` helper
 
 ## A _note_ here
+
+## \\_Not emphasis\\_
+
+## Literal \\[link](x)
+
+## Fish &amp; chips
+
+## Install <kbd>uv</kbd>
+
+## See <https://example.com/x>
+
+## Logo ![alt text](img.png) here
+
+## Closed heading ##
+
+<a name="legacy-anchor"></a>
+
+```md
+## Fenced heading
+```
 """
 
 TREE = {
     "AGENTS.md": "# Agents\n",
     "docs/b.md": TARGET,
     "docs/sub/c.md": "# C\n",
+    "docs/my file.md": "# M\n",
     "docs/img.png": "png\n",
     "app/x.py": "x = 1\n",
 }
+
+
+def _git_env(root: Path) -> dict[str, str]:
+    """No inherited ``GIT_*`` key (a hook's ``GIT_INDEX_FILE``), no user or system config, and no
+    repository above ``root``."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env |= {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CEILING_DIRECTORIES": str(root.parent),
+    }
+    return env
 
 
 def _repo(root: Path, files: dict[str, str]) -> Path:
     for path, text in files.items():
         (root / path).parent.mkdir(parents=True, exist_ok=True)
         (root / path).write_text(text, encoding="utf-8")
-    subprocess.run(["git", "init", "-q", str(root)], check=True)
-    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "init", "-q", str(root)], check=True, env=_git_env(root))
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, env=_git_env(root))
     return root
 
 
@@ -73,6 +110,7 @@ def _check(root: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SCRIPT)],
         cwd=root,
+        env=_git_env(root),
         capture_output=True,
         encoding="utf-8",
         check=False,
@@ -84,12 +122,13 @@ def _page(link: str) -> str:
 
 
 def test_resolving_links_pass_with_a_count(tmp_path: Path) -> None:
+    # The fourth is the image in a heading of docs/b.md.
     page = "# A\n\nSee [b](b.md), [agents](../AGENTS.md) and [c](sub/c.md#c).\n"
 
     result = _check(_repo(tmp_path, {**TREE, "docs/a.md": page}))
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.splitlines() == ["All 3 relative links in 4 Markdown files resolve."]
+    assert result.stdout.splitlines() == ["All 4 relative links in 5 Markdown files resolve."]
 
 
 @pytest.mark.parametrize(
@@ -117,6 +156,20 @@ def test_resolving_links_pass_with_a_count(tmp_path: Path) -> None:
         "[h](b.md#gitlab-orphan-stage)",
         "[h](b.md#_private_-helper)",
         "[h](b.md#a-note-here)",
+        "[h](b.md#_not-emphasis_)",
+        "[h](b.md#literal-linkx)",
+        "\\[not a link](gone.md)",
+        "\\\\\\[still text](gone.md)",
+        "[h](b.md#fish--chips)",
+        "[h](b.md#install-uv)",
+        "[h](b.md#see-httpsexamplecomx)",
+        "[h](b.md#logo--here)",
+        "[h](b.md#closed-heading)",
+        "[h](b.md#legacy-anchor)",
+        "[query](b.md?plain=1)",
+        "[space](my%20file.md)",
+        "[root](/)",
+        "[up](../)",
     ],
     ids=[
         "root-relative",
@@ -141,6 +194,20 @@ def test_resolving_links_pass_with_a_count(tmp_path: Path) -> None:
         "html-anchor",
         "code-span-keeps-underscores",
         "underscore-emphasis",
+        "escaped-underscores",
+        "escaped-bracket-in-heading",
+        "escaped-bracket-is-text",
+        "escaped-backslash-then-escaped-bracket",
+        "entity",
+        "inline-html",
+        "autolink",
+        "image-in-heading",
+        "closing-hashes",
+        "html-name-anchor",
+        "query",
+        "percent-encoded-path",
+        "root-directory",
+        "parent-directory",
     ],
 )
 def test_a_link_to_a_tracked_file_or_heading_passes(tmp_path: Path, link: str) -> None:
@@ -162,6 +229,9 @@ def test_a_link_to_a_tracked_file_or_heading_passes(tmp_path: Path, link: str) -
         ("[g](#nope)", "docs/a.md:3: #nope: no such anchor"),
         ("[g](b.md#dup-2)", "docs/a.md:3: b.md#dup-2: no such anchor"),
         ("[g](b.md#Dup)", "docs/a.md:3: b.md#Dup: no such anchor"),
+        ("[g](b.md#fenced-heading)", "docs/a.md:3: b.md#fenced-heading: no such anchor"),
+        ("[g](gone.md?plain=1)", "docs/a.md:3: gone.md?plain=1: no such file"),
+        ("\\\\[g](gone.md)", "docs/a.md:3: gone.md: no such file"),
     ],
     ids=[
         "file",
@@ -174,6 +244,9 @@ def test_a_link_to_a_tracked_file_or_heading_passes(tmp_path: Path, link: str) -
         "same-file-anchor",
         "third-duplicate",
         "anchor-case",
+        "heading-in-a-fence",
+        "query",
+        "link-after-an-escaped-backslash",
     ],
 )
 def test_a_broken_link_fails_with_its_file_and_line(tmp_path: Path, link: str, line: str) -> None:
