@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import asyncio
-import logging
-from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
-from types import TracebackType
-from typing import Any, Self, cast
+from datetime import UTC, datetime
+from typing import Any, cast
 
 import pytest
 
-import app.common.application.leader_tasks as common_leader_tasks
 from app.bootstrap.run_data_retention import RunDataRetentionSettings
 from app.common.application.leader_tasks import LeaderTasks, ScheduledTask
-from app.modules.reviews.application.run_data_retention import INTERVAL_SECONDS, PurgeExpiredRunData
+from app.modules.reviews.application.run_data_retention import INTERVAL_SECONDS
 from app.worker import WorkerProcess, WorkerSettings
+from tests.run_data_retention_fakes import (
+    DEFAULT_RETENTION_NOW as _NOW,
+)
+from tests.run_data_retention_fakes import (
+    RetentionClock,
+    RetentionStore,
+    make_retention_task,
+)
 
 _WORKER_ENV = {
     "DATABASE_URL": "postgresql+psycopg://unused/unused",
@@ -61,98 +65,21 @@ def test_the_worker_settings_read_the_retention_period() -> None:
     assert settings.run_data_retention.days == 45
 
 
-_NOW = datetime(2026, 11, 6, 12, tzinfo=UTC)
 _DAY = 86_400
-_INTERVAL = 3_600
 
 
-class _Clock:
-    def __init__(self) -> None:
-        self.now = 1_000.0
-
-    def __call__(self) -> float:
-        return self.now
-
-
-class _Store:
-    """Answers each batch from a script; 0 once it runs out. `cost` is the seconds per batch."""
-
-    def __init__(
-        self,
-        clock: _Clock,
-        *,
-        runs: Sequence[int | BaseException] = (),
-        blobs: Sequence[int | BaseException] = (),
-        cost: float = 0.0,
-    ) -> None:
-        self._clock = clock
-        self._runs = iter(runs)
-        self._blobs = iter(blobs)
-        self._cost = cost
-        self.calls: list[str] = []
-        self.commits = 0
-        self.seen: list[tuple[Any, ...]] = []
-
-    def _answer(self, answer: int | BaseException) -> int:
-        self._clock.now += self._cost
-        if isinstance(answer, BaseException):
-            raise answer
-        return answer
-
-    async def purge_expired_runs(self, before: datetime, now: datetime, limit: int) -> int:
-        self.calls.append("runs")
-        self.seen.append((before, now, limit))
-        return self._answer(next(self._runs, 0))
-
-    async def clear_expired_blobs(self, now: datetime, limit: int) -> int:
-        self.calls.append("blobs")
-        self.seen.append((now, limit))
-        return self._answer(next(self._blobs, 0))
-
-
-class _Uow:
-    def __init__(self, store: _Store) -> None:
-        self.retention = store
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        return None
-
-    async def commit(self) -> None:
-        self.retention.commits += 1
-
-    async def rollback(self) -> None:
-        return None
-
-
-def _task(store: _Store, clock: _Clock) -> PurgeExpiredRunData:
-    return PurgeExpiredRunData(
-        uow=lambda: _Uow(store),
-        retention=timedelta(days=90),
-        now=lambda: _NOW,
-        clock=clock,
-    )
-
-
-def _leader(store: _Store, clock: _Clock) -> LeaderTasks:
+def _leader(store: RetentionStore, clock: RetentionClock) -> LeaderTasks:
     return LeaderTasks(
-        [ScheduledTask("run_data_retention", _task(store, clock), INTERVAL_SECONDS)],
+        [ScheduledTask("run_data_retention", make_retention_task(store, clock), INTERVAL_SECONDS)],
         clock=clock,
     )
 
 
 def test_a_pass_drains_the_runs_then_the_blobs_one_transaction_per_batch() -> None:
-    clock = _Clock()
-    store = _Store(clock, runs=(100, 100, 3), blobs=(1_000, 7))
+    clock = RetentionClock(1_000.0)
+    store = RetentionStore(clock, runs=(100, 100, 3), blobs=(1_000, 7))
 
-    assert asyncio.run(_task(store, clock).run(10)) is False
+    assert asyncio.run(make_retention_task(store, clock).run(10)) is False
 
     assert store.calls == ["runs", "runs", "runs", "blobs", "blobs"]
     assert store.commits == 5
@@ -170,103 +97,37 @@ def test_a_pass_drains_the_runs_then_the_blobs_one_transaction_per_batch() -> No
 def test_a_pass_reports_the_work_its_budget_cut_off(
     runs: tuple[int, ...], blobs: tuple[int, ...], calls: list[str]
 ) -> None:
-    clock = _Clock()
-    store = _Store(clock, runs=runs, blobs=blobs, cost=6.0)
+    clock = RetentionClock(1_000.0)
+    store = RetentionStore(clock, runs=runs, blobs=blobs, cost=6.0)
 
-    assert asyncio.run(_task(store, clock).run(10)) is True
+    assert asyncio.run(make_retention_task(store, clock).run(10)) is True
 
     assert store.calls == calls
 
 
-def test_a_tick_runs_at_once_and_then_once_per_interval() -> None:
-    clock = _Clock()
-    store = _Store(clock)
-    task = _leader(store, clock)
+def test_retention_runs_and_resumes_through_leader_tasks() -> None:
+    clock = RetentionClock(1_000.0)
+    store = RetentionStore(clock, runs=(100,), cost=6.0)
+    leader = _leader(store, clock)
 
     async def ticks() -> None:
-        await task.tick()
-        assert store.calls == ["runs", "blobs"]
-        clock.now += _INTERVAL - 1
-        await task.tick()
-        assert store.calls == ["runs", "blobs"]
-        clock.now += 1
-        await task.tick()
+        # Tick 1 finishes `runs` (`100`, then `0`), hits deadline at 1012s before `blobs`,
+        # so the gate stays open for an immediate resume on Tick 2 without advancing clock.
+        await leader.tick()
+        assert store.calls == ["runs", "runs"]
+        # Once drained, the hourly interval gate measures INTERVAL_SECONDS from tick start.
+        tick2_start = clock.now
+        await leader.tick()
+        assert store.calls == ["runs", "runs", "runs", "blobs"]
+        clock.now = tick2_start + INTERVAL_SECONDS - 1
+        await leader.tick()
+        assert store.calls == ["runs", "runs", "runs", "blobs"]
+        clock.now = tick2_start + INTERVAL_SECONDS
+        await leader.tick()
 
     asyncio.run(ticks())
 
-    assert store.calls == ["runs", "blobs", "runs", "blobs"]
-
-
-def test_a_tick_cut_off_by_its_budget_goes_on_at_the_next_tick() -> None:
-    clock = _Clock()
-    store = _Store(clock, runs=(100, 100), cost=_DAY)
-    task = _leader(store, clock)
-
-    async def ticks() -> None:
-        await task.tick()
-        assert store.calls == ["runs"]
-        await task.tick()
-
-    asyncio.run(ticks())
-
-    assert store.calls == ["runs", "runs"]
-
-
-def test_a_failed_pass_stays_inside_the_tick_and_waits_for_the_interval(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    clock = _Clock()
-    store = _Store(clock, runs=(RuntimeError("database"), 0))
-    task = _leader(store, clock)
-
-    async def ticks() -> None:
-        await task.tick()
-        await task.tick()
-        assert store.calls == ["runs"]
-        clock.now += _INTERVAL
-        await task.tick()
-
-    with caplog.at_level(logging.ERROR):
-        asyncio.run(ticks())
-
-    assert store.calls == ["runs", "runs", "blobs"]
-    assert store.commits == 2
-    assert "Leader task run_data_retention failed" in caplog.text
-
-
-def test_a_hung_pass_times_out_inside_the_tick_and_waits_for_the_interval(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(common_leader_tasks, "TICK_BUDGET_SECONDS", 0.01)
-    monkeypatch.setattr(common_leader_tasks, "TASK_TIMEOUT_MARGIN_SECONDS", 0.01)
-    clock = _Clock()
-    store = _Store(clock)
-    task = _leader(store, clock)
-    calls = 0
-
-    async def hang(before: datetime, now: datetime, limit: int) -> int:
-        nonlocal calls
-        calls += 1
-        await asyncio.Event().wait()
-        return 0
-
-    monkeypatch.setattr(store, "purge_expired_runs", hang)
-
-    async def ticks() -> None:
-        await task.tick()
-        await task.tick()
-
-    asyncio.run(ticks())
-
-    assert calls == 1
-
-
-def test_a_cancelled_pass_cancels_the_tick() -> None:
-    clock = _Clock()
-    store = _Store(clock, runs=(asyncio.CancelledError(),))
-
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(_leader(store, clock).tick())
+    assert store.calls == ["runs", "runs", "runs", "blobs", "runs", "blobs"]
 
 
 class _Leader:

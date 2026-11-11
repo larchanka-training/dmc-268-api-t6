@@ -1169,12 +1169,14 @@ async def _run_worker(
                 gateway=gateway,
                 provider_factory=provider_factory,
                 delays=delays,
-                # Converge, GC, TTL purge and run data retention touch only the database.
-                # Reconcile and wake-up dispatch use the configured provider consumer;
-                # all scheduled leader tasks share one tick budget (#556).
+                # Order inside the shared 10s tick budget (#556): index tasks run first
+                # (`reconcile` consumes remaining index headroom), followed by hourly
+                # `run_data_retention`. If `reconcile` drains the tick budget,
+                # `run_data_retention` keeps its gate open and will run on subsequent
+                # ticks after index tasks; `BitbucketStatusReconciler` runs right after.
                 leader_tasks=LeaderTasks(
                     [
-                        *index_leader_tasks(settings.code_index, session_factory, index).tasks,
+                        *index_leader_tasks(settings.code_index, session_factory, index),
                         run_data_retention_scheduled_task(
                             settings.run_data_retention, session_factory
                         ),

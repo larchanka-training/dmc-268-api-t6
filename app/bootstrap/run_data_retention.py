@@ -59,4 +59,5 @@ def run_data_retention_scheduled_task(
         "run_data_retention",
         run_data_retention_task(settings, session_factory),
         INTERVAL_SECONDS,
+        continue_after_timeout=False,
     )

@@ -49,17 +49,11 @@ from app.modules.code_index.application.vcs import (
     VcsUnavailable,
 )
 from app.modules.code_index.domain.enums import PurgeReason
+from tests.leader_task_fakes import Clock, Recorder
+from tests.leader_task_fakes import Runs as _Runs
 
 _TTL = timedelta(days=30)
 R1, R2, R3, R4 = (UUID(int=number) for number in range(1, 5))
-
-
-@dataclass
-class Clock:
-    now: float = 0.0
-
-    def __call__(self) -> float:
-        return self.now
 
 
 @dataclass
@@ -276,116 +270,6 @@ def _dispatch(index: Index, clock: Clock, wakeups: Wakeups) -> DispatchIndexWake
 # --- LeaderTasks --------------------------------------------------------------------
 
 
-type _Runs = list[tuple[str, float, float]]
-
-
-@dataclass
-class Recorder:
-    """A task that records when it ran with which budget and spends `cost` seconds."""
-
-    name: str
-    clock: Clock
-    runs: _Runs
-    cost: float = 0.0
-    error: BaseException | None = None
-    remains: bool = False
-
-    async def run(self, budget_seconds: float) -> bool:
-        self.runs.append((self.name, self.clock.now, budget_seconds))
-        self.clock.now += self.cost
-        if self.error is not None:
-            raise self.error
-        return self.remains
-
-
-def test_a_task_runs_on_the_first_tick_and_then_once_its_interval_has_passed() -> None:
-    clock = Clock()
-    runs: _Runs = []
-    tasks = LeaderTasks(
-        [
-            ScheduledTask("ttl", Recorder("ttl", clock, runs), 3_600),
-            ScheduledTask("gc", Recorder("gc", clock, runs), 300),
-        ],
-        clock=clock,
-    )
-
-    for now in (0, 299, 300, 3_599, 3_600):
-        clock.now = now
-        asyncio.run(tasks.tick())
-
-    assert runs == [
-        ("ttl", 0, 10.0),
-        ("gc", 0, 10.0),
-        ("gc", 300, 10.0),
-        ("gc", 3_599, 10.0),
-        ("ttl", 3_600, 10.0),
-    ]
-
-
-def test_a_failing_task_is_logged_and_neither_stops_the_others_nor_the_tick(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    clock = Clock()
-    runs: _Runs = []
-    failing = Recorder("ttl", clock, runs, error=RuntimeError("database is gone"))
-    tasks = LeaderTasks(
-        [ScheduledTask("ttl", failing, 60), ScheduledTask("gc", Recorder("gc", clock, runs), 60)],
-        clock=clock,
-    )
-
-    with caplog.at_level(logging.ERROR):
-        asyncio.run(tasks.tick())
-        clock.now = 30
-        asyncio.run(tasks.tick())
-        clock.now = 60
-        asyncio.run(tasks.tick())
-
-    # The failing task's gate moved on too: it runs once per interval, not every tick.
-    assert runs == [("ttl", 0, 10.0), ("gc", 0, 10.0), ("ttl", 60, 10.0), ("gc", 60, 10.0)]
-    assert [record.getMessage() for record in caplog.records] == [
-        "Leader task ttl failed",
-        "Leader task ttl failed",
-    ]
-
-
-def test_the_tasks_of_a_tick_share_one_deadline() -> None:
-    clock = Clock()
-    runs: _Runs = []
-    tasks = LeaderTasks(
-        [
-            ScheduledTask("ttl", Recorder("ttl", clock, runs, cost=4), 3_600),
-            ScheduledTask("gc", Recorder("gc", clock, runs, cost=7), 300),
-            ScheduledTask("third", Recorder("third", clock, runs), 300),
-        ],
-        clock=clock,
-    )
-
-    asyncio.run(tasks.tick())
-    # The deadline passed during gc: the third task keeps its gate open for the next tick.
-    clock.now = 30
-    asyncio.run(tasks.tick())
-
-    assert runs == [("ttl", 0, 10.0), ("gc", 4, 6.0), ("third", 30, 10.0)]
-
-
-def test_a_task_with_work_left_runs_again_on_the_next_tick() -> None:
-    clock = Clock()
-    runs: _Runs = []
-    busy = Recorder("gc", clock, runs, remains=True)
-    tasks = LeaderTasks([ScheduledTask("gc", busy, 300)], clock=clock)
-
-    for now in (0, 30, 60):
-        clock.now = now
-        asyncio.run(tasks.tick())
-    busy.remains = False
-    for now in (90, 120, 389, 390):
-        clock.now = now
-        asyncio.run(tasks.tick())
-
-    # The gate moves on only after the run at 90 drains: by the interval from its start.
-    assert [now for _, now, _ in runs] == [0, 30, 60, 90, 390]
-
-
 def test_a_hanging_task_times_out_rolls_back_its_unit_and_the_next_task_runs(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -416,98 +300,6 @@ def test_a_hanging_task_times_out_rolls_back_its_unit_and_the_next_task_runs(
     [record] = caplog.records
     assert record.getMessage() == "Leader task gc failed"
     assert record.exc_info is not None and record.exc_info[0] is TimeoutError
-
-
-@dataclass
-class HangsOnce:
-    """A task whose first run hangs until the tick's timeout cancels it."""
-
-    name: str
-    clock: Clock
-    runs: _Runs
-    hung: bool = False
-
-    async def run(self, budget_seconds: float) -> bool:
-        self.runs.append((self.name, self.clock.now, budget_seconds))
-        if not self.hung:
-            self.hung = True
-            await asyncio.Event().wait()
-        return False
-
-
-@pytest.mark.parametrize(
-    ("name", "interval", "continues", "ran_at"),
-    [
-        pytest.param("reconcile", 600, True, [0, 30], id="reconcile-runs-on-the-next-tick"),
-        pytest.param("gc", 300, False, [0, 300], id="gc-waits-its-interval"),
-    ],
-)
-def test_after_a_timeout_only_a_task_that_continues_runs_again_on_the_next_tick(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    name: str,
-    interval: float,
-    continues: bool,
-    ran_at: list[float],
-) -> None:
-    # Real seconds: the timeout runs on the event loop's clock, not on the fake one.
-    monkeypatch.setattr(common_leader_tasks, "TICK_BUDGET_SECONDS", 0.01)
-    monkeypatch.setattr(common_leader_tasks, "TASK_TIMEOUT_MARGIN_SECONDS", 0.05)
-    clock = Clock()
-    runs: _Runs = []
-    tasks = LeaderTasks(
-        [
-            ScheduledTask(
-                name, HangsOnce(name, clock, runs), interval, continue_after_timeout=continues
-            )
-        ],
-        clock=clock,
-    )
-
-    with caplog.at_level(logging.ERROR):
-        for now in (0, 30, 300):
-            clock.now = now
-            asyncio.run(tasks.tick())
-
-    # The run that drained moves the gate on by the interval from its start.
-    assert [now for _, now, _ in runs] == ran_at
-    [record] = caplog.records
-    assert record.getMessage() == f"Leader task {name} failed"
-    assert record.exc_info is not None and record.exc_info[0] is TimeoutError
-
-
-def test_a_timeout_error_the_task_raises_itself_moves_the_gate_of_a_task_that_continues() -> None:
-    clock = Clock()
-    runs: _Runs = []
-    raising = Recorder("reconcile", clock, runs, error=TimeoutError("the listing timed out"))
-    tasks = LeaderTasks(
-        [ScheduledTask("reconcile", raising, 600, continue_after_timeout=True)], clock=clock
-    )
-
-    for now in (0, 30, 600):
-        clock.now = now
-        asyncio.run(tasks.tick())
-
-    # Only the tick's own timeout keeps the gate open; this error is a failure.
-    assert [now for _, now, _ in runs] == [0, 600]
-
-
-def test_a_cancellation_in_a_task_propagates_out_of_the_tick() -> None:
-    clock = Clock()
-    runs: _Runs = []
-    tasks = LeaderTasks(
-        [
-            ScheduledTask("ttl", Recorder("ttl", clock, runs, error=asyncio.CancelledError()), 60),
-            ScheduledTask("gc", Recorder("gc", clock, runs), 60),
-        ],
-        clock=clock,
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(tasks.tick())
-
-    # A shutdown or a lost leader lock: no later task starts.
-    assert runs == [("ttl", 0, 10.0)]
 
 
 # --- PurgeUnusedIndexes -------------------------------------------------------------

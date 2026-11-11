@@ -27,6 +27,7 @@ from app.bootstrap.llm_gateway import build_gateway as original_build_gateway
 from app.common.application.leader_tasks import LeaderTasks, ScheduledTask
 from app.modules.reviews.application.handle_review_run import ClaimedAttempt, DeliveryOutcome
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, StoredRunMessage
+from app.modules.reviews.application.run_data_retention import INTERVAL_SECONDS, PurgeExpiredRunData
 from app.modules.reviews.application.run_delivery import (
     HandleRunDelivery,
     PersistedRunIdentity,
@@ -793,9 +794,11 @@ def test_run_worker_hands_the_index_leader_tasks_to_the_worker_process(
     leader = composed["leader_tasks"]
     assert isinstance(leader, LeaderTasks)
     assert [task.name for task in leader.tasks] == [*names, "run_data_retention"]
+    assert isinstance(leader.tasks[-1].task, PurgeExpiredRunData)
+    assert leader.tasks[-1].continue_after_timeout is False
     intervals = {task.name: task.interval_seconds for task in leader.tasks}
     assert intervals["gc"] == 120
-    assert intervals["run_data_retention"] == 3_600
+    assert intervals["run_data_retention"] == INTERVAL_SECONDS
 
 
 LLM_ENV = {

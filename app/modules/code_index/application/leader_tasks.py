@@ -17,8 +17,8 @@ The worker leader runs them from `leader_tick`, after the sweep and the outbox r
   publication or outdated versions, but not again for a head the job refused with a
   terminal code (ADR §6.1, leader reconcile row).
 
-All of them implement [`LeaderTask`](../../common/application/leader_tasks.py) and run inside
-the worker's shared [`LeaderTasks`](../../common/application/leader_tasks.py) scheduler.
+All of them implement [`LeaderTask`](../../../common/application/leader_tasks.py) and run inside
+the worker's shared [`LeaderTasks`](../../../common/application/leader_tasks.py) scheduler.
 Every store call is a short transaction of its own; a wake-up and a head read run
 outside any transaction.
 """

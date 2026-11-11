@@ -33,7 +33,7 @@ from aio_pika.abc import AbstractIncomingMessage, AbstractQueue, AbstractRobustC
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bootstrap.environment import positive_integer
-from app.common.application.leader_tasks import LeaderTasks, ScheduledTask
+from app.common.application.leader_tasks import ScheduledTask
 from app.common.infrastructure.amqp_consumer import consume_queue
 from app.modules.code_index.application.build_index import (
     BuildRepositoryIndex,
@@ -316,7 +316,7 @@ def index_leader_tasks(
     settings: CodeIndexSettings,
     session_factory: async_sessionmaker[AsyncSession],
     consumer: IndexConsumer | None,
-) -> LeaderTasks:
+) -> list[ScheduledTask]:
     """The index tasks of the worker leader (#143, ADR 0001 §4-§6).
 
     Converge, garbage collection and the TTL purge touch only the database and always
@@ -364,7 +364,7 @@ def index_leader_tasks(
                 continue_after_timeout=True,
             )
         )
-    return LeaderTasks(tasks)
+    return tasks
 
 
 class IndexWorkerSettings(Protocol):

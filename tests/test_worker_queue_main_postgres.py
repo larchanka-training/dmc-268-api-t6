@@ -30,7 +30,6 @@ from sqlalchemy.ext.asyncio import (
 
 import app.modules.code_index.infrastructure.amqp as index_amqp
 import app.worker as worker_module
-from app.common.application.leader_tasks import LeaderTasks
 from app.modules.reviews.application.reconcile_runs import ReconcileRuns
 from app.modules.reviews.application.run_failures import RetryDelays
 from app.modules.reviews.infrastructure.amqp import (
@@ -505,7 +504,7 @@ def test_main_worker_stop_releases_persisted_leases_before_connection_close_and_
         monkeypatch.setattr(worker_module, "amqp_channels", observed_channels)
         # The leader's index tasks are not under test: converge would purge this index,
         # whose repository has RAG off (ADR §6.1), and fence out the active job.
-        monkeypatch.setattr(worker_module, "index_leader_tasks", lambda *args: LeaderTasks([]))
+        monkeypatch.setattr(worker_module, "index_leader_tasks", lambda *args: [])
         task: asyncio.Task[None] | None = None
         try:
             async with asyncio.timeout(25):
