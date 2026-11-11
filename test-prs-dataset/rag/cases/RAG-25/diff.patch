@@ -1,0 +1,23 @@
+diff --git a/booklend/catalog.py b/booklend/catalog.py
+index 8feaff7..d59b357 100644
+--- a/booklend/catalog.py
++++ b/booklend/catalog.py
+@@ -2,4 +2,5 @@
+ 
+ 
+ def slip_title(title: str) -> str:
++    """Return the title trimmed and capitalised, as printed on slips."""
+     return title.strip().title()
+diff --git a/booklend/loans.py b/booklend/loans.py
+index 55e0f07..bd90a95 100644
+--- a/booklend/loans.py
++++ b/booklend/loans.py
+@@ -5,6 +5,6 @@ from datetime import date, timedelta
+ from .records import LOANS
+ 
+ 
+-def extend_due_date(loan_id: str) -> date:
++def extend_due_date(loan_id: str, days: int) -> date:
+     loan = LOANS[loan_id]
+-    return loan.due + timedelta(days=7)
++    return loan.due + timedelta(days=days)
