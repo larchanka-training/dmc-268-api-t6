@@ -237,4 +237,4 @@ Fallback и repair: 0 из 144 вызовов. В каждом из шести �
 
 ## 8. Дальше
 
-Техлид принял FAIL и не планирует v2: [решение в #139](https://github.com/larchanka-training/dmc-268-api-t6/issues/139#issuecomment-6644434085), #147 закрыт как not planned. AC #146 об инъекциях перенесён в #498 решением техлида: защита нужна и для v1, потому что `rag_enabled` можно включить на репозитории.
+Техлид принял FAIL и не планирует v2: [решение в #139](https://github.com/larchanka-training/dmc-268-api-t6/issues/139#issuecomment-6644434085), #147 закрыт как not planned. AC #146 об инъекциях перенесён в #498 решением техлида: защита нужна и для v1, потому что `rag_enabled` можно включить на репозитории. Замер защиты на промпте v7: [RAG_V7_INJECTION_REPORT.md](RAG_V7_INJECTION_REPORT.md).

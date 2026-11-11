@@ -82,7 +82,7 @@ for d in test-prs-dataset/rag/responses/*/; do
 done
 ```
 
-`reports/gate.json` is the gate script's output over these six captures, run without `--oracle` (the tech lead's decision of #498: the hallucination condition stays `undefined`).
+`reports/gate.json` is the gate script's output over these six captures, run without `--oracle` (the tech lead's decision of #498: the hallucination condition stays `undefined`). The injection measurement and its reading are in [the v7 report](../../docs/test-plan/RAG_V7_INJECTION_REPORT.md); `tests/test_rag_report_v7.py` pins its numbers to `gate.json` and the manifests.
 
 `reports/146-v5/` is the frozen record of the accepted #146 eval (prompt v5, 24 cases): its six captures (`responses/`, run ids 41720614606, 41724358586, 41725329228 for arm A and 41720730389, 41724449009, 41725470313 for arm B), the gate output ([`gate.json`](reports/146-v5/gate.json)) and the hallucination oracle (`oracle/`). It is never edited; the live captures are compared against it. The recorded result and the computed gate verdict of #146 are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md); `reports/146-v5/oracle/hallucination.json` is the oracle the gate took with `--oracle`: the 34 of 76 findings of the valid answers the tech lead confirmed in the second pass over all 76 findings on 2026-11-08 (part 1 partly pre-labelled by an LLM, every mark checked by hand); the decisions are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md#оракул-галлюцинаций).
 
