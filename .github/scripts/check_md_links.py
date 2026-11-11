@@ -46,6 +46,8 @@ LINK_TEXT = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 AUTOLINK = re.compile(r"<([A-Za-z][A-Za-z0-9+.-]*:[^<>\s]*)>")
 TAG = re.compile(r"</?[A-Za-z][^<>]*>")
 ESCAPE = re.compile(r"\\([!-/:-@\[-`{-~])")
+# Escapes pair left to right, so `\\[` is a backslash and a live bracket.
+ESCAPED_PAIR = re.compile(r"\\(.)")
 UNDERSCORE_EMPHASIS = re.compile(r"(?<![^\W_])(_+)(?=\S)(.+?)(?<=\S)\1(?![^\W_])")
 
 
@@ -74,15 +76,27 @@ def _prose_lines(text: str) -> Iterator[tuple[int, str]]:
 
 
 def _inline_text(markdown: str) -> str:
-    text = IMAGE.sub("", markdown)
+    # An escaped character is literal text: hold it as a private-use character until the rest of
+    # the Markdown is gone, so that `\_` is no emphasis and `\[` no link.
+    escaped: list[str] = []
+
+    def hold(match: re.Match[str]) -> str:
+        escaped.append(match.group(1))
+        return chr(0xE000 + len(escaped) - 1)
+
+    text = ESCAPE.sub(hold, markdown)
+    text = IMAGE.sub("", text)
     text = LINK_TEXT.sub(r"\1", text)
     text = AUTOLINK.sub(r"\1", text)
     text = TAG.sub("", text)
-    text = ESCAPE.sub(r"\1", text)
     previous = None
     while previous != text:
         previous, text = text, UNDERSCORE_EMPHASIS.sub(r"\2", text)
-    return html.unescape(text)
+    text = html.unescape(text)
+    return "".join(
+        escaped[ord(char) - 0xE000] if 0xE000 <= ord(char) < 0xE000 + len(escaped) else char
+        for char in text
+    )
 
 
 def _heading_text(markdown: str) -> str:
@@ -126,6 +140,10 @@ def _anchors(text: str) -> set[str]:
 
 def _targets(line: str) -> list[str]:
     prose = CODE_SPAN.sub(lambda match: " " * len(match.group(0)), line)
+    # An escaped bracket or parenthesis is text, never part of a link.
+    prose = ESCAPED_PAIR.sub(
+        lambda match: "  " if match.group(1) in "[]()" else match.group(0), prose
+    )
     found = [match.group(1) for match in INLINE_LINK.finditer(prose)]
     reference = REFERENCE.match(prose)
     if reference:
