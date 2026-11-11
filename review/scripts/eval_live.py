@@ -23,16 +23,17 @@ usage of every paid call. --responses-dir keeps arms and repeated runs apart.
 
 Every arm except ``legacy`` binds the version and SHA-256 of the --system prompt it sends,
 as production binds the pinned prompt row; a version with a pin must be the pinned file and
-must have a known answer schema. ``legacy`` refuses a snapshot-path prompt (v4/v5), which is
-only reviewed with a policy snapshot. All three checks run before the first call.
+must have a known answer schema. ``legacy`` refuses a snapshot-path prompt (v4, v5, v7), which
+is only reviewed with a policy snapshot. All three checks run before the first call.
 
 --rag-arm (#146) records the RAG A/B over a root of RAG cases (``class: rag``): ``none`` is arm
 A, ``graph`` arm B. Both run the production context build offline (``eval_rag_context``) and
-review.system v5 with policy arm ``none`` on the fast engine; ``--system`` must be the pinned v5
-file. The manifest then also records, per case, the review call's latency and an evidence record
-of the prompt the gateway really sent (rebuilt from its context and checked byte for byte against
-the first request), and for the run the RAG arm, the digest of every ``index.json`` and the
-synthetic revision ids. Nothing of this is written for the other corpora.
+the review.system version of ``--system`` with policy arm ``none`` on the fast engine; it must
+be the pinned file of a version with a retrieved section (v5, v7). The manifest then also
+records, per case, the review call's latency and an evidence record of the prompt the gateway
+really sent (rebuilt from its context and checked byte for byte against the first request),
+and for the run the RAG arm, the digest of every ``index.json`` and the synthetic revision
+ids. Nothing of this is written for the other corpora.
 
 Every manifest records ``run_metadata.static_digest_without_prompt`` (#317): the prompt file is a
 static input, so two prompt versions never share ``static_digest``, and this digest of the other
@@ -892,8 +893,9 @@ def _check_rag_corpus(
     """The validated RAG arm of a RAG corpus, ``None`` for any other; refuse a wrong RAG
     configuration before any call.
 
-    The offline build fixes what a RAG case sends: review.system v5 under policy arm ``none``
-    on the fast engine. Both arms must run exactly that, so anything else is an error here.
+    The offline build fixes what a RAG case sends: a review.system version with a retrieved
+    section under policy arm ``none`` on the fast engine. Both arms must run exactly that, so
+    anything else is an error here.
     """
     rag_ids = [record["id"] for _, record in records if record["class"] == "rag"]
     if not rag_ids:
@@ -915,14 +917,19 @@ def _check_rag_corpus(
 
 
 def _check_rag_system(inputs: _CaptureInputs) -> None:
-    """``--system`` must be the very file the offline build renders, or ``prompt_sha`` of the
-    manifest would not be the prompt of the calls."""
-    from review.scripts.eval_rag_context import SYSTEM_PROMPT_V5
+    """``--system`` must be a version with a retrieved section and the very file the offline
+    build renders for it, or ``prompt_sha`` of the manifest would not be the prompt of the
+    calls."""
+    from review.scripts.eval_rag_context import system_prompt
 
-    if inputs.prompt_sha != hashlib.sha256(SYSTEM_PROMPT_V5.read_bytes()).hexdigest():
+    try:
+        built = system_prompt(inputs.prompt_version)
+    except ValueError as exc:
+        raise RecorderError(f"{inputs.prompt_path}: {exc}") from exc
+    if inputs.prompt_sha != hashlib.sha256(built.read_bytes()).hexdigest():
         raise RecorderError(
             f"{inputs.prompt_path} differs from the prompt the RAG build sends "
-            f"({SYSTEM_PROMPT_V5.name}); use the pinned file"
+            f"({built.name}); use the pinned file"
         )
 
 
@@ -931,6 +938,7 @@ async def _rag_inputs(
     rag_arm: str,
     settings: LlmSettings,
     commit_context: Mapping[str, CommitMessagePrefix],
+    version: str,
 ) -> dict[str, ReviewCase]:
     """Build every RAG case's input offline, before the first call (any error stops the run)."""
     # Imported here: the offline build loads the parser and the indexer, which the main and
@@ -946,7 +954,7 @@ async def _rag_inputs(
             raise RecorderError(f"case {case_id}: a RAG case cannot carry commit messages")
         try:
             inputs[case_id] = await build_case_input(
-                case_dir, arm, review_model=settings.primary.model
+                case_dir, arm, review_model=settings.primary.model, version=version
             )
         except (OSError, ValueError, PolicyError) as exc:
             raise RecorderError(f"invalid RAG case {case_id}: {exc}") from exc
@@ -1180,11 +1188,6 @@ async def record_live(
         pinned_defaults=policy_arm != "legacy",
         rag_code=rag,
     )
-    if rag and inputs.prompt_version != "v5":
-        # The offline build always renders the v5 file (the only one with a retrieved section).
-        raise RecorderError(
-            f"the RAG arms run review.system.v5, not {inputs.prompt_path} ({inputs.prompt_version})"
-        )
     if rag:
         _check_rag_system(inputs)
     prompt_bindings = _prompt_bindings(inputs, policy_arm)
@@ -1206,7 +1209,9 @@ async def record_live(
     }
     policy_arm_digest = _policy_arm_digest(root, records, policy_arm)
     rag_inputs = (
-        await _rag_inputs(records, rag_run, settings, commit_context) if rag_run is not None else {}
+        await _rag_inputs(records, rag_run, settings, commit_context, inputs.prompt_version)
+        if rag_run is not None
+        else {}
     )
     rag_records: dict[str, _RagRecord] = {}
     statuses: dict[str, dict[str, str | bool | None]] = {}

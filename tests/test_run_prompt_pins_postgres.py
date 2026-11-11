@@ -602,8 +602,8 @@ def test_historical_run_keeps_todays_pins_and_digest(env: Env) -> None:
         ),
         pytest.param(
             True,
-            "v5",
-            "3bd7d39939b60d0c16b08090a4d3e5f0cbdb8a731fa4bde91bd6570546e085c9",
+            "v7",
+            "b5cdaac4f6185a3986942755f18f2543e5be3b41452ca2a8e4ffc8c6d0a49af9",
             id="full-seed",
         ),
     ],

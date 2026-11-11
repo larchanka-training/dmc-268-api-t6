@@ -154,7 +154,7 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 | `app/modules/reviews/application/llm.py` | `LlmCallRecord.response` holds the envelope the recorder reads; `LlmErrorCode` values are the recorded `gateway_status` replay's publishability check reads. |
 | `app/modules/reviews/application/prompt_budget.py` | Chooses whole, truncated, and omitted diff files. |
 | `app/modules/reviews/application/prompt_builder.py` | Renders the system/user message envelope, including commit lines. |
-| `app/modules/reviews/application/rag_index.py` | `has_retrieved_section` decides which bound review prompt versions (v5) show the `<retrieved_excerpts>` section; eval has no RAG index, so it is empty. |
+| `app/modules/reviews/application/rag_index.py` | `has_retrieved_section` decides which bound review prompt versions (v5, v7) show the `<retrieved_excerpts>` section; eval has no RAG index, so it is empty. |
 | `app/modules/reviews/application/review_output.py` | Parses and validates review output; a failure triggers repair. |
 | `app/modules/reviews/application/review_path.py` | `SNAPSHOT_REVIEW_PROMPT_VERSIONS` decides which bound review prompt versions get the ReviewOutput v2 schema. |
 | `app/modules/reviews/application/run_failures.py` | Deliberately wide. Only `FAST_ATTEMPT_DEADLINE` (`run_failures.py:17`) shapes the eval, through `CASE_DEADLINE["fast"]` (`llm_gateway.py:147`): the gateway refuses a call with less than one call timeout left (`gateway.py:334-341`) and skips a same-model retry that would leave less (`gateway.py:278-281`). `llm.py:17` also imports `RETRYABLE_ERROR_CODES` for `LlmCallFailed.run_retryable`, which the eval never calls. The rest is worker retry, lease and failure-code policy: its edits do not shape the eval but still cause static drift. |
@@ -1270,8 +1270,8 @@ manual workflow:
    prompt each arm takes.
 3. Select the prompt with `review_prompt`, or with `review_prompt_file` for a file the choice does
    not list. That input takes a file directly in `review/prompts/` with `key: review.system`. It
-   overrides `review_prompt` and is refused with corpus `rag`, whose arms fix v5. Left empty, it
-   changes nothing.
+   overrides `review_prompt` and is refused with corpus `rag`, whose arms take their prompt from
+   `review_prompt` (v5 or v7). Left empty, it changes nothing.
 4. Aggregate the downloaded reports. Name the arms after the prompts: a label that is a policy
    arm must match the arm the report was captured with.
 

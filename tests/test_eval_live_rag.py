@@ -50,6 +50,7 @@ from tests.rag_case_fakes import _rag_metadata
 from tests.test_eval_live import INVALID, fixture_root
 
 SYSTEM_V5 = REPO_ROOT / "review" / "prompts" / "review.system.v5.md"
+SYSTEM_V7 = REPO_ROOT / "review" / "prompts" / "review.system.v7.md"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "rag_eval"
 CASES = {"RAG-01": ("spike", "reverse_edge"), "RAG-02": ("clean", "clean")}
 
@@ -240,10 +241,11 @@ def refusal_cases() -> Iterator[Any]:
     yield pytest.param({"policy_arm": "legacy"}, "--policy-arm none", id="policy-legacy")
     yield pytest.param({"policy_arm": "valid"}, "--policy-arm none", id="policy-valid")
     yield pytest.param({"engine": "deep"}, "fast engine", id="deep-engine")
+    # No v6 is packaged: its A/B drafts (#399) keep the number.
     for version in ("v2", "v3", "v4"):
         yield pytest.param(
             {"system_prompt": REPO_ROOT / "review" / "prompts" / f"review.system.{version}.md"},
-            "review.system.v5",
+            "retrieved section",
             id=f"prompt-{version}",
         )
 
@@ -321,7 +323,7 @@ def window_without_rag(root: Path, case_id: str) -> LlmSettings:
     """
     configured = settings()
     context = asyncio.run(
-        build_arm_input(root / "cases" / case_id, "B", review_model="primary-model")
+        build_arm_input(root / "cases" / case_id, "B", review_model="primary-model", version="v5")
     ).context
     assert context.retrieved
     counter = token_counter_for("counter/v2")
@@ -416,6 +418,53 @@ def test_a_fallback_call_is_flagged_on_its_case(tmp_path: Path) -> None:
     assert evidence["fallback_called"] is True
     # The evidence is of the first request, the one the recorded answer belongs to.
     assert evidence["prompt_digest"] == PROMPT_RAG_01
+
+
+def test_a_v7_capture_hides_retrieved_comments_and_replays_on_v7(tmp_path: Path) -> None:
+    """The recorder takes the version from --system and the replay from the manifest: a
+    replay that rebuilt the evidence on another version would not match the recorded one."""
+    from review.scripts.eval_replay import replay
+
+    root = rag_root(tmp_path)
+    transport = valid_answers()
+
+    manifest = record_rag(root, transport, "graph", system_prompt=SYSTEM_V7)
+
+    assert (manifest["prompt_version"], manifest["prompt_path"]) == (
+        "v7",
+        "review/prompts/review.system.v7.md",
+    )
+    assert {request.messages[0].content for request in transport.requests} == {
+        SYSTEM_V7.read_text(encoding="utf-8")
+    }
+    assert replay(root)["validity"] == 1.0
+
+
+def test_a_rag_capture_of_a_prompt_without_a_retrieved_section_is_not_replayed(
+    tmp_path: Path,
+) -> None:
+    """The recorder refuses such a prompt, so only an edited manifest names one: its replay
+    stops on the manifest, before the offline build of any case would fail on it."""
+    from review.scripts.eval_replay import ReplayError, replay
+
+    root = rag_root(tmp_path)
+    record_rag(root, valid_answers(), "graph")
+    path = root / "responses" / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    v4 = REPO_ROOT / "review" / "prompts" / "review.system.v4.md"
+    manifest.update(
+        prompt_path="review/prompts/review.system.v4.md",
+        prompt_sha=hashlib.sha256(v4.read_bytes()).hexdigest(),
+        prompt_version="v4",
+    )
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ReplayError) as refused:
+        replay(root)
+    assert str(refused.value).startswith(
+        "a RAG capture of review/prompts/review.system.v4.md: review.system v4 has no "
+        "retrieved section"
+    )
 
 
 def test_the_capture_replays_without_the_rag_fields_being_rejected(tmp_path: Path) -> None:
@@ -521,20 +570,21 @@ def test_the_patch_is_read_as_bytes_so_every_line_ending_survives(tmp_path: Path
     assert case.diff == patch
 
 
-def test_eval_live_and_the_rag_arm_bind_the_same_prompt_pins() -> None:
+@pytest.mark.parametrize("version", ["v5", "v7"])
+def test_eval_live_and_the_rag_arm_bind_the_same_prompt_pins(version: str) -> None:
     """One construction of the prompt bindings: a copy would let the arms drift apart."""
-    system = SYSTEM_V5.read_bytes()
+    system = (REPO_ROOT / "review" / "prompts" / f"review.system.{version}.md").read_bytes()
     inputs = cast(
         Any,
         SimpleNamespace(
-            prompt_version="v5",
+            prompt_version=version,
             prompt_sha=hashlib.sha256(system).hexdigest(),
-            prompt_path="review/prompts/review.system.v5.md",
+            prompt_path=f"review/prompts/review.system.{version}.md",
         ),
     )
 
     recorder = eval_live_module._prompt_bindings(inputs, "none")
-    rag = _policy_snapshot(system, "primary-model").prompt_bindings
+    rag = _policy_snapshot(system, "primary-model", version).prompt_bindings
 
     assert recorder == rag
 
@@ -596,7 +646,9 @@ def test_a_later_request_that_does_not_start_with_the_first_prompt_stops_the_cap
     tmp_path: Path,
 ) -> None:
     root = rag_root(tmp_path, {"RAG-01": ("spike", "reverse_edge")})
-    arm = asyncio.run(build_arm_input(root / "cases" / "RAG-01", "B", review_model="primary-model"))
+    arm = asyncio.run(
+        build_arm_input(root / "cases" / "RAG-01", "B", review_model="primary-model", version="v5")
+    )
     first = (("system", arm.prompt.system), ("user", arm.prompt.user))
     tap = eval_live_module._FirstRequestTap(None)
 
@@ -626,12 +678,14 @@ def test_a_system_file_other_than_the_one_the_rag_build_sends_fails_before_any_c
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Whatever the pin says, the manifest's ``prompt_sha`` must be of the bytes sent."""
-    other = tmp_path / "review.system.v5.md"
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    other = prompts / "review.system.v5.md"
     other.write_bytes(SYSTEM_V5.read_bytes() + b"\nExtra.\n")
     monkeypatch.setitem(
         PINNED_PROMPT_CHECKSUMS, "review.system:v5", hashlib.sha256(other.read_bytes()).hexdigest()
     )
-    monkeypatch.setattr(eval_rag_context_module, "SYSTEM_PROMPT_V5", other)
+    monkeypatch.setattr(eval_rag_context_module, "PROMPTS", prompts)
     transport = valid_answers()
 
     with pytest.raises(eval_live_module.RecorderError, match="differs from the prompt the RAG"):

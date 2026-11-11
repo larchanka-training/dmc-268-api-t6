@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from app.modules.reviews.application.rag_index import RETRIEVED_PROMPT_VERSIONS
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github/workflows/eval-live.yml"
 
@@ -333,14 +335,15 @@ def _assert_selection_contract(text: str) -> None:
     # v3 by default: the default legacy arm refuses the snapshot-path v4/v5 (eval_live.py).
     assert (
         "      review_prompt:\n"
-        '        description: "Review prompt: v3, or v4 or v5 (snapshot path: needs policy_arm '
-        'none, or valid or malicious with corpus rules; corpus rag needs v5)"\n'
+        '        description: "Review prompt: v3, or v4, v5 or v7 (snapshot path: needs policy_arm '
+        'none, or valid or malicious with corpus rules; corpus rag needs v5 or v7)"\n'
         "        required: false\n"
         "        type: choice\n"
         "        options:\n"
         "          - v3\n"
         "          - v4\n"
         "          - v5\n"
+        "          - v7\n"
         "        default: v3\n"
     ) in text
     assert "      EVAL_CORPUS: ${{ inputs.corpus || 'main' }}\n" in text
@@ -442,6 +445,7 @@ def test_manual_workflow_security_and_selection_contract() -> None:
         ("${{ inputs.policy_arm || 'legacy' }}", "legacy"),
         ("          - v4\n", ""),
         ("          - v5\n", ""),
+        ("          - v7\n", ""),
         ("        default: v3\n", "        default: v4\n"),
         (
             "    type: choice\n        options:\n          - v3",
@@ -822,11 +826,12 @@ def _validate(
     return _run("Validate corpus", tmp_path, env)
 
 
+@pytest.mark.parametrize("prompt", ["v5", "v7"])
 @pytest.mark.parametrize("arm", ["none", "graph"])
-def test_validate_runs_the_rag_profile_for_a_v5_policy_none_rag_run(
-    tmp_path: Path, arm: str
+def test_validate_runs_the_rag_profile_for_a_policy_none_rag_run(
+    tmp_path: Path, arm: str, prompt: str
 ) -> None:
-    result = _validate(tmp_path, "rag", "none", "v5", arm)
+    result = _validate(tmp_path, "rag", "none", prompt, arm)
 
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "args").read_text().splitlines() == [
@@ -844,8 +849,10 @@ def test_validate_runs_the_rag_profile_for_a_v5_policy_none_rag_run(
 @pytest.mark.parametrize(
     ("policy", "prompt", "arm", "message"),
     [
-        ("none", "v3", "none", "review_prompt v5"),
-        ("none", "v4", "graph", "review_prompt v5"),
+        ("none", "v3", "none", "review_prompt v5 or v7"),
+        ("none", "v4", "graph", "review_prompt v5 or v7"),
+        # No v6 is packaged: its A/B drafts (#399) keep the number.
+        ("none", "v6", "graph", "review_prompt v5 or v7"),
         ("legacy", "v5", "none", "policy_arm none"),
         ("valid", "v5", "graph", "policy_arm none"),
         ("malicious", "v5", "none", "policy_arm none"),
@@ -869,7 +876,7 @@ def test_validate_refuses_a_missing_rag_arm_and_prompt(tmp_path: Path) -> None:
     assert "rag_arm none or graph" in unset_arm.stderr
     unset_prompt = _validate(tmp_path, "rag", "none", None, "none")
     assert unset_prompt.returncode == 1
-    assert "review_prompt v5" in unset_prompt.stderr
+    assert "review_prompt v5 or v7" in unset_prompt.stderr
     assert not (tmp_path / "args").exists()
 
 
@@ -1056,7 +1063,7 @@ def test_validate_tells_the_checked_in_prompts_apart_by_their_key(prompt: str) -
 
 
 def test_validate_refuses_the_file_input_on_the_rag_corpus(tmp_path: Path) -> None:
-    """The guard of the corpus step reads review_prompt only, and the RAG arms fix v5."""
+    """The guard of the corpus step reads review_prompt only: a RAG run names its prompt there."""
     _prompt_tree(tmp_path)
 
     result = _run(
@@ -1066,7 +1073,18 @@ def test_validate_refuses_the_file_input_on_the_rag_corpus(tmp_path: Path) -> No
     )
 
     assert result.returncode == 1
-    assert "corpus rag fixes review_prompt v5" in result.stderr
+    assert "corpus rag takes its prompt from review_prompt" in result.stderr
+
+
+def test_the_rag_guard_admits_the_versions_with_a_retrieved_section() -> None:
+    """The workflow refuses a RAG prompt before the corpus is provisioned; eval_live.py refuses
+    the same set later, so the two lists are one."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    [admitted] = re.findall(r'"\$\{EVAL_REVIEW_PROMPT:-\}" =~ \^\(([^)]*)\)\$', text)
+
+    assert set(admitted.split("|")) == {
+        version for key, version in RETRIEVED_PROMPT_VERSIONS if key == "review.system"
+    }
 
 
 @pytest.mark.parametrize("corpus", ["main", "rules"])
