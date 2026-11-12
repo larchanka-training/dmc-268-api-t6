@@ -12,7 +12,12 @@ from uuid import UUID
 
 import pytest
 
-from app.modules.reviews.application.check_runs import failure_reason
+from app.modules.reviews.application.check_runs import (
+    CheckRunReport,
+    CheckRunTarget,
+    check_run_view,
+    failure_reason,
+)
 from app.modules.reviews.application.conventions import CachedConventions, GeneratedConventions
 from app.modules.reviews.application.execute_review import (
     ExecuteReviewRun,
@@ -56,6 +61,11 @@ from app.modules.reviews.application.review_output import (
 )
 from app.modules.reviews.application.review_path import ReviewBinding
 from app.modules.reviews.application.run_failures import RunFailure, classify_failure
+from app.modules.reviews.application.store_review_output import (
+    NoModelAnswer,
+    PublishingGuard,
+    StoreReviewOutput,
+)
 from app.modules.reviews.application.verdict import SeverityThresholdValue, severity_counts
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
@@ -4178,3 +4188,340 @@ def test_execute_review_snapshot_warning_keeps_supported_low_and_drops_info() ->
         ),
         "effort": "small",
     }
+
+
+def _overflow_store(
+    snapshots: list[Any],
+    *,
+    snapshot_path: bool = True,
+) -> tuple[Any, StoreReviewOutput, list[Any], list[Any]]:
+    from dataclasses import dataclass, field
+    from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
+    from app.modules.reviews.application.post_processing_diff_map import diff_map_from_snapshots
+    from app.modules.reviews.application.queue_messages import ReviewPublishPointer
+    from app.modules.reviews.application.review_output import (
+        FindingPostProcessingInput,
+        ReviewOutput,
+        ReviewPublication,
+    )
+    from app.modules.reviews.application.run_coverage import project_run_coverage
+
+    coverage = project_run_coverage(
+        snapshots,
+        diff_map_from_snapshots(
+            repository_id=UUID(int=1),
+            code_change_number=7,
+            head_sha="a" * 40,
+            base_sha="b" * 40,
+            diff_old_sha="c" * 40,
+            snapshots=snapshots,
+        ),
+        snapshot_path=snapshot_path,
+    )
+
+    @dataclass
+    class _Repo:
+        answers: list[dict[str, object] | None] = field(default_factory=list)
+        response: dict[str, Any] = field(default_factory=dict)
+        body: str = ""
+        state: str = "running"
+
+        async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
+            return FindingPostProcessingInput(
+                diff_map_from_snapshots(
+                    repository_id=UUID(int=1),
+                    code_change_number=7,
+                    head_sha="a" * 40,
+                    base_sha="b" * 40,
+                    diff_old_sha="c" * 40,
+                    snapshots=snapshots,
+                ),
+                frozenset(item.filename for item in snapshots if item.review_patch is not None),
+                frozenset(),
+                coverage=coverage,
+            )
+
+        async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
+            return PublishingGuard(self.state, "worker", False, "a" * 40, True, "REQUEST_CHANGES")
+
+        async def store_review_output(
+            self,
+            run_id: UUID,
+            model_output: dict[str, object] | None,
+            parsed: ReviewOutput,
+            processed: ProcessedReviewOutput,
+        ) -> ReviewPublication:
+            self.answers.append(model_output)
+            self.body = processed.review_body
+            self.state = "publishing"
+            return ReviewPublication("a" * 40, (), self.body)
+
+        async def enter_publishing(self, run_id: UUID, *, postprocess_response: dict[str, Any], **_: Any) -> None:
+            self.response = postprocess_response
+
+    @dataclass
+    class _Uow:
+        reviews: _Repo
+
+        async def __aenter__(self) -> _Uow:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            return None
+
+    pointers: list[ReviewPublishPointer] = []
+
+    class _Queue:
+        async def publish_review(self, pointer: ReviewPublishPointer) -> None:
+            pointers.append(pointer)
+
+    repo = _Repo()
+    store = StoreReviewOutput(lambda: _Uow(repo), _Queue(), worker_id="worker", run_url=lambda _: None)
+    published_raw: list[Any] = []
+
+    class _Publisher:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            published_raw.append(raw_output)
+            return await store.execute(run_id, raw_output)
+
+    return repo, _Publisher(), pointers, published_raw
+
+
+def _run_overflow_pipeline(
+    *,
+    snapshots: list[Any],
+    changed_files: tuple[ChangedFile, ...],
+    omitted_files: tuple[str, ...] = (),
+    snapshot: PolicySnapshot | None = None,
+    replies: list[Any],
+    pr_body: str | None = None,
+    with_verifier: bool = True,
+    store_out: tuple[Any, Any, list[Any], list[Any]] | None = None,
+) -> tuple[Any, list[Any], list[Any], Any, bool]:
+    import httpx
+    from app.modules.reviews.infrastructure.llm.models import GatewayReviewModel
+    from tests.test_llm_gateway import Harness
+
+    repo, publisher, pointers, published_raw = store_out or _overflow_store(
+        snapshots, snapshot_path=snapshot is not None
+    )
+    harness = Harness(replies, fallback=None)
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=changed_files,
+                omitted_files=omitted_files,
+                policy_snapshot=snapshot,
+            )
+
+    class Meta:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta(
+                "PR", pr_body, "u", "b", "m", (), len(snapshots), len(snapshots), 0, False, False
+            )
+
+    async def exercise() -> bool:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            model = GatewayReviewModel(harness.gateway(client), harness.run, Meta())
+            pipeline = ExecuteReviewRun(
+                Processor(),
+                Repository(),
+                model,
+                publisher,
+                reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []}))
+                if with_verifier
+                else None,
+            )
+            return await pipeline.execute(RUN_ID)
+
+    outcome = asyncio.run(exercise())
+    return repo, pointers, published_raw, harness, outcome
+
+
+@pytest.mark.parametrize("pr_body", [None, "Overview. " * 400], ids=["zero-files-fit", "pr-meta-overflow"])
+def test_execute_review_context_overflow_publishes_partial_review_with_truncated_list(
+    pr_body: str | None,
+) -> None:
+    from app.modules.reviews.application.get_run_diff import DiffSnapshot
+
+    line_payload = "x = " + "a" * 6_500
+    snapshots = [
+        DiffSnapshot(
+            f"app/mod_{idx}.py",
+            f"@@ -0,0 +1,1 @@\n+{line_payload}",
+            "a" * 40,
+            status="added",
+            additions=1,
+            changes=1,
+            review_patch=f"@@ -0,0 +1,1 @@\n+{line_payload}",
+        )
+        for idx in range(1, 8)
+    ]
+    changed_files = tuple(
+        ChangedFile(
+            f"app/mod_{idx}.py",
+            "added",
+            (DiffLine(1, "added", line_payload),),
+        )
+        for idx in range(1, 8)
+    )
+    # send_budget = 10_000 - 8_000 = 2_000 tokens: mandatory policy/verifier (~1_100) fit,
+    # while either 0 files fit (pr_body=None) or stripped prompt + pr_body > 2_000.
+    snapshot = _make_test_snapshot(max_input_tokens=10_000, max_policy_tokens=12_000)
+    repo, pointers, published_raw, harness, outcome = _run_overflow_pipeline(
+        snapshots=snapshots,
+        changed_files=changed_files,
+        snapshot=snapshot,
+        replies=[],
+        pr_body=pr_body,
+    )
+
+    assert outcome is True
+    assert harness.requests == []
+    assert len(published_raw) == 1 and isinstance(published_raw[0], NoModelAnswer)
+    assert repo.answers == [None]
+    assert repo.response["verdict"] is None
+    assert repo.response["coverage"]["status"] == "partial"
+    assert repo.response["coverage"]["reviewed_files"] == 0
+    assert repo.response["coverage"]["reason_counts"] == {"review_input_incomplete": 7}
+    assert [p.review_event for p in pointers] == ["COMMENT"]
+    assert "- ` app/mod_1.py `: модель получила не весь patch" in repo.body
+    assert "- Ещё причин: 2" in repo.body
+    assert "и ещё 2" in repo.body
+    view = check_run_view(
+        CheckRunReport(
+            CheckRunTarget(1, "o/r", "a" * 40, RUN_ID),
+            "succeeded",
+            1,
+            verdict=repo.response["verdict"],
+            coverage_status=repo.response["coverage"]["status"],
+            saved_summary=repo.response["summary"],
+        )
+    )
+    assert view.conclusion == "neutral"
+    assert view.title == "AI-ревью: проверка неполная"
+
+
+@pytest.mark.parametrize(
+    ("status_code", "payload"),
+    [
+        (400, {"json": {"error": {"code": "context_length_exceeded", "message": "too long"}}}),
+        (413, {"text": "Request Entity Too Large"}),
+    ],
+    ids=["http-400-length", "http-413"],
+)
+def test_execute_review_runtime_provider_overflow_publishes_partial_review(
+    status_code: int,
+    payload: dict[str, Any],
+) -> None:
+    import httpx
+    from app.modules.reviews.application.get_run_diff import DiffSnapshot
+
+    snapshots = [
+        DiffSnapshot(
+            "app/main.py",
+            "@@ -0,0 +1,1 @@\n+x = 1",
+            "a" * 40,
+            status="added",
+            additions=1,
+            changes=1,
+            review_patch="@@ -0,0 +1,1 @@\n+x = 1",
+        )
+    ]
+    snapshot = _make_test_snapshot(max_input_tokens=60_000, max_policy_tokens=12_000)
+    repo, pointers, published_raw, harness, outcome = _run_overflow_pipeline(
+        snapshots=snapshots,
+        changed_files=(ChangedFile("app/main.py", "added", (DiffLine(1, "added", "x = 1"),)),),
+        snapshot=snapshot,
+        replies=[httpx.Response(status_code, **payload)],
+    )
+
+    assert outcome is True
+    assert len(harness.requests) == 1
+    assert len(published_raw) == 1 and isinstance(published_raw[0], NoModelAnswer)
+    assert repo.response["verdict"] is None
+    assert repo.response["coverage"]["status"] == "partial"
+    assert "- ` app/main.py `: модель получила не весь patch" in repo.body
+    assert [p.review_event for p in pointers] == ["COMMENT"]
+
+
+def test_execute_review_policy_budget_exceeded_never_publishes_review() -> None:
+    from app.modules.reviews.application.get_run_diff import DiffSnapshot
+
+    snapshots = [
+        DiffSnapshot(
+            "app/main.py",
+            "@@ -0,0 +1,1 @@\n+x = 1",
+            "a" * 40,
+            status="added",
+            additions=1,
+            changes=1,
+            review_patch="@@ -0,0 +1,1 @@\n+x = 1",
+        )
+    ]
+    store_bundle = _overflow_store(snapshots)
+    repo, _, pointers, published_raw = store_bundle
+    snapshot = _make_test_snapshot(max_input_tokens=60_000, max_policy_tokens=1)
+
+    with pytest.raises(PolicyError) as raised:
+        _run_overflow_pipeline(
+            snapshots=snapshots,
+            changed_files=(ChangedFile("app/main.py", "added", (DiffLine(1, "added", "x = 1"),)),),
+            snapshot=snapshot,
+            replies=[],
+            store_out=store_bundle,
+        )
+    assert raised.value.code == PolicyErrorCode.PROMPT_BUDGET_EXCEEDED
+    assert published_raw == []
+    assert pointers == []
+    assert repo.body == ""
+
+
+def test_execute_review_legacy_technical_only_overflow_publishes_none_coverage() -> None:
+    import httpx
+    from app.modules.reviews.application.get_run_diff import DiffSnapshot
+
+    snapshots = [DiffSnapshot("data/huge.txt", None, "d" * 40, omission_reason="too_large")]
+    repo, pointers, published_raw, _, outcome = _run_overflow_pipeline(
+        snapshots=snapshots,
+        changed_files=(),
+        omitted_files=("data/huge.txt",),
+        snapshot=None,
+        replies=[httpx.Response(413, text="Request Entity Too Large")],
+        with_verifier=False,
+    )
+
+    assert outcome is True
+    assert len(published_raw) == 1 and isinstance(published_raw[0], NoModelAnswer)
+    assert repo.response["verdict"] is None
+    assert repo.response["coverage"]["status"] == "none"
+    assert [p.review_event for p in pointers] == ["COMMENT"]
+    view = check_run_view(
+        CheckRunReport(
+            CheckRunTarget(1, "o/r", "a" * 40, RUN_ID),
+            "succeeded",
+            1,
+            verdict=repo.response["verdict"],
+            coverage_status=repo.response["coverage"]["status"],
+            saved_summary=repo.response["summary"],
+        )
+    )
+    assert view.conclusion == "neutral"
+    assert view.title == "AI-ревью: нет доступных для анализа изменений"

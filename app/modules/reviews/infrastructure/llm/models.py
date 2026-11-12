@@ -345,7 +345,7 @@ async def _fitted_review(
         if context.changed_files and not fitted.changed_files:
             raise RunFailure(
                 LlmErrorCode.CONTEXT_OVERFLOW.value,
-                "llm_context_overflow: no changed files fit within the input token budget",
+                "no changed files fit within the input token budget",
             )
     prompt = PromptBuilder().build_prompt(fitted)
     base_manifest = PromptBuilder().build_manifest(

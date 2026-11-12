@@ -22,7 +22,7 @@ from app.modules.reviews.application.findings_post_processor import (
     FindingsPostProcessor,
     ProcessedFinding,
 )
-from app.modules.reviews.application.llm import LlmCallFailed
+from app.modules.reviews.application.llm import LlmCallFailed, LlmErrorCode
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import CallManifest, PolicySnapshot
 from app.modules.reviews.application.prompt_budget import (
@@ -66,13 +66,20 @@ from app.modules.reviews.application.review_output import (
     validate_v2_coordinates,
 )
 from app.modules.reviews.application.review_path import ReviewBinding, snapshot_for_review
-from app.modules.reviews.application.run_failures import RunFailure
+from app.modules.reviews.application.run_failures import RunFailure, classify_failure
 from app.modules.reviews.application.store_review_output import NoModelAnswer
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 _LOGGER = logging.getLogger(__name__)
 # R2: the payload levels shown as excerpts; L1 is the changed files themselves.
 _EXCERPT_LEVELS = frozenset({ContextLevel.L2, ContextLevel.L3, ContextLevel.L4})
+
+
+def _is_review_context_overflow(exc: LlmCallFailed | RunFailure) -> bool:
+    """Only non-policy ``llm_context_overflow`` degrades; policy errors fail closed."""
+    if isinstance(exc, PolicyError):
+        return False
+    return classify_failure(exc).error_code == LlmErrorCode.CONTEXT_OVERFLOW.value
 
 
 def verifier_candidate_id(index: int, finding: ReviewFindingV2) -> str:
@@ -381,7 +388,19 @@ class ExecuteReviewRun:
             # R10: the review model fits, guards and manifests the call once; its reply
             # carries the fitted context and the accepted call's manifest.
 
-        reply = await self._model.draft_review(context=context)
+        try:
+            reply = await self._model.draft_review(context=context)
+        except (LlmCallFailed, RunFailure) as exc:
+            if not _is_review_context_overflow(exc):
+                raise
+            _LOGGER.warning(
+                "Review context overflow run_id=%s; publishing incomplete coverage",
+                run_id,
+            )
+            incomplete = tuple(sorted({file.path for file in changed_files}))
+            return await self._publisher.execute(
+                run_id, NoModelAnswer(incomplete_paths=incomplete)
+            )
         reviewer_manifest: CallManifest | None = None
         model_output: Mapping[str, object] | str | bytes
         if isinstance(reply, ReviewReply):
