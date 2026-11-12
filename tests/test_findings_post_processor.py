@@ -12,6 +12,7 @@ import pytest
 from app.modules.reviews.application.diff_map import DiffMap
 from app.modules.reviews.application.findings_post_processor import (
     FindingsPostProcessor,
+    ProcessedReviewOutput,
     _format_checked_files,
     finalize_stored_review_body,
     format_body_only_overflow_footer,
@@ -66,13 +67,13 @@ def _trusted_coverage(paths: frozenset[str]) -> RunCoverage:
     )
 
 
-def process(  # type: ignore[no-untyped-def]
+def process(
     *findings: dict[str, object],
     max_inline: int | None = None,
     diff_map: DiffMap | None = None,
     checked_paths: frozenset[str] | None = None,
     severity_threshold: SeverityThresholdValue = "all",
-):
+) -> ProcessedReviewOutput:
     resolved_map = diff_map if diff_map is not None else _default_diff_map()
     paths = checked_paths if checked_paths is not None else _paths_of(resolved_map)
     return FindingsPostProcessor.from_default_patterns().process(
