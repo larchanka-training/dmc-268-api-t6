@@ -358,6 +358,28 @@ def test_prompt_that_cannot_fit_fails_with_context_overflow_before_any_call() ->
     assert transport.requests == []
 
 
+def test_zero_fitted_files_raises_context_overflow_without_provider_call() -> None:
+    # send budget = 8 300 - 8 000 = 300 tokens: base prompt without diff fits (< 300),
+    # yet even one changed line cannot fit so fit_review_context omits every file.
+    transport = Transport(json.dumps(EMPTY_ANSWER))
+    huge_line = (ChangedFile(MAIN, "added", (DiffLine(1, "added", "a" * 1_200),)),)
+    context = _context(huge_line, _snapshot(max_input_tokens=8_300))
+
+    with pytest.raises(RunFailure) as raised:
+        _draft(_gateway(transport), context)
+
+    assert raised.value.error_code == "llm_context_overflow"
+    assert not isinstance(raised.value, PolicyError)
+    assert transport.requests == []
+
+    # Mandatory policy budget check still runs first when both fail.
+    over_policy = replace(context, policy_snapshot=_snapshot(max_input_tokens=8_300, max_policy_tokens=1))
+    with pytest.raises(PolicyError) as policy_raised:
+        _draft(_gateway(transport), over_policy)
+    assert policy_raised.value.code == PolicyErrorCode.PROMPT_BUDGET_EXCEEDED
+    assert transport.requests == []
+
+
 def test_a_2500_line_diff_is_fitted_first_and_never_overflows_prematurely() -> None:
     # #219 part 2: the guard runs after the fit, so a large diff is cut, not refused.
     line = "x = 100 + 200 # line calculation " + "y" * 55

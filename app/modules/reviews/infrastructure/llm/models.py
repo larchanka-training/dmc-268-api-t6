@@ -27,7 +27,7 @@ from app.modules.reviews.application.conventions_prompt import (
     fit_conventions_request,
 )
 from app.modules.reviews.application.execute_review import PullRequestMetaSource, ReviewReply
-from app.modules.reviews.application.llm import RunCallContext
+from app.modules.reviews.application.llm import LlmErrorCode, RunCallContext
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import CallManifest
 from app.modules.reviews.application.prompt_budget import (
@@ -342,6 +342,11 @@ async def _fitted_review(
     )
     if fitted.policy_snapshot is not None:
         _guard_snapshot_budget(fitted, counter, max_tokens)
+        if context.changed_files and not fitted.changed_files:
+            raise RunFailure(
+                LlmErrorCode.CONTEXT_OVERFLOW.value,
+                "llm_context_overflow: no changed files fit within the input token budget",
+            )
     prompt = PromptBuilder().build_prompt(fitted)
     base_manifest = PromptBuilder().build_manifest(
         fitted,
@@ -382,7 +387,7 @@ def _guard_snapshot_budget(context: ReviewContext, counter: TokenCounter, max_to
             PolicyErrorCode.PROMPT_BUDGET_EXCEEDED, str(exc), limit=exc.limit, actual=exc.actual
         ) from exc
     except PreSendGuardError as exc:
-        raise RunFailure("llm_context_overflow", str(exc)) from exc
+        raise RunFailure(LlmErrorCode.CONTEXT_OVERFLOW.value, str(exc)) from exc
 
 
 def _messages(prompt: ReviewPrompt) -> tuple[ChatMessage, ...]:
