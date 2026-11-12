@@ -358,6 +358,27 @@ def test_prompt_that_cannot_fit_fails_with_context_overflow_before_any_call() ->
     assert transport.requests == []
 
 
+def test_policy_exceeding_review_send_budget_fails_closed_before_any_call() -> None:
+    # send budget = 9 500 - 8 000 = 1 500 tokens; policy (~2 050) <= max_policy_tokens (12 000)
+    # yet exceeds review send budget -> must fail closed with policy_prompt_budget_exceeded.
+    transport = Transport(json.dumps(EMPTY_ANSWER))
+    base_snapshot = _snapshot(max_input_tokens=9_500, max_policy_tokens=12_000)
+    heavy_rules = make_policy_document_present(
+        path=".review/rules.md",
+        text="# Rules\n" + ("Keep every boundary isolated. " * 200),
+        blob_oid="r" * 40,
+    )
+    context = _context(_one_line(), replace(base_snapshot, rules=heavy_rules))
+
+    with pytest.raises(PolicyError) as raised:
+        _draft(_gateway(transport), context)
+
+    assert raised.value.code == PolicyErrorCode.PROMPT_BUDGET_EXCEEDED
+    assert raised.value.limit == 1_500
+    assert raised.value.actual is not None and raised.value.actual > 1_500
+    assert transport.requests == []
+
+
 def test_zero_fitted_files_raises_context_overflow_without_provider_call() -> None:
     # send budget = 8 300 - 8 000 = 300 tokens: base prompt without diff fits (< 300),
     # yet even one changed line cannot fit so fit_review_context omits every file.
