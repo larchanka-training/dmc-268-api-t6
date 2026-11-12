@@ -36,9 +36,10 @@ from tests.clean_without_text_fakes import (
     finding,
 )
 from tests.execute_review_fakes import FakeVerifierModel, conventions
+from tests.llm_gateway_fakes import PRIMARY, completion
 from tests.run_coverage_fakes import code_snapshot, coverage
 from tests.test_gateway_review_model import RUN, Transport, _gateway, _snapshot
-from tests.test_llm_gateway import PRIMARY, Harness, completion
+from tests.test_llm_gateway import Harness
 
 
 def test_gateway_hidden_fit_marks_legacy_unverified_output_and_persisted_result_partial() -> None:

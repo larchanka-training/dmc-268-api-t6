@@ -54,10 +54,10 @@ from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepos
 from tests.clean_without_text_fakes import answer
 from tests.policy_snapshot_fakes import make_complete_execution_profile
 from tests.portal_postgres import PR_NEW, WS_A, Env, api, portal_schema
+from tests.prompt_assets_fakes import _packaged, _seed
+from tests.publication_settings_postgres import _insert, _ready
 from tests.test_clean_without_text_acceptance_postgres import RevisionSource, checkpoint
 from tests.test_review_context_stage import Parser, Policy, Vcs
-from tests.test_run_prompt_pins_postgres import _packaged, _seed
-from tests.test_run_publication_settings_postgres import _insert, _ready
 from tests.test_severity_threshold_postgres import RecordingQueue
 
 _LINE = "@@ -1 +1 @@\n-old\n+new"

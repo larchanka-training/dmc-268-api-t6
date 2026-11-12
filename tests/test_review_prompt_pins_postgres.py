@@ -57,6 +57,8 @@ from app.modules.reviews.infrastructure.run_repository import (
 )
 from tests.policy_snapshot_fakes import make_complete_execution_profile
 from tests.portal_postgres import INSTALL_A, PROMPT, REPO_A, RUN_ATTEMPTED, Env, portal_schema
+from tests.prompt_assets_fakes import _packaged
+from tests.publication_settings_postgres import _insert, _ready
 
 # test_clean_without_text_sent_context_postgres.py and test_snapshot_path_live_pin.py still import
 # _bind_v4 from here (both owned by open PR #478); they import tests.review_prompt_pins_postgres
@@ -66,8 +68,7 @@ from tests.test_prepare_policy_snapshot import Source
 from tests.test_review_context_stage import Parser, Vcs, _checkpoint
 from tests.test_review_context_stage import Repository as SourceTree
 from tests.test_run_processor_context_stage import Conventions, GitHub
-from tests.test_run_prompt_pins_postgres import _packaged
-from tests.test_run_publication_settings_postgres import _claim, _insert, _ready
+from tests.test_run_publication_settings_postgres import _claim
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 V2_SHA = "9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75"

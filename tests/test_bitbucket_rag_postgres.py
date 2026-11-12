@@ -93,7 +93,7 @@ from app.worker import (
     process_review_run,
 )
 from tests.bitbucket_connection_postgres_support import _config
-from tests.test_llm_gateway import PRIMARY, completion
+from tests.llm_gateway_fakes import PRIMARY, completion
 from tests.test_prompt_builder import _metadata_context
 
 pytest_plugins = ("tests.bitbucket_connection_postgres_support",)

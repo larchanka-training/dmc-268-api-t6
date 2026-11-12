@@ -49,9 +49,10 @@ from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunTraceUnitOfWork,
 )
 from tests.execute_review_fakes import _AcceptingCheckpointPublisher
+from tests.llm_gateway_fakes import PRIMARY, completion
 from tests.portal_postgres import INSTALL_A, PROMPT, REPO_A, RUN_ATTEMPTED, Env, portal_schema
 from tests.test_app_reinstall_postgres import FreshGitHub, apply
-from tests.test_llm_gateway import PRIMARY, completion, valid
+from tests.test_llm_gateway import valid
 from tests.test_review_context_stage import _stage
 from tests.test_run_diff_origin_postgres import history
 from tests.test_run_llm_origin_postgres import run_context

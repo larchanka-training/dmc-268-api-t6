@@ -19,10 +19,10 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from tests import test_snapshot_path_e2e_postgres as e2e
+from tests import snapshot_path_e2e_support as e2e
+from tests.github_vcs_payload_fakes import _pull_payload
 from tests.portal_postgres import Env
-from tests.test_github_vcs_provider import _pull_payload
-from tests.test_snapshot_path_e2e_postgres import env as env
+from tests.snapshot_path_e2e_support import env as env
 
 _NAME = "a\\b.txt"
 _SHA = "7" * 40

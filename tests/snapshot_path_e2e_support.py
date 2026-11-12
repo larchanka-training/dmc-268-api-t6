@@ -1,0 +1,960 @@
+"""A v4-bound review through the worker composition, end to end (#130 F1-14).
+
+``compose_worker_process`` runs one queued run with the production attempt provider (the
+gateway's conventions, review and verifier models), the factory's context stage and the real
+GitHub run source over in-memory HTTP transports. The run is bound to a review.system v4 row
+with the bytes of the packaged ``review.system.v4.md`` (F2), inactive here. The v4 run takes the
+snapshot path: selector, snapshot, L2-L4 context counted with the pinned counter, a single
+fit, a manifest per call, the review citing the diff and the L3 excerpt, the verifier shown
+that excerpt, ``llm.verify`` and the publication input. A v3 run in the same composition
+stays on the legacy path. A retried v4 attempt keeps the snapshot and every pinned prompt
+while newer rows go live, and a provider failure after a model call sends the review to the
+fallback on a manifest row of its own. The v4 prompt shows no retrieved section. A run bound
+to the packaged ``review.system.v5.md`` (#144) always shows one: empty with RAG off; with a
+ready graph index the review shows and records the caller of the changed function, the
+verifier shows it again with the same index commit, and a retry before the accepted answer
+retrieves from a newer index publication (D8). A v4 run in flight when the v5 seed makes v5
+live keeps its v4 prompt: no retrieved section, and a ready index is recorded as not used.
+A run bound to ``review.system.v7.md`` (#498) shows a comment of the retrieved caller as a
+marker; a v5 run in flight when the v7 seed makes v7 live keeps v5 and shows the comment.
+A verifier answer citing a range the diff block does not show, or a rule finding without a
+requirement of its rule, earns the attempt's one free slot: the fallback, or a bounded repair
+without a fallback model; the recovered answer publishes. A changed-file name the run cannot
+store unchanged leaves its source unisolable: the v4 run fails on its first attempt before the
+diff is written and before any model call (RFS §11, #497); a v3 run with such a name keeps the
+retried internal error.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import os
+import re
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+from typing import Any
+from uuid import UUID
+
+import httpx
+import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
+
+from app.bootstrap.llm_gateway import build_gateway
+from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
+    GitHubAppInstallationAccessTokenProvider,
+)
+from app.modules.reviews.application.prompt_builder import file_block_id
+from app.modules.reviews.application.queue_messages import ReviewPublishPointer
+from app.modules.reviews.application.try_enqueue_webhook_run import (
+    PendingRunMessage,
+    RunPublicationKind,
+)
+from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
+from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
+from app.modules.reviews.infrastructure.llm.settings import LlmSettings
+from app.modules.reviews.infrastructure.run_repository import (
+    SqlAlchemyRunRepository,
+)
+from app.modules.reviews.infrastructure.vcs_failures import ClassifiedVcsProvider
+from app.worker import (
+    GitHubAdapters,
+    compose_worker_process,
+    execution_profile_of,
+    review_context_stage_factory,
+)
+from tests.code_index_postgres import C1, C2, _build, _enable, _Index
+from tests.github_vcs_payload_fakes import _pull_payload
+from tests.llm_gateway_fakes import FALLBACK, PRIMARY, completion
+from tests.portal_postgres import REPO_A, REPO_B, Env, portal_schema
+from tests.prompt_assets_fakes import _live_assets, _packaged, _seed, _up_to
+from tests.publication_settings_postgres import _insert, _ready
+from tests.rag_review_context_fakes import (
+    _GREET_PATCH,
+    _MODELS,
+    _SERVICE,
+    _USER,
+    _user_file,
+)
+from tests.retired_installation_fakes import DiscardTokenCache
+from tests.review_prompt_pins_postgres import (
+    _V4_CONTENT,
+    _V5_CONTENT,
+    _bind_v4,
+    _bind_v5,
+    _bind_v7,
+)
+from tests.worker_queue_postgres import SETTINGS, GitHub
+
+_HEAD = "f" * 40  # the head of PR_NEW after ``_ready``
+_REVIEW_TREE = "1" * 40
+# The Git blob ids of the two policy documents below: the raw policy read checks them (#168).
+_RULES = "ce0b715d4d8a24915dca62ff7df9fd0255e44312"
+_AGENTS = "b45208a635f8eff05a44ab890c4650a41a108041"
+_SERVICE_SHA = "4" * 40
+_MODELS_SHA = "5" * 40
+_TEST_SHA = "6" * 40
+_PATH = "pkg/service.py"
+# A changed test file: weighted below a source file, so it gets an L2 window, never L3.
+_TEST_PATH = "tests/test_service.py"
+_TEST_FILE = "def test_greet():\n    value = 1\n    assert value\n"
+_TEST_PATCH = "@@ -1,2 +1,3 @@\n def test_greet():\n+    value = 1\n     assert value"
+_ADDED_LINE = 12  # ``+    extra = 1`` of ``_GREET_PATCH``
+# ``pkg/app.py`` calls the ``greet`` the PR changes: the graph index reaches it (#144).
+_APP_PATH = "pkg/app.py"
+_APP_SHA = "7" * 40
+_CALL_LINE = 5  # ``    return greet(user_id)`` of ``_USER``
+_LLM = LlmSettings(primary=PRIMARY, fallback=FALLBACK)
+_CONVENTIONS_ANSWER = {
+    "files": [{"path": path, "relevance": "changed file"} for path in (_PATH, _TEST_PATH)],
+    "key_patterns": ["Pattern one", "Pattern two", "Pattern three"],
+    "recommendations": [f"Check {index} (from: standard/correctness)" for index in range(5)],
+}
+_FINDING: dict[str, Any] = {
+    "path": _PATH,
+    "line": _ADDED_LINE,
+    "start_line": None,
+    "severity": "high",
+    "category": "correctness",
+    "title": "Added variable is unused",
+    "body": "The added variable is never read.",
+    "suggestion": None,
+    "confidence": 0.9,
+    "rule_name": None,
+}
+_SUMMARY = {"problem": "An added variable is unused.", "done_well": "Small.", "effort": "small"}
+_EVIDENCE = [{"block_id": file_block_id(_PATH), "start_line": _ADDED_LINE, "end_line": _ADDED_LINE}]
+_ROTATED = "---\nkey: review.conventions\nversion: 99\n---\nA rotated conventions prompt.\n"
+_ROTATED_REVIEW = "---\nkey: review.system\nversion: 98\n---\nA rotated review prompt.\n"
+_ROTATED_VERIFIER = "---\nkey: review.verifier\nversion: 97\n---\nA rotated verifier prompt.\n"
+
+
+@pytest.fixture
+def env() -> Iterator[Env]:
+    url = os.environ.get("TEST_DATABASE_URL")
+    if url is None:
+        pytest.skip("set TEST_DATABASE_URL to run the snapshot path end to end")
+    with portal_schema(url, None) as schema:
+        yield schema
+
+
+@dataclass
+class Queue:
+    published: list[ReviewPublishPointer] = field(default_factory=list)
+    retries: list[str] = field(default_factory=list)
+    on_publish: Callable[[], None] | None = None
+
+    async def publish_confirmed(
+        self, message: PendingRunMessage, *, kind: RunPublicationKind = RunPublicationKind.QUEUED
+    ) -> None:
+        raise AssertionError("the claimed run is already queued")
+
+    async def publish_retry(self, message: PendingRunMessage, delay_key: str) -> None:
+        self.retries.append(delay_key)
+
+    async def publish_review(self, pointer: ReviewPublishPointer) -> None:
+        if self.on_publish is not None:
+            self.on_publish()
+        self.published.append(pointer)
+
+
+def _blob(sha: str, raw: bytes) -> httpx.Response:
+    content = base64.b64encode(raw).decode()
+    return httpx.Response(
+        200, json={"sha": sha, "encoding": "base64", "content": content, "size": len(raw)}
+    )
+
+
+@dataclass
+class GitHubHttp:
+    """The GitHub REST API of PR 3 of octo/a: the policy at the base, the change at the head."""
+
+    files_unavailable: int = 0
+    # The head tree also holds ``pkg/app.py``, the caller the graph index retrieves.
+    rag: bool = False
+    # The changed files as GitHub lists them; ``None``: the service and its test.
+    files: tuple[dict[str, Any], ...] | None = None
+    # The caller of ``greet`` the head serves to a RAG read.
+    caller: str = _USER
+    title: str = "Fix parser"
+    labels: tuple[str, ...] = ("backend",)
+    calls: list[str] = field(default_factory=list)
+    transaction_probe: Callable[[str], None] | None = None
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        self.calls.append(f"{request.method} {path}")
+        if self.transaction_probe is not None:
+            self.transaction_probe("vcs" if "/git/" in path or "/pulls/" in path else "github")
+        if path.endswith("/access_tokens"):
+            return httpx.Response(
+                201, json={"token": "token", "expires_at": "2030-01-01T00:00:00Z"}
+            )
+        if "/git/trees/" in path:
+            sha = path.rsplit("/", 1)[1]
+            if sha == _REVIEW_TREE:
+                tree = [{"path": "rules.md", "mode": "100644", "type": "blob", "sha": _RULES}]
+            elif sha == _HEAD:
+                tree = [
+                    {"path": _PATH, "mode": "100644", "type": "blob", "sha": _SERVICE_SHA},
+                    {"path": "pkg/models.py", "mode": "100644", "type": "blob", "sha": _MODELS_SHA},
+                    {"path": _TEST_PATH, "mode": "100644", "type": "blob", "sha": _TEST_SHA},
+                ]
+                if self.rag:
+                    tree.append(
+                        {"path": _APP_PATH, "mode": "100644", "type": "blob", "sha": _APP_SHA}
+                    )
+            else:
+                tree = [
+                    {"path": ".review", "mode": "040000", "type": "tree", "sha": _REVIEW_TREE},
+                    {"path": "AGENTS.md", "mode": "100644", "type": "blob", "sha": _AGENTS},
+                ]
+            return httpx.Response(200, json={"tree": tree, "truncated": False})
+        if "/git/blobs/" in path:
+            sha = path.rsplit("/", 1)[1]
+            raw = {
+                _RULES: b"Be careful.\n",
+                _AGENTS: b"# AGENTS\n\nUse uv.\n",
+                _SERVICE_SHA: _SERVICE.encode(),
+                _MODELS_SHA: _MODELS.encode(),
+                _TEST_SHA: _TEST_FILE.encode(),
+                _APP_SHA: self.caller.encode(),
+            }[sha]
+            if request.headers["Accept"] == "application/vnd.github.raw+json":
+                return httpx.Response(200, content=raw)
+            return _blob(sha, raw)
+        if path.endswith("/pulls/3"):
+            changed = 2 if self.files is None else len(self.files)
+            payload = _pull_payload(changed_files=changed, head_sha=_HEAD)
+            payload["number"] = 3
+            payload["title"] = self.title
+            payload["labels"] = [{"name": label} for label in self.labels]
+            return httpx.Response(200, json=payload)
+        if path.endswith("/pulls/3/commits"):
+            return httpx.Response(200, json=[])
+        if path.endswith("/pulls/3/files"):
+            if self.files_unavailable:
+                self.files_unavailable -= 1
+                return httpx.Response(503, json={"message": "unavailable"})
+            if self.files is not None:
+                return httpx.Response(200, json=list(self.files))
+            files = [
+                {
+                    "filename": path,
+                    "status": "modified",
+                    "sha": sha,
+                    "additions": 1,
+                    "deletions": 0,
+                    "changes": 1,
+                    "patch": patch,
+                }
+                for path, sha, patch in (
+                    (_PATH, _SERVICE_SHA, _GREET_PATCH),
+                    (_TEST_PATH, _TEST_SHA, _TEST_PATCH),
+                )
+            ]
+            return httpx.Response(200, json=files)
+        if "/compare/" in path:
+            return httpx.Response(200, json={"merge_base_commit": {"sha": "c" * 40}})
+        raise AssertionError(f"unexpected GitHub request {request.method} {request.url}")
+
+
+@dataclass
+class ModelHttp:
+    """The model provider: each call answers the request it gets, in the order of the path."""
+
+    kinds: list[str]
+    bodies: list[dict[str, Any]] = field(default_factory=list)
+    summaries: list[dict[str, Any]] = field(default_factory=list)
+    on_review: Callable[[], None] | None = None
+    transaction_probe: Callable[[str], None] | None = None
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("response_format", {}).get("json_schema", {}).get("name") == (
+            "ChangeSummaryOutput"
+        ):
+            # The change summary agent (#316): the attempt's last call, when a slot is left.
+            self.summaries.append(body)
+            return completion(json.dumps({"sentences": ["Adds an extra counter to a service."]}))
+        self.bodies.append(body)
+        kind = self.kinds.pop(0)
+        if self.transaction_probe is not None:
+            self.transaction_probe(kind)
+        if kind.startswith("review") and self.on_review is not None:
+            self.on_review()
+        if kind == "unavailable":
+            # One provider outage of the call. Within the slots E-1 keeps for the verifier the
+            # primary gets no second try: the gateway goes to the fallback.
+            return httpx.Response(503, json={"error": {"message": "unavailable"}})
+        if kind == "conventions":
+            answer: dict[str, Any] = _CONVENTIONS_ANSWER
+        elif kind in ("review-v2", "review-v2-rule"):
+            # The review cites the added line in the diff and in the L3 excerpt of the file,
+            # and the call of ``greet`` in a retrieved block when the prompt shows one.
+            prompt = body["messages"][-1]["content"]
+            [l3] = re.findall(r'<excerpt block_id="([^"]+)" level="L3"', prompt)
+            cited = [
+                *_EVIDENCE,
+                {"block_id": l3, "start_line": _ADDED_LINE, "end_line": _ADDED_LINE},
+                *(
+                    {"block_id": rag, "start_line": _CALL_LINE, "end_line": _CALL_LINE}
+                    for rag in re.findall(r'<excerpt block_id="([^"]+)" level="RAG"', prompt)
+                ),
+            ]
+            # ``review-v2-rule``: the finding names the repository rules it breaks.
+            rule = ".review/rules.md" if kind == "review-v2-rule" else None
+            finding = {**_FINDING, "rule_name": rule, "evidence_refs": cited}
+            answer = {"findings": [finding], "summary": _SUMMARY}
+        elif kind == "review-v1":
+            answer = {"findings": [_FINDING], "summary": _SUMMARY}
+        else:
+            assert kind in (
+                "verifier",
+                "verifier-contradicted",
+                "verifier-unshown",
+                "verifier-rule",
+            )
+            # The verifier prompt, also under the repair turn of a repair call.
+            prompt = body["messages"][1]["content"]
+            ids = re.findall(r'candidate_id="([^"]+)"', prompt)
+            status = "contradicted" if kind == "verifier-contradicted" else "supported"
+            evidence = _EVIDENCE
+            requirements: list[dict[str, Any]] = []
+            if kind == "verifier-unshown":
+                # Lines past the end of the shown hunk (RIGHT 9-13): never in the prompt.
+                evidence = [{"block_id": file_block_id(_PATH), "start_line": 22, "end_line": 24}]
+            elif kind == "verifier-rule":
+                # The rule finding cites the shown lines of the repository rules.
+                [rules] = re.findall(
+                    r'<repository_rules block_id="policy-rules"[^>]*>\n(.*?)\n</repository_rules>',
+                    prompt,
+                    flags=re.DOTALL,
+                )
+                shown = [int(n) for n in re.findall(r'<line n="(\d+)">', rules)]
+                requirements = [
+                    {
+                        "block_id": "policy-rules",
+                        "start_line": min(shown),
+                        "end_line": max(shown),
+                        "check_id": None,
+                    }
+                ]
+            answer = {
+                "decisions": [
+                    {
+                        "candidate_id": candidate,
+                        "status": status,
+                        "reason": "The cited added line is never read.",
+                        "evidence_refs": evidence,
+                        "requirement_refs": requirements,
+                    }
+                    for candidate in ids
+                ]
+            }
+        return completion(json.dumps(answer))
+
+
+@dataclass(frozen=True)
+class Observed:
+    run_id: UUID
+    outcomes: list[str]
+    state: tuple[Any, ...]
+    tools: list[str]
+    actions: dict[str, list[tuple[Any, Any]]]
+    manifests: list[tuple[UUID, str, int]]
+    manifest_blocks: list[list[dict[str, Any]]]
+    manifest_ids: list[UUID]
+    snapshots: list[UUID]
+    pins: tuple[Any, ...]
+    conventions_prompt: str
+    verifier_prompt: str
+    bodies: list[dict[str, Any]]
+    queue: Queue
+    payloads: list[tuple[Any, ...]]
+    checkpoint_meta: list[dict[str, Any]]
+    checkpoint_attempts: list[int]
+    transaction_checks: list[str]
+
+
+async def _rows(
+    factory: async_sessionmaker[AsyncSession], sql: str, run_id: UUID
+) -> list[tuple[Any, ...]]:
+    async with factory() as session:
+        return [tuple(row) for row in await session.execute(text(sql), {"id": run_id})]
+
+
+async def _make_due(session: AsyncSession, run_id: UUID) -> None:
+    # The retry backoff has passed: the worker may take the run again.
+    await session.execute(
+        text("UPDATE runs SET available_at=clock_timestamp()-interval '1 minute' WHERE id=:id"),
+        {"id": run_id},
+    )
+
+
+# Binds a run to an inactive row of a packaged review.system version (the seed stops at v3).
+_BIND = {4: _bind_v4, 5: _bind_v5, 7: _bind_v7}
+
+
+async def _scenario(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    version: int,
+    retry: bool,
+    rag: bool,
+    seeded_after: int | None = None,
+    caller: str = _USER,
+    llm: LlmSettings = _LLM,
+    review_kind: str | None = None,
+    verifier_kinds: tuple[str, ...] = ("verifier",),
+    files: tuple[dict[str, Any], ...] | None = None,
+    redeliveries: int = 0,
+    on_review: Callable[[UUID], None] | None = None,
+    prior_attempts: int = 0,
+    checkpoint_retry: bool = False,
+    missing_retrieved_on_retry: bool = False,
+    tamper_fitted_digest_on_retry: bool = False,
+    transaction_probe: Callable[[str], None] | None = None,
+    transaction_checks: list[str] | None = None,
+) -> Observed:
+    """``version``: the review.system version the run is bound to; v3 is the seeded live row.
+    ``seeded_after``: the run is created under the seeded live row of ``version``, then the
+    seed up to ``seeded_after`` makes that version live before the worker takes the run.
+    ``caller``: the caller of ``greet`` a RAG read gets at the head. ``llm``: the models of
+    the composition; ``review_kind`` and ``verifier_kinds``: how the review and the verifier
+    calls answer; ``files``: the changed files GitHub lists, the service and its test when
+    ``None``; ``redeliveries``: how many more times the worker takes the run once it is due
+    again."""
+    await _ready(factory)
+    await _seed(factory, _live_assets() if seeded_after is None else _up_to(_packaged(), version))
+    async with factory.begin() as session:
+        run_id = await _insert(session)
+        if prior_attempts:
+            await session.execute(
+                text("UPDATE runs SET attempt=:attempt WHERE id=:id"),
+                {"id": run_id, "attempt": prior_attempts},
+            )
+        await session.execute(
+            text(
+                "UPDATE repositories SET enabled=true,installation_available=true,"
+                "rag_enabled=:rag WHERE id=:id"
+            ),
+            {"id": REPO_A, "rag": rag},
+        )
+    if seeded_after is not None:
+        await _seed(factory, _up_to(_packaged(), seeded_after))
+        [pinned_and_live] = await _rows(
+            factory,
+            "SELECT p.version, (SELECT version FROM prompt_versions "
+            "WHERE key='review.system' AND is_active) "
+            "FROM runs r JOIN prompt_versions p ON p.id = r.prompt_version_id WHERE r.id=:id",
+            run_id,
+        )
+        assert pinned_and_live == (version, seeded_after)
+    index = _Index(factory, REPO_A, REPO_B)
+    if rag:
+        # A ready graph index of the default branch at C1 knows the caller of ``greet``.
+        await _enable(index, REPO_A)
+        await _build(index, REPO_A, C1, _user_file())
+    if seeded_after is None and version in _BIND:
+        await _BIND[version](factory, run_id)
+    snapshot_path = version >= 4
+    queue = Queue()
+    if transaction_probe is not None:
+        queue.on_publish = lambda: transaction_probe("publish")
+    github_http = GitHubHttp(
+        files_unavailable=1 if retry and not rag and not checkpoint_retry else 0,
+        rag=rag,
+        files=files,
+        caller=caller,
+    )
+    github_http.transaction_probe = transaction_probe
+    if review_kind is None:
+        review_kind = "review-v2" if snapshot_path else "review-v1"
+    if checkpoint_retry:
+        kinds = ["conventions", review_kind]
+    elif retry and rag:
+        # The first attempt fails before any answer is accepted: the provider refuses its
+        # review call on the primary and on the fallback model. The second attempt keeps the
+        # conventions of the first.
+        kinds = ["conventions", "unavailable", "unavailable", review_kind]
+    else:
+        # On the retried attempt the provider refuses the review call once.
+        kinds = ["conventions", *(["unavailable"] if retry else []), review_kind]
+    if missing_retrieved_on_retry:
+        assert checkpoint_retry and len(verifier_kinds) == 3
+        model_kinds = [*kinds, *verifier_kinds[:2], review_kind, verifier_kinds[2]]
+    else:
+        model_kinds = [*kinds, *(verifier_kinds if snapshot_path else [])]
+    model_http = ModelHttp(model_kinds)
+    model_http.transaction_probe = transaction_probe
+    if on_review is not None:
+        model_http.on_review = lambda: on_review(run_id)
+    outcomes: list[str] = []
+    async with (
+        httpx.AsyncClient(
+            base_url="https://api.github.test", transport=httpx.MockTransport(github_http.handle)
+        ) as client,
+        httpx.AsyncClient(transport=httpx.MockTransport(model_http.handle)) as llm_client,
+    ):
+        tokens = GitHubAppInstallationAccessTokenProvider(
+            client=client,
+            app_id="42",
+            private_key="unused",
+            jwt_encoder=lambda claims, key: "jwt",
+            cache=DiscardTokenCache(),
+            now=lambda: datetime(2026, 10, 10, tzinfo=UTC).timestamp(),
+        )
+        github_vcs = HttpGitHubVcsProvider(client=client, token_provider=tokens)
+        vcs = ClassifiedVcsProvider(github_vcs)
+        runs = SqlAlchemyRunRepository(factory, allow_unscoped=True)
+        github = GitHub()
+        # The adapters of ``worker.github_adapters`` with recording publication fakes.
+        adapters = GitHubAdapters(
+            context_stage=review_context_stage_factory(
+                client=client,
+                tokens=tokens,
+                vcs=github_vcs,
+                runs=runs,
+                session_factory=factory,
+                redis=None,
+                execution_profile=execution_profile_of(llm),
+            ),
+            vcs=vcs,
+            run_source=lambda run: GitHubRunSource(
+                client=client,
+                token_provider=tokens,
+                vcs=vcs,
+                runs=runs,
+                run_id=run,
+                conventions_from_base=True,
+            ),
+            check_runs=github,
+            reviews=github,
+            eligibility=github,
+        )
+        process = compose_worker_process(
+            settings=SETTINGS,
+            session_factory=factory,
+            queue=queue,
+            github=adapters,
+            gateway=build_gateway(llm, llm_client, factory),
+            attempt_deadline=timedelta(minutes=10),
+        )
+        outcomes.append(await process.handle_run.execute(run_id))
+        if retry or checkpoint_retry:
+            if checkpoint_retry:
+                github_http.title = "Fix parser (edited)"
+                github_http.labels = ("backend", "size/XL")
+            if rag:
+                # A newer publication of the index, at C2, lands between the attempts.
+                if missing_retrieved_on_retry:
+                    await _build(index, REPO_A, C2, base=C1)
+                else:
+                    await _build(index, REPO_A, C2, _user_file(), base=C1)
+            async with factory.begin() as session:
+                if tamper_fitted_digest_on_retry:
+                    await session.execute(
+                        text(
+                            "UPDATE review_candidate_checkpoints SET fitted_context="
+                            "jsonb_set(fitted_context, '{prompt_sha256}', '\"0\"') "
+                            "WHERE run_id=:id"
+                        ),
+                        {"id": run_id},
+                    )
+                if not rag:
+                    # Newer conventions, review and verifier rows go live between the
+                    # attempts; the run keeps its pins.
+                    await session.execute(
+                        text(
+                            "UPDATE prompt_versions SET is_active=false WHERE key IN "
+                            "('review.conventions','review.system','review.verifier')"
+                        )
+                    )
+                    for key, version, content in (
+                        ("review.conventions", 99, _ROTATED),
+                        ("review.system", 98, _ROTATED_REVIEW),
+                        ("review.verifier", 97, _ROTATED_VERIFIER),
+                    ):
+                        await session.execute(
+                            text(
+                                "INSERT INTO prompt_versions "
+                                "(id,key,version,content,checksum,is_active) "
+                                "VALUES (gen_random_uuid(),:key,:version,:content,:sum,true)"
+                            ),
+                            {
+                                "key": key,
+                                "version": version,
+                                "content": content,
+                                "sum": sha256(content.encode()).hexdigest(),
+                            },
+                        )
+                await _make_due(session, run_id)
+            outcomes.append(await process.handle_run.execute(run_id))
+        for _ in range(redeliveries):
+            async with factory.begin() as session:
+                await _make_due(session, run_id)
+            outcomes.append(await process.handle_run.execute(run_id))
+    actions: dict[str, list[tuple[Any, Any]]] = {}
+    tools: list[str] = []
+    for tool, request, response in await _rows(
+        factory,
+        "SELECT tool, request, response FROM run_actions WHERE run_id=:id ORDER BY index",
+        run_id,
+    ):
+        tools.append(tool)
+        actions.setdefault(tool, []).append((request, response))
+    [state] = await _rows(
+        factory, "SELECT state::text, error_code, attempt FROM runs WHERE id=:id", run_id
+    )
+    [pins] = await _rows(
+        factory,
+        "SELECT prompt_version_id, conventions_prompt_version_id, verifier_prompt_version_id "
+        "FROM runs WHERE id=:id",
+        run_id,
+    )
+    [(conventions_prompt,)] = await _rows(
+        factory,
+        "SELECT p.content FROM prompt_versions p JOIN runs r "
+        "ON p.id = r.conventions_prompt_version_id WHERE r.id=:id",
+        run_id,
+    )
+    [(verifier_prompt,)] = await _rows(
+        factory,
+        "SELECT p.content FROM prompt_versions p JOIN runs r "
+        "ON p.id = r.verifier_prompt_version_id WHERE r.id=:id",
+        run_id,
+    )
+    payloads = await _rows(
+        factory, "SELECT schema_version, summary FROM context_payloads WHERE run_id=:id", run_id
+    )
+    return Observed(
+        run_id=run_id,
+        outcomes=outcomes,
+        state=state,
+        tools=tools,
+        actions=actions,
+        manifests=[
+            (row[0], row[1], row[2])
+            for row in await _rows(
+                factory,
+                "SELECT policy_snapshot_id, stage, attempt FROM context_manifests "
+                "WHERE run_id=:id ORDER BY created_at",
+                run_id,
+            )
+        ],
+        manifest_blocks=[
+            row[0]
+            for row in await _rows(
+                factory,
+                "SELECT blocks FROM context_manifests WHERE run_id=:id ORDER BY created_at",
+                run_id,
+            )
+        ],
+        manifest_ids=[
+            row[0]
+            for row in await _rows(
+                factory,
+                "SELECT id FROM context_manifests WHERE run_id=:id ORDER BY created_at",
+                run_id,
+            )
+        ],
+        snapshots=[
+            row[0]
+            for row in await _rows(
+                factory, "SELECT snapshot_id FROM run_policy_snapshots WHERE run_id=:id", run_id
+            )
+        ],
+        pins=pins,
+        conventions_prompt=conventions_prompt,
+        verifier_prompt=verifier_prompt,
+        bodies=model_http.bodies,
+        queue=queue,
+        payloads=payloads,
+        checkpoint_meta=[
+            row[0]
+            for row in await _rows(
+                factory,
+                "SELECT fitted_context->'pr_meta' FROM review_candidate_checkpoints "
+                "WHERE run_id=:id ORDER BY attempt",
+                run_id,
+            )
+        ],
+        checkpoint_attempts=[
+            row[0]
+            for row in await _rows(
+                factory,
+                "SELECT attempt FROM review_candidate_checkpoints "
+                "WHERE run_id=:id ORDER BY attempt",
+                run_id,
+            )
+        ],
+        transaction_checks=[] if transaction_checks is None else transaction_checks,
+    )
+
+
+def _observe(
+    env: Env,
+    *,
+    version: int,
+    retry: bool = False,
+    rag: bool = False,
+    seeded_after: int | None = None,
+    caller: str = _USER,
+    llm: LlmSettings = _LLM,
+    review_kind: str | None = None,
+    verifier_kinds: tuple[str, ...] = ("verifier",),
+    files: tuple[dict[str, Any], ...] | None = None,
+    redeliveries: int = 0,
+    on_review: Callable[[UUID], None] | None = None,
+    prior_attempts: int = 0,
+    checkpoint_retry: bool = False,
+    missing_retrieved_on_retry: bool = False,
+    tamper_fitted_digest_on_retry: bool = False,
+    check_transactions: bool = False,
+) -> Observed:
+    transaction_checks: list[str] = []
+    observer = create_engine(
+        env.database_url,
+        connect_args={"application_name": f"{env.schema}_observer"},
+        poolclass=NullPool,
+    )
+    worker_name = f"{env.schema}_worker"
+
+    def transaction_probe(stage: str) -> None:
+        with observer.connect() as connection:
+            open_transactions = connection.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() "
+                    "AND application_name=:name AND state LIKE 'idle in transaction%'"
+                ),
+                {"name": worker_name},
+            )
+        assert open_transactions == 0, f"open worker transaction during {stage}"
+        transaction_checks.append(stage)
+
+    async def scenario() -> Observed:
+        engine = create_async_engine(
+            env.database_url,
+            connect_args={
+                "options": f"-csearch_path={env.schema}",
+                "application_name": worker_name,
+            },
+            poolclass=NullPool,
+        )
+        try:
+            return await _scenario(
+                async_sessionmaker(engine, expire_on_commit=False),
+                version=version,
+                retry=retry,
+                rag=rag,
+                seeded_after=seeded_after,
+                caller=caller,
+                llm=llm,
+                review_kind=review_kind,
+                verifier_kinds=verifier_kinds,
+                files=files,
+                redeliveries=redeliveries,
+                on_review=on_review,
+                prior_attempts=prior_attempts,
+                checkpoint_retry=checkpoint_retry,
+                missing_retrieved_on_retry=missing_retrieved_on_retry,
+                tamper_fitted_digest_on_retry=tamper_fitted_digest_on_retry,
+                transaction_probe=transaction_probe if check_transactions else None,
+                transaction_checks=transaction_checks,
+            )
+        finally:
+            await engine.dispose()
+
+    try:
+        return asyncio.run(scenario())
+    finally:
+        observer.dispose()
+
+
+# The trace of a v4 attempt, as built (G aligns the canon, PIPELINE_SPEC §7, with it). The
+# stage's ``context.build`` is the attempt's only one (#168 part 6); the change summary
+# agent's ``llm.call`` (#316) follows the verifier's without a manifest; finalization
+# follows the committed candidate checkpoint and verifier while still running.
+_SNAPSHOT_PATH_STEPS = [
+    "policy.load",
+    "vcs.fetch_diff",
+    "context.build",
+    "context.manifest",
+    "llm.call",
+    "llm.repo_conventions",
+    "context.manifest",
+    "llm.call",
+    "llm.review_output",
+    "review.postprocess",
+    "context.manifest",
+    "llm.call",
+    "llm.call",
+    "llm.verify",
+    "review.finalize",
+    "review.publish_start",
+]
+_LEGACY_STEPS = [
+    "policy.load",
+    "vcs.fetch_diff",
+    "context.build",
+    "llm.call",
+    "llm.repo_conventions",
+    "llm.call",
+    "llm.review_output",
+    "review.finalize",
+    "review.publish_start",
+]
+
+
+def _assert_snapshot_path(
+    observed: Observed,
+    *,
+    attempt: int,
+    earlier: tuple[str, ...] = (),
+    review_fallback: bool = False,
+    version: int = 4,
+    rag: bool = False,
+    summarized: bool = True,
+) -> None:
+    run_id, (review_pin, _, verifier_pin) = observed.run_id, observed.pins
+    assert observed.state == ("publishing", None, attempt)
+    steps = list(_SNAPSHOT_PATH_STEPS)
+    if not summarized:
+        # The attempt's four calls leave the change summary agent no slot: no call is sent.
+        del steps[steps.index("llm.review_output") - 1]
+    if rag:
+        # RAG is on: the stage records the index after the context build.
+        steps.insert(steps.index("context.build") + 1, "context.rag")
+    stages = ["conventions", "review", "verification"]
+    if review_fallback:
+        # The fallback is one more review call with a manifest of its own.
+        at = steps.index("llm.call", steps.index("llm.repo_conventions")) + 1
+        steps[at:at] = ["context.manifest", "llm.call"]
+        stages.insert(1, "review")
+    assert observed.tools == [*earlier, *steps]
+    # Selector and snapshot: the run's one stored snapshot carries every call of the run.
+    [snapshot_id] = observed.snapshots
+    assert [policy["policy_snapshot_id"] for _, policy in observed.actions["policy.load"]] == [
+        str(snapshot_id)
+    ] * (1 + earlier.count("policy.load"))
+    assert observed.manifests == [(snapshot_id, stage, attempt) for stage in stages]
+    # No block of this run is retrieved (no code index is seeded, or the pinned prompt shows
+    # none): every stored block keeps the selection metadata of a retrieved one (ADR 0001 §9)
+    # as None.
+    assert len(observed.manifest_blocks) == len(stages)
+    assert all(observed.manifest_blocks)
+    assert {
+        (block["selection_reason"], block["index_commit_sha"], block["edge_kind"])
+        for blocks in observed.manifest_blocks
+        for block in blocks
+    } == {(None, None, None)}
+    # R19: the stage counts the blocks of a v4 run with the counter the profile pins
+    # (counter/v2, three characters per token): L1 the two hunks, L4 the ``User`` signature
+    # and docstring, L3 the whole service file, L2 the test file's window.
+    [(_, stage_build)] = observed.actions["context.build"]
+    assert stage_build["tokens_by_level"] == {"L1": 67, "L4": 15, "L3": 66, "L2": 16}
+    # The run's one context_payloads row is that build's response (schema 2).
+    assert observed.payloads == [(2, stage_build)]
+    calls = [request for request, _ in observed.actions["llm.call"]]
+    if summarized:
+        *calls, summary = calls
+        assert (summary["operation"], summary["prompt_version_id"]) == ("change_summary", None)
+    manifests = observed.actions["context.manifest"]
+    assert [call["stage"] for call in calls] == stages
+    for call, (manifest_request, manifest) in zip(calls, manifests, strict=True):
+        assert call["policy_snapshot_id"] == str(snapshot_id)
+        assert (call["call_id"], call["manifest_id"]) == (
+            manifest_request["call_id"],
+            manifest["manifest_id"],
+        )
+        # A single fit: the estimate of the sent prompt is the manifest's own count.
+        assert call["input_tokens_estimate"] == manifest["input_tokens"]
+    bodies = observed.bodies
+    if review_fallback:
+        # The failed primary call and the fallback: one prompt, two calls, two rows.
+        assert [call["kind"] for call in calls[1:3]] == ["primary", "fallback"]
+        assert calls[1]["manifest_id"] != calls[2]["manifest_id"]
+        assert bodies[1]["messages"] == bodies[2]["messages"]
+        calls, manifests, bodies = ([items[0], *items[2:]] for items in (calls, manifests, bodies))
+    assert calls[1]["prompt_version_id"] == str(review_pin)
+    assert calls[2]["prompt_version_id"] == str(verifier_pin)
+    conventions_body, review_body, verifier_body = bodies
+    assert review_body["messages"][0]["content"] == (_V5_CONTENT if version == 5 else _V4_CONTENT)
+    # L2-L4: the review gets the context excerpts of the stage, counted in its manifest.
+    review_prompt = review_body["messages"][-1]["content"]
+    # v4 has no retrieved section; v5 always shows one, here empty.
+    if version == 5:
+        assert "</context_excerpts>\n<retrieved_excerpts>\n\n</retrieved_excerpts>\n" in (
+            review_prompt
+        )
+    else:
+        assert "<retrieved_excerpts>" not in review_prompt
+    excerpts = re.findall(
+        r'<excerpt block_id="([^"]+)" level="(L[234])" path="([^"]+)"', review_prompt
+    )
+    assert [(level, path) for _, level, path in excerpts] == [
+        ("L4", "pkg/models.py"),
+        ("L3", _PATH),
+        ("L2", _TEST_PATH),
+    ]
+    (l4, _, _), (l3, _, _), _ = excerpts
+    # The snapshot-path L4 id: the head and a digest, never the path.
+    assert re.fullmatch(r"L4:f{12}:[0-9a-f]{16}", l4)
+    assert set(manifests[1][1]["tokens_by_role"]) == {
+        "diff",
+        "ast_excerpt",
+        "source_excerpt",
+        "policy_document",
+    }
+    # The verifier gets the candidate's citations: the diff line and the cited L3 excerpt.
+    verifier_prompt = verifier_body["messages"][-1]["content"]
+    block = file_block_id(_PATH)
+    assert f'<ref block_id="{block}" start_line="12" end_line="12" />' in verifier_prompt
+    assert f'<ref block_id="{l3}" start_line="12" end_line="12" />' in verifier_prompt
+    assert f'<file block_id="{block}" path="{_PATH}"' in verifier_prompt
+    assert '<line n="12" type="added">    extra = 1</line>' in verifier_prompt
+    assert f'<excerpt block_id="{l3}" level="L3" path="{_PATH}"' in verifier_prompt
+    assert '<line n="12">    extra = 1</line>' in verifier_prompt
+    # Only the cited excerpt: neither the L4 signature nor the L2 window.
+    assert verifier_prompt.count("<excerpt ") == 1
+    [(verify, decisions)] = observed.actions["llm.verify"]
+    assert verify["manifest_id"] == manifests[2][1]["manifest_id"]
+    assert verify["accepted_call_id"] == calls[2]["call_id"]
+    assert [decision["status"] for decision in decisions["decisions"]] == ["supported"]
+    # The publication input: the verified finding, stored and handed to the publisher.
+    [(_, output)] = observed.actions["llm.review_output"]
+    assert [
+        (finding["path"], finding["line"], finding["evidence_refs"])
+        for finding in output["findings"]
+    ] == [
+        (
+            _PATH,
+            _ADDED_LINE,
+            [
+                {"block_id": block, "start_line": 12, "end_line": 12},
+                {"block_id": l3, "start_line": 12, "end_line": 12},
+            ],
+        )
+    ]
+    [(_, postprocess)] = observed.actions["review.finalize"]
+    assert postprocess["inline"] == 1
+    assert postprocess["change_summary"] == (
+        {"status": "shown", "received": 1, "shown": 1}
+        if summarized
+        else {"status": "failed", "error_code": "llm_unavailable"}
+    )
+    assert [(pointer.run_id, pointer.findings_hash) for pointer in observed.queue.published] == [
+        (run_id, postprocess["findings_hash"])
+    ]
+    # Every call takes the run's pinned row, not the active one (R1).
+    assert conventions_body["messages"][0]["content"] == observed.conventions_prompt
+    # The verifier is sent the body of its pinned row, without the front matter.
+    assert verifier_body["messages"][0]["content"] == (
+        observed.verifier_prompt.split("\n---\n", 1)[1].strip()
+    )
