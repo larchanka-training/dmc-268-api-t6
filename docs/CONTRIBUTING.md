@@ -333,6 +333,14 @@ uv run mypy .
 uv run pytest
 ```
 
+Ожидаемый результат без предупреждений (версии инструментов фиксированы в `uv.lock`; подробности и замер правил — в [`.agents/rules/backend.md`](../.agents/rules/backend.md#4-language-rules)):
+
+- `uv run ruff check .` — код выхода `0`, `All checks passed!`, `0` предупреждений конфигурации (`convention = "google"` отключает конфликтные правила `D`).
+- `uv run ruff format --check .` — код выхода `0`, все файлы отформатированы.
+- `uv run mypy .` (в CI на Linux; на macOS/Windows: `uv run mypy --platform linux .`) — код выхода `0`, `Success: no issues found in … source files` (проверка `strict = true` на `app/` и `tests/`).
+- `uv run pytest` (локально) — код выхода `0`, `0` новых предупреждений от кода репозитория; без `TEST_DATABASE_URL` и `TEST_RABBITMQ_URL` пропускаются тесты `-m integration`, платформенные пропуски допустимы.
+- Шаг «Unit tests (zero skips)» в CI (`ci-cd.yml`): `uv run pytest -m "not integration" -n auto -rs --strict-markers …` — код выхода `0`, `0` skipped, `0` предупреждений от кода репозитория. Предупреждения сторонних зависимостей при импорте testclient (`StarletteDeprecationWarning` в `fastapi.testclient` и `DeprecationWarning` для `anyio.abc.BlockingPortal` в `starlette.testclient`) зафиксированы как baseline и не глушатся глобальным `-W ignore` (в CI автоматический fail-on-warning включен для `CoverageWarning`).
+
 Тесты `-m integration` без PostgreSQL и RabbitMQ пропускаются; как их включить — в [README](../README.md#tests).
 
 **Куда слать PR.** В ветку `main` нужного репозитория:
