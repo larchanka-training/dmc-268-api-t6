@@ -516,7 +516,9 @@ class _Stage:
     head_sha: str | None = None
     ignored_file_paths: frozenset[str] = frozenset()
 
-    def __init__(self, snapshot: PolicySnapshot | None, payload: ReviewContextPayload | None):
+    def __init__(
+        self, snapshot: PolicySnapshot | None, payload: ReviewContextPayload | None
+    ) -> None:
         self.snapshot_for_llm = snapshot
         self.payload = payload
 

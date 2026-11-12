@@ -4,8 +4,9 @@
 
 - Always use uv for dependencies and running tools (never pip/poetry).
 - Never `--no-verify`.
-- Run the gates before claiming done: `uv run ruff check .`, `uv run ruff format --check .`,
-  `uv run mypy .`, `uv run pytest`.
+- Run the gates before claiming done without errors or new warnings: `uv run ruff check .`,
+  `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest` (criteria for
+  «без предупреждений» and `ruff` rule rationale: `.agents/rules/backend.md` §4).
 - No new dependency without a line in the PR body (`uv add`, commit `uv.lock`).
 - Never edit files owned by another open PR without a comment there.
 - User docs (the UI repo `docs-site/content/docs/`) follow `docs/CONTRIBUTING.md` §8: a PR that
@@ -106,7 +107,43 @@ from a missing scope.
 - No business logic in routers — routers decode the transport contract and call a
   use case.
 - Enums are `StrEnum`.
-- Ruff: `select = ["E", "F", "I", "UP", "B", "SIM"]`, line length 100.
+- Ruff: `select = ["E", "F", "I", "UP", "B", "SIM", "W", "FA", "G", "PIE", "T10", "TID", "PLE", "YTT", "ANN", "D"]`,
+  line length 100, `[tool.ruff.lint.pydocstyle] convention = "google"`, `ignore` in `pyproject.toml`
+  (no directory `per-file-ignores`, no package-wide `# noqa`).
+  - Baseline measurements on `main` (`ruff 0.16.6`, entire repository `.` including `.agents/`):
+    - Clean expanded families (0 hits on `main`): `W`, `FA`, `G`, `PIE`, `T10`, `TID`, `PLE`, `YTT`.
+    - `D` (13,605 total hits):
+      - Presence rules `D100`–`D107` (12,229 hits: 7,724 `D103`, 2,527 `D102`, 1,186 `D101`,
+        540 `D107`, 184 `D105`, 42 `D100`, 26 `D104`) omitted to avoid boilerplate on helpers/tests.
+      - `D401` (647 hits, English imperative mood false positives on Russian docstrings) disabled by
+        `convention = "google"` alongside `D203`/`D213`.
+      - Formatting backlog (729 hits, including 333 inside `.agents/` SYNC copies from UI):
+        `D205` (365 hits: 203 outside, 162 in `.agents/`), `D209` (327 hits: 168 outside, 159 in
+        `.agents/`), `D301` (15 hits: 14 outside, 1 in `.agents/`), `D403` (13 hits: 3 outside,
+        10 in `.agents/`), `D202` (8 hits: 4 in `app/`, 4 in `tests/`), `D210` (1 hit in `.agents/`).
+      - All other Google-convention rules (`D200`, `D201`, `D206`–`D208`, `D211`, `D212`, `D214`,
+        `D300`, `D402`, `D405`, `D410`–`D412`, `D414`–`D419`) have 0 hits and are strictly enforced.
+    - `ANN` (714 total hits): `ANN401` (707 `Any` usages: 29 `app/`, 537 `tests/`, 17 `scripts/`,
+      2 `review/`, 122 `.agents/`) ignored because `mypy --strict` verifies types; remaining 7
+      hits in `tests/` typed directly.
+    - Deferred families:
+      - `ERA001` (3 hits: 2 in `tests/` addressed by #458 Part 1, 1 in `.agents/` SYNC copy;
+        deferred to #458 Part 1 merge).
+      - `RUF` (401 Cyrillic homoglyph hits `RUF001`–`RUF003`: 13 in `.agents/` SYNC, 95 across 56
+        files including 5 >60 KB test files).
+- «Без предупреждений» (gate pass criteria; baseline предупреждений зафиксирован, новые не допускаются):
+  - `uv run ruff check .`: exit code `0`, `All checks passed!`, 0 configuration warnings.
+  - `uv run ruff format --check .`: exit code `0`, all files formatted, 0 warnings.
+  - `uv run mypy .`: exit code `0`, `Success: no issues found in <N> source files` (`strict = true`
+    on `app/` and `tests/`), 0 warnings/errors.
+  - Локальный запуск `uv run pytest`: exit code `0`, 0 failed; тесты `-m integration` пропускаются,
+    если `TEST_DATABASE_URL` / `TEST_RABBITMQ_URL` не заданы; платформенные пропуски допустимы;
+    0 новых предупреждений от кода репозитория.
+  - Команда CI (`ci-cd.yml`): `uv run pytest --strict-markers -W error::coverage.exceptions.CoverageWarning -m "not integration"`;
+    exit code `0`, 0 skipped, 0 предупреждений от кода репозитория (`app/`, `tests/`, `scripts/`,
+    `review/`). Базовый список внешних предупреждений (`StarletteDeprecationWarning` в testclient,
+    `anyio.abc.BlockingPortal`) и `PytestAssertRewriteWarning` на `tests.github_webhook_fakes` /
+    `tests.bitbucket_connection_postgres_support` зафиксирован как baseline и не должен расти или глушиться `-W ignore`.
 
 ## 5. Testing
 

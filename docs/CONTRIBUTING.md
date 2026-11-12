@@ -333,6 +333,14 @@ uv run mypy .
 uv run pytest
 ```
 
+Ожидаемый результат без предупреждений (версии инструментов фиксированы в `uv.lock`; подробности и замер правил — в [`.agents/rules/backend.md`](../.agents/rules/backend.md#4-language-rules)):
+
+- `uv run ruff check .` — код выхода `0`, `All checks passed!`, `0` предупреждений конфигурации (`convention = "google"` отключает конфликтные правила `D`).
+- `uv run ruff format --check .` — код выхода `0`, все файлы отформатированы.
+- `uv run mypy .` — код выхода `0`, `Success: no issues found in … source files` (проверка `strict = true` на `app/` и `tests/`, целевая ОС CI — Linux).
+- `uv run pytest` (локально) — код выхода `0`, `0` новых предупреждений от кода репозитория; без `TEST_DATABASE_URL` и `TEST_RABBITMQ_URL` пропускаются только `-m integration` (юнит-тесты `-m "not integration"` не пропускаются), платформенные пропуски допустимы.
+- Шаг pytest в CI (`ci-cd.yml`): `uv run pytest --strict-markers -W error::coverage.exceptions.CoverageWarning -m "not integration"` — код выхода `0`, `0` skipped, `0` предупреждений от кода репозитория. Известные базовые предупреждения сторонних зависимостей (`fastapi.testclient` / `starlette.testclient`) и `PytestAssertRewriteWarning` для `tests.github_webhook_fakes` / `tests.bitbucket_connection_postgres_support` зафиксированы как baseline и не глушатся глобальным `-W ignore`.
+
 Тесты `-m integration` без PostgreSQL и RabbitMQ пропускаются; как их включить — в [README](../README.md#tests).
 
 **Куда слать PR.** В ветку `main` нужного репозитория:

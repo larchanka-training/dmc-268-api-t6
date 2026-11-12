@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -81,7 +82,7 @@ def test_bitbucket_run_routes_to_bound_resources_without_github_fallback(
         status_reconciler = None
 
         @asynccontextmanager
-        async def attempt(self, **kwargs: Any):  # type: ignore[no-untyped-def]
+        async def attempt(self, **kwargs: Any) -> AsyncIterator[BitbucketAttemptBundle]:
             assert kwargs["claimed"] == CLAIMED
             assert kwargs["expected_input"] == INPUT
             calls.append("admitted")
