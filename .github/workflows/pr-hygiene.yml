@@ -1,0 +1,38 @@
+name: PR hygiene
+
+# Checks PR title length/format, required template sections, Refs lines, commit subjects,
+# and zero closing keywords (Closes/Fixes/Resolves) per docs/CONTRIBUTING.md. The script
+# is SYNC-mirrored from dmc-268-ui-t6 (.github/scripts/check_pr_hygiene.py). Not a
+# required check of ruleset `main`.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: pr-hygiene-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pr-hygiene:
+    name: PR hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.11"
+          python-version: "3.13"
+
+      # The script is stdlib only: --no-project runs it without syncing the project environment.
+      - name: Check PR hygiene
+        run: uv run --no-project python .github/scripts/check_pr_hygiene.py

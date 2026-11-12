@@ -72,6 +72,10 @@ Use the affected module/component (folder) name, lowercase, kebab-case.
 
 ## 3. Footer
 
+- Before committing/pushing, check the subject (≤72) and the whole message (no closing keyword
+  `Closes`, `Fixes`, or `Resolves` followed by `#N` or `owner/repo#N`; run
+  `.github/scripts/check_pr_hygiene.py --rev-range origin/main..HEAD` or see `api` canon
+  `docs/CONTRIBUTING.md` §2 command 4б).
 - Reference the issue: `Refs #N` (same repo) or `Refs owner/repo#N` (cross-repo).
 - Never a closing keyword (`Closes`/`Fixes`/`Resolves`), same-repo or cross-repo — the tech
   lead closes the issue after checking its AC.
