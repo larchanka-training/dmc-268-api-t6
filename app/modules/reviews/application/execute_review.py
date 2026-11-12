@@ -398,9 +398,7 @@ class ExecuteReviewRun:
                 run_id,
             )
             incomplete = tuple(sorted({file.path for file in changed_files}))
-            return await self._publisher.execute(
-                run_id, NoModelAnswer(incomplete_paths=incomplete)
-            )
+            return await self._publisher.execute(run_id, NoModelAnswer(incomplete_paths=incomplete))
         reviewer_manifest: CallManifest | None = None
         model_output: Mapping[str, object] | str | bytes
         if isinstance(reply, ReviewReply):

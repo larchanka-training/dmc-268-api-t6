@@ -269,8 +269,11 @@ def test_no_model_answer_with_incomplete_paths_publishes_partial_bounded_list() 
         )
         for idx in range(1, 8)
     ]
-    repository = Repository(files, project(files, snapshot_path=True), review_event="REQUEST_CHANGES")
-    queue, committed = Queue(), []
+    repository = Repository(
+        files, project(files, snapshot_path=True), review_event="REQUEST_CHANGES"
+    )
+    queue = Queue()
+    committed: list[str] = []
     omitted = tuple(item.filename for item in files)
 
     marker = NoModelAnswer(incomplete_paths=omitted)

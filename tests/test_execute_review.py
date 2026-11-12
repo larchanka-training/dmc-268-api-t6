@@ -4194,8 +4194,10 @@ def _overflow_store(
     snapshots: list[Any],
     *,
     snapshot_path: bool = True,
-) -> tuple[Any, StoreReviewOutput, list[Any], list[Any]]:
+) -> tuple[Any, Any, list[Any], list[Any]]:
     from dataclasses import dataclass, field
+    from datetime import datetime
+
     from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
     from app.modules.reviews.application.post_processing_diff_map import diff_map_from_snapshots
     from app.modules.reviews.application.queue_messages import ReviewPublishPointer
@@ -4256,8 +4258,22 @@ def _overflow_store(
             self.state = "publishing"
             return ReviewPublication("a" * 40, (), self.body)
 
-        async def enter_publishing(self, run_id: UUID, *, postprocess_response: dict[str, Any], **_: Any) -> None:
+        async def enter_publishing(
+            self,
+            run_id: UUID,
+            *,
+            lease_until: datetime,
+            postprocess_request: dict[str, Any],
+            postprocess_response: dict[str, Any],
+            started_at: datetime,
+            duration_ms: int,
+            verify_request: dict[str, Any] | None = None,
+            verify_response: dict[str, Any] | None = None,
+        ) -> None:
             self.response = postprocess_response
+
+        async def mark_review_published(self, run_id: UUID) -> None:
+            return None
 
     @dataclass
     class _Uow:
@@ -4282,7 +4298,9 @@ def _overflow_store(
             pointers.append(pointer)
 
     repo = _Repo()
-    store = StoreReviewOutput(lambda: _Uow(repo), _Queue(), worker_id="worker", run_url=lambda _: None)
+    store = StoreReviewOutput(
+        lambda: _Uow(repo), _Queue(), worker_id="worker", run_url=lambda _: None
+    )
     published_raw: list[Any] = []
 
     class _Publisher:
@@ -4305,6 +4323,7 @@ def _run_overflow_pipeline(
     store_out: tuple[Any, Any, list[Any], list[Any]] | None = None,
 ) -> tuple[Any, list[Any], list[Any], Any, bool]:
     import httpx
+
     from app.modules.reviews.infrastructure.llm.models import GatewayReviewModel
     from tests.test_llm_gateway import Harness
 
@@ -4355,7 +4374,9 @@ def _run_overflow_pipeline(
     return repo, pointers, published_raw, harness, outcome
 
 
-@pytest.mark.parametrize("pr_body", [None, "Overview. " * 400], ids=["zero-files-fit", "pr-meta-overflow"])
+@pytest.mark.parametrize(
+    "pr_body", [None, "Overview. " * 400], ids=["zero-files-fit", "pr-meta-overflow"]
+)
 def test_execute_review_context_overflow_publishes_partial_review_with_truncated_list(
     pr_body: str | None,
 ) -> None:
@@ -4432,6 +4453,7 @@ def test_execute_review_runtime_provider_overflow_publishes_partial_review(
     payload: dict[str, Any],
 ) -> None:
     import httpx
+
     from app.modules.reviews.application.get_run_diff import DiffSnapshot
 
     snapshots = [
@@ -4496,6 +4518,7 @@ def test_execute_review_policy_budget_exceeded_never_publishes_review() -> None:
 
 def test_execute_review_legacy_technical_only_overflow_publishes_none_coverage() -> None:
     import httpx
+
     from app.modules.reviews.application.get_run_diff import DiffSnapshot
 
     snapshots = [DiffSnapshot("data/huge.txt", None, "d" * 40, omission_reason="too_large")]

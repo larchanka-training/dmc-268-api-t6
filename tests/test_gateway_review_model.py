@@ -373,7 +373,9 @@ def test_zero_fitted_files_raises_context_overflow_without_provider_call() -> No
     assert transport.requests == []
 
     # Mandatory policy budget check still runs first when both fail.
-    over_policy = replace(context, policy_snapshot=_snapshot(max_input_tokens=8_300, max_policy_tokens=1))
+    over_policy = replace(
+        context, policy_snapshot=_snapshot(max_input_tokens=8_300, max_policy_tokens=1)
+    )
     with pytest.raises(PolicyError) as policy_raised:
         _draft(_gateway(transport), over_policy)
     assert policy_raised.value.code == PolicyErrorCode.PROMPT_BUDGET_EXCEEDED
