@@ -1,7 +1,7 @@
 """Repository-scoped, revocable agent credentials.
 
-Revision ID: 20261109_0062
-Revises: 20261106_0061
+Revision ID: 20261112_0065
+Revises: 20261109_0064
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "20261109_0062"
-down_revision = "20261106_0061"
+revision = "20261112_0065"
+down_revision = "20261109_0064"
 branch_labels = None
 depends_on = None
 
