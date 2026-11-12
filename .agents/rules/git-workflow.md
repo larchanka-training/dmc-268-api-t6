@@ -15,8 +15,8 @@ links, no `Impact:` blocks) — this file ships to any team using this stack.
 
 ## Commits
 
-- Conventional Commits (`type(scope): summary`).
-- Reference the issue: `(#N)` in the subject, or `Refs #N` in the footer.
+- Conventional Commits (`type(scope): summary`), subject line ≤72 characters (standard git `Merge ...` and `Revert "..."` exempt).
+- Reference the issue: `(#N)` in the subject, or `Refs #N` in the footer (`Refs owner/repo#N` cross-repo).
 - Small, atomic commits — one logical change per commit.
 - Never `--no-verify`.
 - Rebase on `main` before requesting review.
@@ -24,6 +24,9 @@ links, no `Impact:` blocks) — this file ships to any team using this stack.
 ## Pull requests
 
 - Title: conventional (`type(scope): summary`), ≤72 characters.
+- Overlap check: before opening or updating a PR, check open PRs touching the same files
+  or same issue/part (`gh pr list --state open --limit 200`); post a heads-up comment on overlapping
+  PRs (`AGENTS.md`) and document stacking/dependencies in `What`.
 - Body has four mandatory sections, in this order — the AI reviewer reads the body
   first:
   - `What`
