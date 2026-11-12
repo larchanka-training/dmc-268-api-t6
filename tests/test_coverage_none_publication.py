@@ -254,3 +254,39 @@ def test_the_marker_is_an_empty_mapping() -> None:
     assert dict(marker) == {}
     assert len(marker) == 0
     assert "summary" not in marker
+
+
+def test_no_model_answer_with_incomplete_paths_publishes_partial_bounded_list() -> None:
+    files = [
+        DiffSnapshot(
+            f"src/file_{idx}.py",
+            "@@ -0,0 +1,2 @@\n+a = 1\n+b = 2",
+            "a" * 40,
+            status="added",
+            additions=2,
+            changes=2,
+            review_patch="@@ -0,0 +1,2 @@\n+a = 1\n+b = 2",
+        )
+        for idx in range(1, 8)
+    ]
+    repository = Repository(files, project(files, snapshot_path=True), review_event="REQUEST_CHANGES")
+    queue, committed = Queue(), []
+    omitted = tuple(item.filename for item in files)
+
+    marker = NoModelAnswer(incomplete_paths=omitted)
+    assert dict(marker) == {}
+    assert len(marker) == 0
+
+    assert asyncio.run(_store(repository, queue, committed).execute(_RUN, marker)) is True
+
+    assert repository.answers == [None]
+    assert committed == ["commit"]
+    assert repository.response["verdict"] is None
+    assert repository.response["coverage"]["status"] == "partial"
+    assert repository.response["coverage"]["reviewed_files"] == 0
+    assert repository.response["coverage"]["reason_counts"] == {"review_input_incomplete": 7}
+    assert [pointer.review_event for pointer in queue.pointers] == ["COMMENT"]
+    assert "модель получила не весь patch" in repository.body
+    assert "`src/file_1.py`" in repository.body
+    assert "- Ещё причин: 2" in repository.body
+    assert "и ещё 2" in repository.body
