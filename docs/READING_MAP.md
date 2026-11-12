@@ -2,7 +2,8 @@
 
 Какой раздел открыть под задачу, чтобы не читать спеку целиком. Карта покрывает
 [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md) (SD), [PIPELINE_SPEC.md](PIPELINE_SPEC.md) (PIPELINE) и
-[CONTEXT_AND_VERIFICATION_SPEC.md](CONTEXT_AND_VERIFICATION_SPEC.md) (CVS). Правило чтения —
+[CONTEXT_AND_VERIFICATION_SPEC.md](CONTEXT_AND_VERIFICATION_SPEC.md) (CVS), а также
+[INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) (INC). Правило чтения —
 блок Context discipline в [AGENTS.md](../AGENTS.md).
 
 ## Как читать
@@ -21,6 +22,8 @@
 
 | Задача | Что открыть |
 | --- | --- |
+| Инкрементальный Run: активный прогон, scope дельты, coverage v2 и целостность | [INC §6.4](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#64-судьба-активного-run-при-synchronize-решение-доведение-до-публикации-и-снятие-противоречия-с-t15), [INC §6.5](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#65-определение-базы-разницы-diff-base-selection) |
+| Причины fallback, вердикт и QA инкремента | [INC §6.2](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#62-расширение-модели-данных-run-и-ddl-alembic), [INC §6.8](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#68-формирование-вердикта-check-run-и-агрегация-сохраняющихся-дефектов), [INC §6.9](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#69-сквозная-матрица-сценариев-для-регрессионного-тестирования-qa-qa-inc-01--qa-inc-28) |
 | Как устроен код сейчас: от вебхука до опубликованного ревью | [ARCHITECTURE.md](ARCHITECTURE.md), целевая раскладка — [SD §4](SYSTEM_DESIGN.md#4-c4--уровень-2-контейнеры) |
 | Добавить или изменить `error_code` | [PIPELINE §6](PIPELINE_SPEC.md#6-каталог-error_code), [PIPELINE §5](PIPELINE_SPEC.md#5-сбои-и-деградация) |
 | Новая фаза или `tool` в `run_actions`, правка трейса | [PIPELINE §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions), [SD §6.2](SYSTEM_DESIGN.md#62-прогон-быстрый-путь) |
@@ -192,14 +195,19 @@
 
 ## Инкрементальное ревью и лимиты
 
-[`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) превышает 80 КБ. Перед чтением выполните `rg -n '^## |^### ' docs/INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md` и откройте только нужный диапазон строк:
+[`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) превышает 80 КБ. Перед чтением выполните `grep -n '^## ' docs/INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`, затем `grep -n '^### ' docs/INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md` и откройте только нужный подраздел:
 
 | Раздел | Содержание |
 | --- | --- |
-| §1–§5 | Инварианты, fingerprint, дедупликация, треды и базовые QA |
+| §1 | Область, терминология и инварианты |
+| §2 | Fingerprint и смещения строк |
+| §3 | Подавление дубликатов |
+| §4 | Устаревшие и решённые треды |
+| §5 | QA части 1 |
 | §6.1–§6.3 | Концепция, DDL и переходы Run |
-| §6.4–§6.5 | Активный Run, закреплённая голова и выбор базы |
-| §6.6–§6.7 | Развилки, scope дельты и вход модели |
+| §6.4 | Активный Run, закреплённая голова, scope дельты, coverage v2 и ошибка целостности |
+| §6.5 | Выбор и проверка пригодности базы |
+| §6.6–§6.7 | Развилки и вход модели |
 | §6.8–§6.9 | Вердикт, coverage и QA-INC |
 | §7 | Лимиты и квоты |
 
