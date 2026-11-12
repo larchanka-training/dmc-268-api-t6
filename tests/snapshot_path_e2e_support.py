@@ -827,7 +827,7 @@ def _assert_snapshot_path(
     steps = list(_SNAPSHOT_PATH_STEPS)
     if not summarized:
         # The attempt's four calls leave the change summary agent no slot: no call is sent.
-        del steps[steps.index("llm.review_output") - 1]
+        del steps[steps.index("llm.verify") - 1]
     if rag:
         # RAG is on: the stage records the index after the context build.
         steps.insert(steps.index("context.build") + 1, "context.rag")

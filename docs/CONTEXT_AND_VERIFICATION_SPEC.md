@@ -1499,7 +1499,7 @@ runs завершаются закреплённым legacy pipeline; новые
 
 Коды, которые шлюз вернул агенту «что изменилось» (PIPELINE_SPEC §4.5), к таблице не
 относятся: прогон с ними не падает, ревью публикуется без текста агента, а код пишется
-только в `review.postprocess.change_summary.error_code`.
+только в `review.finalize.change_summary.error_code`.
 
 ## 9. Карта diff и адаптеры VCS
 
