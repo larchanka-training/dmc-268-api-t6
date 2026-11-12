@@ -10,129 +10,33 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import dataclass, field
-from datetime import datetime
-from types import TracebackType
 from typing import Any, cast
 from uuid import UUID
 
 import pytest
 
-from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
-from app.modules.reviews.application.post_processing_diff_map import diff_map_from_snapshots
-from app.modules.reviews.application.queue_messages import ReviewPublishPointer
 from app.modules.reviews.application.review_output import (
-    FindingPostProcessingInput,
     InvalidReviewOutput,
     PublishReviewOutput,
-    ReviewOutput,
-    ReviewPublication,
     VerifiedReviewOutput,
 )
-from app.modules.reviews.application.run_coverage import RunCoverage
 from app.modules.reviews.application.run_failures import classify_failure
-from app.modules.reviews.application.store_review_output import (
-    NoModelAnswer,
-    PublishingGuard,
-    StoreReviewOutput,
+from app.modules.reviews.application.store_review_output import NoModelAnswer, StoreReviewOutput
+from tests.review_publication_fakes import (
+    PublicationQueueFake as Queue,
+)
+from tests.review_publication_fakes import (
+    PublicationRepositoryFake as Repository,
+)
+from tests.review_publication_fakes import (
+    PublicationUowFake as Uow,
 )
 from tests.test_clean_without_text_result import answer
 from tests.test_coverage_none_classification import project, unsupported_path
 
 _RUN = UUID(int=213)
 _TOO_LARGE = DiffSnapshot("large.txt", None, "d" * 40, omission_reason="too_large")
-
-
-@dataclass
-class Repository:
-    """The publishing boundary: every answer it was asked to store, and the last result."""
-
-    snapshots: list[DiffSnapshot]
-    coverage: RunCoverage
-    review_event: str = "REQUEST_CHANGES"
-    state: str = "running"
-    answers: list[dict[str, object] | None] = field(default_factory=list)
-    response: dict[str, Any] = field(default_factory=dict)
-    body: str = ""
-
-    async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
-        return FindingPostProcessingInput(
-            diff_map_from_snapshots(
-                repository_id=UUID(int=1),
-                code_change_number=7,
-                head_sha="a" * 40,
-                base_sha="b" * 40,
-                diff_old_sha="c" * 40,
-                snapshots=self.snapshots,
-            ),
-            frozenset(),
-            frozenset(),
-            coverage=self.coverage,
-        )
-
-    async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
-        return PublishingGuard(self.state, "worker", False, "a" * 40, True, self.review_event)
-
-    async def store_review_output(
-        self,
-        run_id: UUID,
-        model_output: dict[str, object] | None,
-        parsed: ReviewOutput,
-        processed: ProcessedReviewOutput,
-    ) -> ReviewPublication:
-        self.answers.append(model_output)
-        self.body = processed.review_body
-        self.state = "publishing"
-        return ReviewPublication("a" * 40, (), self.body)
-
-    async def enter_publishing(
-        self,
-        run_id: UUID,
-        *,
-        lease_until: datetime,
-        postprocess_request: dict[str, Any],
-        postprocess_response: dict[str, Any],
-        started_at: datetime,
-        duration_ms: int,
-        verify_request: dict[str, Any] | None = None,
-        verify_response: dict[str, Any] | None = None,
-    ) -> None:
-        self.response = postprocess_response
-
-    async def mark_review_published(self, run_id: UUID) -> None:
-        raise AssertionError("finalization only queues publication")
-
-
-@dataclass
-class Uow:
-    reviews: Repository
-    committed: list[str]
-
-    async def __aenter__(self) -> Uow:
-        return self
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        return None
-
-    async def commit(self) -> None:
-        self.committed.append("commit")
-
-    async def rollback(self) -> None:
-        return None
-
-
-@dataclass
-class Queue:
-    pointers: list[ReviewPublishPointer] = field(default_factory=list)
-
-    async def publish_review(self, pointer: ReviewPublishPointer) -> None:
-        self.pointers.append(pointer)
 
 
 def _store(repository: Repository, queue: Queue, committed: list[str]) -> StoreReviewOutput:
