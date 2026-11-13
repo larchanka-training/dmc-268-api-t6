@@ -52,8 +52,8 @@ from review.scripts.eval_rag_gate import (
     run_from_report,
 )
 from tests.eval_live_fakes import RECORDED_AT
-from tests.test_eval_live_rag import rag_root, record_rag, valid_answers
-from tests.test_eval_replay import edit_manifest
+from tests.eval_rag_fakes import rag_root, record_rag, valid_answers
+from tests.eval_replay_fakes import edit_manifest
 
 REVERSE = [f"RAG-{n:02d}" for n in range(1, 11)]
 CONTROL = [f"RAG-{n:02d}" for n in range(11, 17)]

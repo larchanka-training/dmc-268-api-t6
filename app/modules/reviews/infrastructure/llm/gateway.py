@@ -153,6 +153,10 @@ class _CostMetadataError(ValueError):
     """The provider amount cannot be converted to USD for this paid answer."""
 
 
+class FxQuoteUnavailableError(LlmCallFailed):
+    """The EUR route could not obtain the quote needed before a provider call."""
+
+
 class _RefusedAfterSendError(LlmCallFailed):
     """A call refused at a later key's checkpoint, after an earlier key's request went out:
     the call was made, so ``_recovery`` keeps its code (CVS §7.3) and ``_call`` traces it."""
@@ -774,7 +778,12 @@ class LlmGateway:
             quote_result = await self._get_fx_quote()
             quote = quote_result.quote if quote_result is not None else None
             if quote is None:
-                raise self._failed(LlmErrorCode.UNAVAILABLE, "ECB EUR/USD quote unavailable", state)
+                raise FxQuoteUnavailableError(
+                    LlmErrorCode.UNAVAILABLE,
+                    "ECB EUR/USD quote unavailable",
+                    usage=tuple(state.usage),
+                    calls=state.calls,
+                )
             try:
                 price = price_at_eur_quote(profile, quote.rate_usd_per_eur)
             except (LlmConfigError, DecimalException):
