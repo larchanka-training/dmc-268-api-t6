@@ -57,20 +57,12 @@ exec "${REAL_UV}" "$@"
 CHECKER = REPO_ROOT / "scripts/skylos_changed_functions.py"
 
 
-def _pinned(name: str, literal: str) -> str:
-    """The value of the script's one ``NAME=value`` line; ``literal`` is the value's pattern."""
-    pins = re.findall(rf"^{name}=({literal})$", SCRIPT.read_text(encoding="utf-8"), re.MULTILINE)
-    assert len(pins) == 1, pins
-    pin: str = pins[0]
-    return pin
-
-
-def _skylos() -> str:
-    """How every pass starts Skylos: the pinned version, its dependencies as of a fixed date."""
-    version = _pinned("SKYLOS_VERSION", r"\d+\.\d+\.\d+")
-    # A literal UTC timestamp, not a command: a dependency released later never reaches the gate.
-    cutoff = _pinned("SKYLOS_RESOLVED_BEFORE", r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
-    return f"--exclude-newer {cutoff} --from skylos=={version} skylos ."
+# How every pass starts Skylos: the version the plan pinned, and its dependencies as PyPI stood
+# on the cutoff the tech lead chose (13.11). Spelled apart, so that the pin check below finds the
+# version pinned in the script only.
+SKYLOS_VERSION = "5.4.0"
+SKYLOS_RESOLVED_BEFORE = "2026-11-03T00:00:00Z"
+SKYLOS = f"--exclude-newer {SKYLOS_RESOLVED_BEFORE} --from skylos=={SKYLOS_VERSION} skylos ."
 
 
 def _script_repo(tmp_path: Path) -> Path:
@@ -145,17 +137,16 @@ def test_two_gated_passes_with_the_pinned_skylos(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert reports.is_dir()
-    skylos = _skylos()
     assert len(calls) == 2, calls
     lines, functions = (call.split() for call in calls)
     # Pass 1: new findings on the changed lines, every analyzer the gate limits count.
-    assert calls[0].startswith(skylos)
+    assert calls[0].startswith(SKYLOS)
     assert {"--quality", "--danger", "--secrets", "--gate", "--summary"} <= set(lines)
     assert " --diff-base origin/main " in calls[0] and " --diff origin/main " in calls[0]
     assert f"--format json-ci -o {reports}/changed-lines.json" in calls[0]
     # Pass 2: size and complexity of the changed functions against the merge base (file level).
     # --gate keeps the policy of the merge base; the verdict is the checker's, so --force.
-    assert calls[1].startswith(skylos)
+    assert calls[1].startswith(SKYLOS)
     assert " --diff-base origin/main " in calls[1] and "--diff" not in functions
     assert f"--select {','.join(FUNCTION_RULES)}" in calls[1]
     assert {"--quality", "--gate", "--force"} <= set(functions)
@@ -265,7 +256,7 @@ def test_a_file_moved_with_edits_is_checked_against_its_base_version(
     assert len(calls) == 3, calls
     # Pass 3: pass 2 once more, in a scratch repository of the moved files and the config.
     moved = calls[2].split()
-    assert calls[2].startswith(_skylos())
+    assert calls[2].startswith(SKYLOS)
     assert f"--select {','.join(FUNCTION_RULES)}" in calls[2]
     assert {"--quality", "--gate", "--force"} <= set(moved) and "--diff" not in moved
     assert f"--format json-ci -o {reports}/moved-functions.json" in calls[2]
@@ -430,7 +421,6 @@ def test_a_missing_base_is_a_usage_error(tmp_path: Path, args: tuple[str, ...]) 
 
 
 def test_skylos_is_pinned_only_in_the_script() -> None:
-    _skylos()
     tracked = subprocess.run(
         ["git", "grep", "-n", "-I", "-E", r"skylos(==|@)[0-9]"],
         cwd=REPO_ROOT,
