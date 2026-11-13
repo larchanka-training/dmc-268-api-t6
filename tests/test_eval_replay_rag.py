@@ -26,19 +26,19 @@ from review.scripts.eval_provenance import (
 from review.scripts.eval_replay import ReplayError, format_console, replay
 from review.scripts.rag_snapshot import build_case_snapshot, render_snapshot
 from tests.eval_live_fakes import settings as rag_settings
+from tests.eval_rag_fakes import (
+    CASES,
+    rag_root,
+    record_rag,
+    valid_answers,
+    window_without_rag,
+)
 from tests.eval_replay_fakes import (
     DATASET_ROOT,
     REPO_ROOT,
     _record_with_digests,
     edit_manifest,
     fixture_root,
-)
-from tests.test_eval_live_rag import (
-    CASES,
-    rag_root,
-    record_rag,
-    valid_answers,
-    window_without_rag,
 )
 
 # --- RAG captures (#146): replay re-derives the recorded evidence from the frozen snapshot ---
