@@ -19,6 +19,10 @@ set -euo pipefail
 
 # The one pin of Skylos: CI and local runs both come through this script.
 SKYLOS_VERSION=5.4.0
+# Skylos's own dependencies resolve as uploaded before this time (uvx --exclude-newer), so that a
+# new release of one of them cannot change the gate. The day after SKYLOS_VERSION's release:
+# bump both together.
+SKYLOS_RESOLVED_BEFORE=2026-11-03T00:00:00Z
 # Function metrics a diff scan lists as advice; [tool.skylos.gate] rules makes them count.
 FUNCTION_RULES=SKY-Q301,SKY-C303,SKY-C304
 
@@ -40,8 +44,8 @@ repo="$(pwd)"
 skylos_gate() {
   local report="$1"
   shift
-  uvx --from "skylos==${SKYLOS_VERSION}" skylos . "$@" --gate \
-    --format json-ci -o "${reports}/${report}.json"
+  uvx --exclude-newer "${SKYLOS_RESOLVED_BEFORE}" --from "skylos==${SKYLOS_VERSION}" \
+    skylos . "$@" --gate --format json-ci -o "${reports}/${report}.json"
 }
 
 # git in the scratch repository of pass 3: no inherited GIT_* variable (a hook's GIT_DIR, the

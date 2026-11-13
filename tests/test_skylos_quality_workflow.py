@@ -57,13 +57,20 @@ exec "${REAL_UV}" "$@"
 CHECKER = REPO_ROOT / "scripts/skylos_changed_functions.py"
 
 
-def _pinned_version() -> str:
-    pins = re.findall(
-        r"^SKYLOS_VERSION=(\d+\.\d+\.\d+)$", SCRIPT.read_text(encoding="utf-8"), re.MULTILINE
-    )
+def _pinned(name: str, literal: str) -> str:
+    """The value of the script's one ``NAME=value`` line; ``literal`` is the value's pattern."""
+    pins = re.findall(rf"^{name}=({literal})$", SCRIPT.read_text(encoding="utf-8"), re.MULTILINE)
     assert len(pins) == 1, pins
-    version: str = pins[0]
-    return version
+    pin: str = pins[0]
+    return pin
+
+
+def _skylos() -> str:
+    """How every pass starts Skylos: the pinned version, its dependencies as of a fixed date."""
+    version = _pinned("SKYLOS_VERSION", r"\d+\.\d+\.\d+")
+    # A literal UTC timestamp, not a command: a dependency released later never reaches the gate.
+    cutoff = _pinned("SKYLOS_RESOLVED_BEFORE", r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+    return f"--exclude-newer {cutoff} --from skylos=={version} skylos ."
 
 
 def _script_repo(tmp_path: Path) -> Path:
@@ -138,7 +145,7 @@ def test_two_gated_passes_with_the_pinned_skylos(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert reports.is_dir()
-    skylos = f"--from skylos=={_pinned_version()} skylos ."
+    skylos = _skylos()
     assert len(calls) == 2, calls
     lines, functions = (call.split() for call in calls)
     # Pass 1: new findings on the changed lines, every analyzer the gate limits count.
@@ -258,7 +265,7 @@ def test_a_file_moved_with_edits_is_checked_against_its_base_version(
     assert len(calls) == 3, calls
     # Pass 3: pass 2 once more, in a scratch repository of the moved files and the config.
     moved = calls[2].split()
-    assert calls[2].startswith(f"--from skylos=={_pinned_version()} skylos .")
+    assert calls[2].startswith(_skylos())
     assert f"--select {','.join(FUNCTION_RULES)}" in calls[2]
     assert {"--quality", "--gate", "--force"} <= set(moved) and "--diff" not in moved
     assert f"--format json-ci -o {reports}/moved-functions.json" in calls[2]
@@ -423,7 +430,7 @@ def test_a_missing_base_is_a_usage_error(tmp_path: Path, args: tuple[str, ...]) 
 
 
 def test_skylos_is_pinned_only_in_the_script() -> None:
-    _pinned_version()
+    _skylos()
     tracked = subprocess.run(
         ["git", "grep", "-n", "-I", "-E", r"skylos(==|@)[0-9]"],
         cwd=REPO_ROOT,
