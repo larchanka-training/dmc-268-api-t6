@@ -19,8 +19,15 @@ from review.scripts.commit_context import (
 from review.scripts.eval_live import RecorderError
 from review.scripts.eval_provenance import rule_json_paths, static_input_paths
 from review.scripts.eval_replay import replay
-from tests.eval_live_fakes import REPO_ROOT, VALID, FakeTransport, answer
-from tests.test_eval_live import commit_context_repo, fixture_root, record_with_repo
+from tests.eval_live_fakes import (
+    REPO_ROOT,
+    VALID,
+    FakeTransport,
+    answer,
+    commit_context_repo,
+    fixture_root,
+    record_with_repo,
+)
 
 LIMITS = "app/modules/reviews/application/commit_prefix_limits.py"
 SIDECAR = "review/eval/pr-commit-messages.json"

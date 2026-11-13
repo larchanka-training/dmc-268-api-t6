@@ -11,6 +11,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+import review.scripts.eval_live as eval_live_module
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.infrastructure.llm.settings import (
     GatewayPolicy,
@@ -24,6 +27,7 @@ from app.modules.reviews.infrastructure.llm.transport import (
     TransportError,
 )
 from review.scripts.eval_live import record_live
+from review.scripts.eval_provenance import rule_json_paths, static_input_paths
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SYSTEM = REPO_ROOT / "review/prompts/review.system.v2.md"
@@ -137,5 +141,73 @@ def record_arm(
             recorded_at=RECORDED_AT,
             policy_arm=arm,
             responses_dir=responses_dir,
+        )
+    )
+
+
+DATASET_ROOT = REPO_ROOT / "test-prs-dataset"
+INVALID = '{"findings":[]}'
+
+
+# The whole diagnostic, not its prefix: the second half tells the user what to do.
+RESPONSES_NOT_EMPTY = "responses directory is not empty; preserve the existing baseline"
+
+
+def fixture_root(tmp_path: Path, case_ids: tuple[str, ...]) -> Path:
+    root = tmp_path / "dataset"
+    for case_id in case_ids:
+        shutil.copytree(DATASET_ROOT / "cases" / case_id, root / "cases" / case_id)
+    return root
+
+
+def record(
+    root: Path, transport: FakeTransport, *, model_settings: LlmSettings | None = None
+) -> dict[str, Any]:
+    return asyncio.run(
+        record_live(
+            root,
+            model_settings or settings(),
+            system_prompt=SYSTEM,
+            backend_rules=BACKEND_RULES,
+            frontend_rules=FRONTEND_RULES,
+            transport=transport,
+            recorded_at=RECORDED_AT,
+        )
+    )
+
+
+def response(root: Path, case_id: str) -> bytes:
+    return (root / "responses" / f"{case_id}.json").read_bytes()
+
+
+def commit_context_repo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: object,
+) -> Path:
+    repo = tmp_path / "repo"
+    for relative in static_input_paths(
+        "review/prompts/review.system.v2.md", rule_json_paths(REPO_ROOT)
+    ):
+        destination = repo / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / relative, destination)
+    sidecar = repo / "review/eval/pr-commit-messages.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(eval_live_module, "REPO_ROOT", repo)
+    return repo
+
+
+def record_with_repo(root: Path, repo: Path, transport: FakeTransport) -> dict[str, Any]:
+    return asyncio.run(
+        record_live(
+            root,
+            settings(),
+            system_prompt=repo / "review/prompts/review.system.v2.md",
+            backend_rules=repo / "review/rules/default-backend.v1.json",
+            frontend_rules=repo / "review/rules/default-frontend.v1.json",
+            transport=transport,
+            recorded_at=RECORDED_AT,
         )
     )
