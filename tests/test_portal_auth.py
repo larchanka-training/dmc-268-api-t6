@@ -70,6 +70,9 @@ def _portal_routes() -> list[tuple[str, str]]:
         ("POST", "/api/auth/refresh"),
         ("POST", "/api/auth/logout"),
         ("GET", "/api/badges/github/{owner}/{repo}.svg"),
+        ("POST", "/api/agent/device/start"),
+        ("POST", "/api/agent/device/poll"),
+        ("GET", "/api/agent/instructions"),
     }
     for route in iter_route_contexts(app.routes):
         assert route.path is not None, f"Route has no path: {route.original_route!r}"

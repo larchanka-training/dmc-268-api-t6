@@ -5,6 +5,7 @@ from __future__ import annotations
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.modules.auth.application.agent_device_access import DeviceChallenge, DevicePoll
 from app.modules.auth.application.exchange_github_code import (
     AuthenticatedUser,
     GitHubProviderUnavailable,
@@ -27,6 +28,16 @@ class _GitHubUserResponse(BaseModel):
     login: str = Field(min_length=1, max_length=255)
     name: str | None = Field(default=None, max_length=255)
     avatar_url: str | None = Field(default=None, max_length=2048)
+
+
+class _DeviceChallengeResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    device_code: str = Field(min_length=1)
+    user_code: str = Field(min_length=1)
+    verification_uri: str = Field(pattern=r"^https://github\.com/login/device$")
+    expires_in: int = Field(gt=0)
+    interval: int = Field(gt=0)
 
 
 class HttpGitHubOAuthClient:
@@ -57,6 +68,67 @@ class HttpGitHubOAuthClient:
                 raise GitHubProviderUnavailable
             response.raise_for_status()
             return _TokenResponse.model_validate(payload).access_token
+        except (httpx.HTTPError, ValidationError, ValueError) as exc:
+            raise GitHubProviderUnavailable from exc
+
+
+class HttpGitHubDeviceOAuthClient:
+    def __init__(self, client: httpx.AsyncClient, *, client_id: str) -> None:
+        self._client = client
+        self._client_id = client_id
+
+    async def start_device(self) -> DeviceChallenge:
+        try:
+            response = await self._client.post(
+                "/login/device/code",
+                data={"client_id": self._client_id},
+                headers={"Accept": "application/json"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or "error" in payload:
+                raise GitHubProviderUnavailable
+            item = _DeviceChallengeResponse.model_validate(payload)
+            return DeviceChallenge(
+                item.device_code,
+                item.user_code,
+                item.verification_uri,
+                item.expires_in,
+                item.interval,
+            )
+        except (httpx.HTTPError, ValidationError, ValueError) as exc:
+            raise GitHubProviderUnavailable from exc
+
+    async def poll_device(self, code: str) -> DevicePoll:
+        try:
+            response = await self._client.post(
+                "/login/oauth/access_token",
+                data={
+                    "client_id": self._client_id,
+                    "device_code": code,
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                },
+                headers={"Accept": "application/json"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise GitHubProviderUnavailable
+            error = payload.get("error")
+            if error == "authorization_pending":
+                return DevicePoll("pending")
+            if error == "slow_down":
+                interval = payload.get("interval")
+                return DevicePoll("slow_down", interval=interval if type(interval) is int else None)
+            if error == "access_denied":
+                return DevicePoll("denied")
+            if error in ("expired_token", "token_expired", "bad_verification_code"):
+                return DevicePoll("expired")
+            if error is not None:
+                raise GitHubProviderUnavailable
+            return DevicePoll("authorized", _TokenResponse.model_validate(payload).access_token)
         except (httpx.HTTPError, ValidationError, ValueError) as exc:
             raise GitHubProviderUnavailable from exc
 

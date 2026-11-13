@@ -25,7 +25,7 @@ from app.modules.auth.infrastructure.jwt_tokens import Rs256AccessTokenIssuer
 from app.modules.workspaces.application.link_github_installations import LinkGitHubInstallations
 
 
-class _CallbackInstallationLinker:
+class CallbackInstallationLinker:
     def __init__(self, linker: LinkGitHubInstallations) -> None:
         self._linker = linker
 
@@ -62,9 +62,7 @@ def get_exchange_github_code(request: Request) -> ExchangeGitHubCode:
             client_secret=config["GITHUB_CLIENT_SECRET"] or "",
         ),
         profile=HttpGitHubUserProfile(clients.api),
-        linker=_CallbackInstallationLinker(
-            resources.github_installation_linker(client=clients.api)
-        ),
+        linker=CallbackInstallationLinker(resources.github_installation_linker(client=clients.api)),
         uow_factory=resources.auth_session_uow,
         issuer=Rs256AccessTokenIssuer(
             config["AUTH_JWT_PRIVATE_KEY"] or "",
