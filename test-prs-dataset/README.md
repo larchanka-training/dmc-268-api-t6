@@ -154,7 +154,7 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 | `app/modules/reviews/application/llm.py` | `LlmCallRecord.response` holds the envelope the recorder reads; `LlmErrorCode` values are the recorded `gateway_status` replay's publishability check reads. |
 | `app/modules/reviews/application/prompt_budget.py` | Chooses whole, truncated, and omitted diff files. |
 | `app/modules/reviews/application/prompt_builder.py` | Renders the system/user message envelope, including commit lines. |
-| `app/modules/reviews/application/rag_index.py` | `has_retrieved_section` decides which bound review prompt versions (v5, v7) show the `<retrieved_excerpts>` section; eval has no RAG index, so it is empty. |
+| `app/modules/reviews/application/rag_index.py` | `has_retrieved_section` decides which bound review prompt versions (v5, v7, v8) show the `<retrieved_excerpts>` section; eval has no RAG index, so it is empty. |
 | `app/modules/reviews/application/review_output.py` | Parses and validates review output; a failure triggers repair. |
 | `app/modules/reviews/application/review_path.py` | `SNAPSHOT_REVIEW_PROMPT_VERSIONS` decides which bound review prompt versions get the ReviewOutput v2 schema. |
 | `app/modules/reviews/application/run_failures.py` | Deliberately wide. Only `FAST_ATTEMPT_DEADLINE` (`run_failures.py:17`) shapes the eval, through `CASE_DEADLINE["fast"]` (`llm_gateway.py:147`): the gateway refuses a call with less than one call timeout left (`gateway.py:334-341`) and skips a same-model retry that would leave less (`gateway.py:278-281`). `llm.py:17` also imports `RETRYABLE_ERROR_CODES` for `LlmCallFailed.run_retryable`, which the eval never calls. The rest is worker retry, lease and failure-code policy: its edits do not shape the eval but still cause static drift. |
@@ -1112,6 +1112,9 @@ and code alike, which is not the provider's tokenizer. Measured on 2026-11-04 fo
 about 22% more. The command measures size only: whether a prompt reviews better takes a live
 A/B.
 
+For the compressed prompt of #318, measured on 2026-11-10 in arm `none`: v7 303,560, v8 229,520,
+-24.4% (from -14.5% on SYN-04, the largest diff, to -26.8% on the smallest cases).
+
 ## rules.md sub-corpus and policy-arm A/B (#163)
 
 `rules/` is a separate corpus for measuring what a repository `.review/rules.md` changes
@@ -1271,7 +1274,7 @@ manual workflow:
 3. Select the prompt with `review_prompt`, or with `review_prompt_file` for a file the choice does
    not list. That input takes a file directly in `review/prompts/` with `key: review.system`. It
    overrides `review_prompt` and is refused with corpus `rag`, whose arms take their prompt from
-   `review_prompt` (v5 or v7). Left empty, it changes nothing.
+   `review_prompt` (v5, v7 or v8). Left empty, it changes nothing.
 4. Aggregate the downloaded reports. Name the arms after the prompts: a label that is a policy
    arm must match the arm the report was captured with.
 
@@ -1281,7 +1284,7 @@ The recorder decides by the `version:` line of the file, before any call:
 | ---------------------- | -------- | ------ |
 | v1, v3 (no pin) | any bytes | any bytes |
 | v2 (pinned) | any bytes | the pinned bytes only |
-| v4, v5 (pinned, snapshot path) | refused | the pinned bytes only |
+| v4, v5, v7, v8 (pinned, snapshot path) | refused | the pinned bytes only |
 | any other, such as a draft v6 | taken, with the legacy envelope and answer schema | refused: no known answer schema |
 
 So a draft cannot be measured on the snapshot path yet: an edited v5 fails its pin and a new version
@@ -1311,6 +1314,62 @@ Recording the digest changed `review/scripts/eval_live.py`, which is a static in
 committed baseline therefore still prints `Static input digest mismatch; refresh the complete
 baseline`, as `main` did before this change, with the same metrics and no path-set warning. The
 committed manifest stays as recorded and has no such digest; the next complete capture will.
+
+### A/B of review.system v7 and v8 (#318)
+
+v8 is v7 in fewer input tokens (#318). Both arms were captured on 2026-11-13 from one ref,
+`6855a89ca054e9c812e1b0d58da0e30f49c0fa73` (branch `feat/318-prompt-compression`), with
+`corpus=main`, `policy_arm=none` and model `mistral-small-4`, three runs per arm, one at a time:
+
+- v8: runs 43471144647, 43471647948, 43471992162;
+- v7: runs 43472327015, 43472715190, 43473043361.
+
+The criterion was fixed before the first run
+([#318](https://github.com/larchanka-training/dmc-268-api-t6/issues/318#issuecomment-6859882433)):
+on the column after gateway normalization, the mean of v8 is at least the minimum of v7 for
+Validity, Precision, Recall, Critical Recall and verdict agreement, and at most the maximum of
+v7 for nulled `rule_name`; the mean `tokens_in` of v8 is at least 20% below that of v7.
+
+`eval_ab.py --baseline v7 --markdown` (its metric columns are the strict raw-first ones):
+
+| Arm | Runs | Precision | Recall | Critical Recall | Validity | Rule constraints found | Exceptions respected | Exceptions flagged | Tokens in | Tokens out | Cost USD |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v8 | 3 | 36.3% (30.8%–42.9%) [4/13, 6/14, 6/17] | 28.1% (21.1%–31.6%) [4/19, 6/19, 6/19] | 60.0% (40.0%–80.0%) [3/5, 2/5, 4/5] | 83.3% (79.2%–87.5%) [19/24, 20/24, 21/24] | n/a (n/a–n/a) [0/0, 0/0, 0/0] | n/a (n/a–n/a) [0/0, 0/0, 0/0] | n/a (n/a–n/a) [0/0, 0/0, 0/0] | 190237 (190237–190237) | 8221 (8168–8278) | 0.017966 (0.015682–0.020156) |
+| v7 | 3 | 31.7% (25.0%–36.8%) [5/15, 7/19, 5/20] | 29.8% (26.3%–36.8%) [5/19, 7/19, 5/19] | 73.3% (60.0%–80.0%) [3/5, 4/5, 4/5] | 79.2% (75.0%–83.3%) [18/24, 20/24, 19/24] | n/a (n/a–n/a) [0/0, 0/0, 0/0] | n/a (n/a–n/a) [0/0, 0/0, 0/0] | n/a (n/a–n/a) [0/0, 0/0, 0/0] | 251949 (248413–259022) | 10668 (9532–12182) | 0.021595 (0.018451–0.025987) |
+
+Delta of the mean against `v7` (percentage points; tokens and USD as numbers):
+
+| Arm | Precision | Recall | Critical Recall | Validity | Rule constraints found | Exceptions respected | Exceptions flagged | Tokens in | Tokens out | Cost USD |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v8 | +4.6 pp | -1.8 pp | -13.3 pp | +4.2 pp | n/a | n/a | n/a | -61712 | -2447 | -0.003629 |
+| v7 | +0.0 pp | +0.0 pp | +0.0 pp | +0.0 pp | n/a | n/a | n/a | +0 | +0 | +0.000000 |
+
+After gateway normalization, the column that decides:
+
+| Arm | Run | Validity | TP/FP/FN | Precision | Recall | Critical | Verdict | `rule_name` nulled |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v7 | 43472327015 | 23/24 | 7/34/12 | 17.1% | 36.8% | 4/5 | 12/24 | 0 of 41 |
+| v7 | 43472715190 | 24/24 | 7/30/12 | 18.9% | 36.8% | 4/5 | 14/24 | 0 of 37 |
+| v7 | 43473043361 | 24/24 | 8/31/11 | 20.5% | 42.1% | 4/5 | 11/24 | 0 of 39 |
+| v8 | 43471144647 | 24/24 | 7/24/12 | 22.6% | 36.8% | 4/5 | 12/24 | 0 of 31 |
+| v8 | 43471647948 | 24/24 | 7/23/12 | 23.3% | 36.8% | 3/5 | 12/24 | 0 of 30 |
+| v8 | 43471992162 | 24/24 | 7/23/12 | 23.3% | 36.8% | 4/5 | 12/24 | 0 of 30 |
+
+Mean of v8 against the bound of v7: Validity 100.0% against 95.8%, Precision 23.1% against
+17.1%, Recall 36.8% against 36.8%, Critical Recall 73.3% against 80.0%, verdict agreement 50.0%
+against 45.8%, nulled `rule_name` 0 against 0. Usage, mean per run, from `run_metadata.usage` of
+each manifest: `tokens_in` 190,237 against 251,949 (-24.5%), `cache_read_tokens` 126,928 against
+181,939, `tokens_out` 8,221 against 10,668, `cost_usd` 0.017966 against 0.021595. Every v8 run
+made 24 calls; the first v7 run made 25 (one repair), which is why its `tokens_in` is higher. The
+six runs cost 0.118684 together.
+
+Critical Recall misses its bound: one v8 run answered LOG-05 with no finding ("No defect was
+found in this change."), where the other two found it (at `medium` and `high`) and v7 found it in
+all three. The critical truth of RES-05 is missed by both arms in every run. The tech lead
+accepted v8 with this deviation on 2026-11-13: one case in one run, 1 of 15 critical matches.
+The EUrouter balance was not checked before the first dispatch, also by the tech lead's
+decision. v8 returns fewer findings, 91 over its three runs against 121 for v7 (`high` 38
+against 61), which is where its precision gain comes from.
 
 ### Service defaults in the policy arms
 
