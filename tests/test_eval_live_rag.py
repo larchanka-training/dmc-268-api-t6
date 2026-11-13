@@ -39,15 +39,16 @@ from review.scripts.rag_snapshot import INDEX_FILE, build_case_snapshot, render_
 from tests.eval_live_fakes import (
     BACKEND_RULES,
     FRONTEND_RULES,
+    INVALID,
     RECORDED_AT,
     REPO_ROOT,
     VALID,
     FakeTransport,
     answer,
+    fixture_root,
     settings,
 )
 from tests.rag_case_fakes import _rag_metadata
-from tests.test_eval_live import INVALID, fixture_root
 
 SYSTEM_V5 = REPO_ROOT / "review" / "prompts" / "review.system.v5.md"
 SYSTEM_V7 = REPO_ROOT / "review" / "prompts" / "review.system.v7.md"
