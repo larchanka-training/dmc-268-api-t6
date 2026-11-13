@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any, cast
+from typing import cast
 from uuid import UUID
 
 import httpx
@@ -47,7 +47,7 @@ from app.modules.reviews.application.run_failures import (
 )
 from app.modules.reviews.application.run_trace import traced_step
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
-from app.modules.reviews.application.verdict import ReviewEvent
+from app.modules.reviews.application.verdict import ReviewEvent, Verdict
 from app.modules.reviews.infrastructure.github_policy_source import classify_policy_http_error
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
 from app.modules.reviews.infrastructure.vcs_failures import (
@@ -501,8 +501,26 @@ def test_check_run_view_follows_the_pipeline_spec_table(
     assert view.conclusion != "failure"
 
 
-def _succeeded(**change: Any) -> CheckRunReport:
-    return replace(CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "succeeded", 1), **change)
+def _succeeded(
+    *,
+    verdict: Verdict | None = None,
+    severity_counts: dict[str, int] | None = None,
+    inline_count: int = 0,
+    summary_only: bool = False,
+    coverage_status: str | None = None,
+    review_event: ReviewEvent | None = None,
+) -> CheckRunReport:
+    return CheckRunReport(
+        CheckRunTarget(1, "o/r", HEAD, RUN),
+        "succeeded",
+        1,
+        verdict=verdict,
+        severity_counts={} if severity_counts is None else severity_counts,
+        inline_count=inline_count,
+        summary_only=summary_only,
+        coverage_status=coverage_status,
+        review_event=review_event,
+    )
 
 
 @pytest.mark.parametrize(
