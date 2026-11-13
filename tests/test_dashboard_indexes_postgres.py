@@ -31,7 +31,9 @@ _INDEXES = {
     ),
     "ix_run_actions_postprocess_run_index": (
         "run_actions",
-        "(run_id, index DESC) WHERE ((tool)::text = 'review.postprocess'::text)",
+        "(run_id, index DESC) WHERE ((tool)::text = ANY "
+        "((ARRAY['review.finalize'::character varying, "
+        "'review.postprocess'::character varying])::text[]))",
     ),
     "ix_context_payloads_summary_only_stop": (
         "context_payloads",
@@ -56,6 +58,13 @@ def test_the_migration_adds_the_dashboard_indexes_and_its_downgrade_drops_them(
 
             config = Config("alembic.ini")
             config.attributes["connection"] = connection
+            command.downgrade(config, "20261109_0066")
+            connection.commit()
+            assert _definitions(connection)["ix_run_actions_postprocess_run_index"] == (
+                "ON run_actions USING btree (run_id, index DESC) "
+                "WHERE ((tool)::text = 'review.postprocess'::text)"
+            )
+
             down_revision = ScriptDirectory.from_config(config).get_revision(_REVISION)
             assert isinstance(down_revision.down_revision, str)
             command.downgrade(config, down_revision.down_revision)

@@ -476,7 +476,7 @@ class RunAction(Base):
             "ix_run_actions_postprocess_run_index",
             "run_id",
             text("index DESC"),
-            postgresql_where=text("tool = 'review.postprocess'"),
+            postgresql_where=text("tool IN ('review.finalize', 'review.postprocess')"),
         ),
     )
 
