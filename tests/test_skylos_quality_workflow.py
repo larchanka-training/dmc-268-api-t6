@@ -87,11 +87,13 @@ def _run_script(
     report: str = "",
     repo: Path | None = None,
     env: dict[str, str] | None = None,
+    fakes: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Run the script in ``repo`` (default: ``_script_repo``) with a fake ``uvx``.
 
     Returns the result and the logged Skylos command lines. ``uv`` is logged to ``uv.log`` in
-    ``tmp_path`` and runs for real. The script gets no git identity: it sets its own.
+    ``tmp_path`` and runs for real; ``fakes`` adds commands to ``PATH`` by name. The script gets
+    no git identity: it sets its own.
     """
     if repo is None:
         repo = _script_repo(tmp_path)
@@ -99,7 +101,7 @@ def _run_script(
     assert real_uv, "uv must be on PATH"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for name, fake in (("uvx", FAKE_UVX), ("uv", FAKE_UV)):
+    for name, fake in {"uvx": FAKE_UVX, "uv": FAKE_UV, **(fakes or {})}.items():
         (bin_dir / name).write_text(fake, encoding="utf-8")
         (bin_dir / name).chmod(0o755)
     log = tmp_path / "uvx.log"
@@ -320,18 +322,39 @@ def test_a_base_the_clone_lacks_is_incomplete(tmp_path: Path) -> None:
     assert "abc123" in result.stderr
 
 
-def test_a_scratch_repository_that_cannot_be_built_is_incomplete(tmp_path: Path) -> None:
+# git failing in the scratch repository of pass 3: its only calls with user.useConfigOnly.
+FAILING_SCRATCH_GIT = """#!/usr/bin/env bash
+if [[ " $* " == *" user.useConfigOnly=true "* ]]; then
+  exit 128
+fi
+exec "${REAL_GIT}" "$@"
+"""
+
+
+@pytest.mark.parametrize("broken", ["temporary directory", "git"])
+def test_a_scratch_repository_that_cannot_be_built_is_incomplete(
+    tmp_path: Path, broken: str
+) -> None:
+    real_git = shutil.which("git")
+    assert real_git, "git must be on PATH"
+    if broken == "git":
+        env, fakes = {"REAL_GIT": real_git}, {"git": FAILING_SCRATCH_GIT}
+    else:
+        env, fakes = {"TMPDIR": str(tmp_path / "missing")}, {}
+
     result, calls = _run_script(
         tmp_path,
         "origin/main",
         str(tmp_path / "reports"),
         repo=_moved_repo(tmp_path, edit=True),
-        env={"TMPDIR": str(tmp_path / "missing")},
+        env=env,
+        fakes=fakes,
     )
 
     assert result.returncode == 2
     assert len(calls) == 2, calls
     assert "scratch repository" in result.stderr
+    assert f"Reports: {tmp_path / 'reports'}" in result.stdout
 
 
 def test_a_moved_report_of_an_earlier_run_is_removed(tmp_path: Path) -> None:

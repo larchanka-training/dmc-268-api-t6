@@ -61,6 +61,18 @@ scratch_git() {
     git -C "${scratch}" -c user.useConfigOnly=true "$@"
 }
 
+# The ERR trap of the scratch repository's setup in pass 3: a repository that cannot be built
+# is an incomplete analysis (2), not a failed gate (1). A command substitution inherits the trap
+# and leaves the message to the main shell.
+# shellcheck disable=SC2329  # invoked by the ERR trap below, not by name
+scratch_setup_failed() {
+  if ((BASH_SUBSHELL == 0)); then
+    echo "Pass 3: cannot build the scratch repository" >&2
+    echo "Reports: ${reports}"
+  fi
+  exit 2
+}
+
 echo "== Skylos ${SKYLOS_VERSION}: new findings on the lines changed since ${base}"
 status=0
 skylos_gate changed-lines --summary --quality --danger --secrets \
@@ -82,8 +94,10 @@ fi
 echo "== Skylos ${SKYLOS_VERSION}: functions of the Python files moved with edits since ${base}"
 moved=0
 if merge_base="$(git merge-base "${base}" HEAD)"; then
-  # A failure to build the scratch repository is an incomplete analysis, not a failed gate.
-  trap 'echo "Pass 3: cannot build the scratch repository" >&2; exit 2' ERR
+  # errtrace: the trap also catches a failure inside scratch_git, which set -e alone would end
+  # with git's own exit code.
+  set -o errtrace
+  trap scratch_setup_failed ERR
   work="$(mktemp -d)"
   trap 'rm -rf "${work}"' EXIT
   scratch="${work}/repo"
@@ -113,6 +127,7 @@ if merge_base="$(git merge-base "${base}" HEAD)"; then
     scratch_git commit -q -a --allow-empty -m "HEAD"
   fi
   trap - ERR
+  set +o errtrace
   echo "Moved with edits: ${#moved_files[@]}"
   if ((${#moved_files[@]} > 0)); then
     output="$(cd "${scratch}" && skylos_gate moved-functions --force --quality \
