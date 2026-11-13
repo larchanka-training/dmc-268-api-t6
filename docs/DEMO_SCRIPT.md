@@ -1,0 +1,221 @@
+# Сценарий демо v1.0
+
+Показ на 7–10 минут на staging: от PR с багами и `.review/rules.md` до дашборда аналитики.
+Сверено со staging 10.11.2026 (api `42c7e5ae`, ui `bdf32fa4`); экранные тексты интерфейса — на
+английском, как в staging UI; тексты check-run на GitHub — на русском, как их пишет бот. Как
+устроена цепочка за кадром — [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## 1. Начальное состояние
+
+Показ идёт в `axyi/dmc268-t6-sandbox`: на него установлен staging App, поэтому песочница есть в
+списке Repositories staging UI. Готовить за 1–2 дня до показа и проверять за 15 минут до начала.
+
+Вкладки браузера, на которые ссылаются шаги: 1 — `.review/rules.md` в `main` песочницы; 2 —
+демо-PR; 3 — staging UI, Settings песочницы; 4 — staging UI, Analytics; 5 — запасной PR.
+
+| Что | Должно быть | Где проверить |
+|---|---|---|
+| Стенд | `{"status":"ok"}`; последний CI/CD на `main` api зелёный, staging выкачен из него | [staging-api /healthcheck](https://staging-api.dmc268-t6.axyi.ru/healthcheck), Actions api |
+| Вход | браузер вошёл в [staging UI](https://staging-ui.dmc268-t6.axyi.ru) через GitHub под пользователем с доступом к установке App на песочнице; у этого пользователя на GitHub право triage или выше в песочнице, иначе на шаге 3 лейбл не поставить | Repositories: в списке есть `axyi/dmc268-t6-sandbox`; на демо-PR справа у Labels есть шестерёнка |
+| Правила | `.review/rules.md` лежит в `main` песочницы. Правила читаются из base-коммита PR ([RULES_FORMAT_SPEC.md §3.1](RULES_FORMAT_SPEC.md#31-ревизия-и-тип-объекта)), поэтому в демо-PR файл не добавляют и не меняют | GitHub, `main` песочницы |
+| CI | `.github/workflows/ci.yml` в `main` песочницы: job `check` на каждый PR | GitHub, `main` песочницы |
+| Код песочницы | в `main` песочницы есть `shop/models.py` (`Order`), `shop/pricing.py` (`order_total` и `with_tax` возвращают целые центы) и `AGENTS.md` с правилом «Money is kept in integer cents, never in floats.». На них опирается листинг приложения A и строка таблицы находок про центы | GitHub, `main` песочницы |
+| Настройки репозитория | Automatic review — включён; CI waiting — `Auto`; Verdict — `Comment`; Comment limit — `10`; Branch filter — пусто; Severity threshold — `All`; RAG — `Ready` | staging UI → Repositories → Settings песочницы |
+| Бюджет | у workspace `GitHub: axyi` нет надписи «The daily budget is used up, reviews are paused until 00:00 UTC» | staging UI → Analytics → Budget today |
+| Демо-PR | открыт заранее, CI зелёный, лейбла `ai-review` нет | вкладка 2 |
+| Запасной PR | подготовлен за 1–2 дня до показа: окно `7 days` в Analytics скользящее, и прогон старше 7 суток из него выпадет. Лейбл поставлен, ревью опубликовано, в нём хотя бы один inline-комментарий в `shop/orders.py`, в Checks `AI Review` — «AI-ревью: …». Inline-комментариев нет — закрыть этот PR и подготовить запасной заново, на ветке `demo/<дата>-backup-2` | вкладка 5 |
+
+На 09.11.2026 Automatic review на staging выключен во всех подключённых репозиториях. Тот, кто
+готовит показ, включает его для песочницы и после показа возвращает как было.
+
+Почему демо-PR открывают заранее. Лейбл запускает ревью, только когда CI на head-коммите зелёный
+([PIPELINE_SPEC.md §8.1](PIPELINE_SPEC.md#81-условие-github)). Если PR открыт заранее, CI к
+показу уже прошёл, и Run создаётся сразу после лейбла.
+
+Почему каждый показ идёт на новом PR. Ревью по лейблу запускается для пары (PR, head-коммит)
+только один раз. Повторный лейбл на том же коммите ничего не запустит.
+
+Подготовка обоих PR — одна и та же, с разными ветками (`<дата>` — день показа, `ГГГГММДД`).
+
+1. Клон и ветка:
+
+   ```bash
+   git clone git@github.com:axyi/dmc268-t6-sandbox.git && cd dmc268-t6-sandbox
+   git switch -c demo/<дата>-live origin/main      # для запасного: demo/<дата>-backup
+   ```
+
+2. Создать файл `shop/orders.py` и вставить в него весь блок кода из приложения A.
+3. Коммит, push и PR:
+
+   ```bash
+   git add shop/orders.py && git commit -m "feat(shop): add order lookups"
+   git push -u origin HEAD
+   gh pr create --base main --title "feat(shop): add order lookups" --body "Order lookups for the account page."
+   ```
+
+На запасном PR лейбл `ai-review` ставят сразу и дожидаются ревью. На демо-PR лейбл не ставят.
+
+## 2. Сценарий
+
+T0 — момент, когда на шаге 3 поставлен лейбл. Время в первом столбце отсчитывается от начала
+показа.
+
+| Время | Шаг | Действие | Результат на экране |
+|---|---|---|---|
+| 0:00–0:45 | 1. Правила команды | Вкладка 1: `.review/rules.md` | Разделы `# Security` (параметризованный SQL), `## Python` (`except Exception` только на границе фоновой задачи), `# Performance` (запрос на каждый элемент списка), блок `review-ignore`: GitHub показывает его блоком кода с `generated/**` и `**/*.min.js` |
+| 0:45–1:30 | 2. PR с багами | Вкладка 2 → Files changed | Новый файл `shop/orders.py`; во вкладке Checks — зелёный `CI / check` |
+| 1:30–2:00 | 3. Триггер | Справа Labels → `ai-review`. Засечь T0. Вкладка Checks | Лейбл `ai-review` на PR. Во вкладке Checks через несколько секунд, без перезагрузки, появляется группа `dmc268-t6-reviewer` с `AI Review` и жёлтым значком выполнения; название check-run в списке не показывается. Прогон `fast` идёт около 20 секунд, и к концу шага значок может смениться на итоговый |
+| 2:00–3:30 | 4. Правила в портале | Вкладка 3: Settings песочницы | Automatic review включён; CI waiting — `Auto (wait for CI when the commit has checks)`; панель Review rules — `File found`, `.review/rules.md`, `main`, текст файла, Ignored paths `**/*.min.js` и `generated/**` |
+| 3:30–4:30 | 5. Как шёл прогон | Вкладка 3: Runs → строка демо-PR | Страница `Run for PR #<N>`: этапы `Collecting context` → `Model analysis` → `Publishing` отмечены пройденными, список `Review session` — от `policy.load` до `github.publish_review`, модель, `Token limit`, `Cost limit`. Прогон к этому шагу обычно закончен; если ещё идёт, этапы и список растут на экране |
+| 4:30–6:00 | 6. Ревью на PR | Вкладка 2 → Conversation, затем Checks → `AI Review`. Ревью нет — [запасной путь](#3-запасной-путь-ревью-не-пришло) | Ревью от `dmc268-t6-reviewer[bot]`: `Executive summary` с `Verdict` и `Risk Score`, `Risk summary`; inline-комментарии в `shop/orders.py` (ожидаются, см. под таблицей). В Checks справа — заголовок «AI-ревью: <вердикт>», под ним счёт находок `critical: …, high: …`, строка `inline: N` и ссылка на Run |
+| 6:00–7:00 | 7. Цена прогона | Вкладка 3: Run, обновить | Status `succeeded`; Findings по severity; Duration; Input tokens, Output tokens, Cost; дифф с находками, фильтр по Severity. Cost округлён до цента: прогон на этом файле стоит меньше цента, на экране `$0.00`, поэтому расход показывают токенами |
+| 7:00–7:30 | 8. Аудит | Вкладка 3: Audit, строка с номером демо-PR в колонке `PR` | Строка демо-PR: Trigger `webhook`, Status `succeeded`, Cost. Она верхняя, только если после демо-прогона в workspace ничего не запускалось |
+| 7:30–8:30 | 9. Аналитика | Вкладка 4: `7 days`, репозиторий `axyi/dmc268-t6-sandbox` | Плитки `Runs: Succeeded`, `Pull requests: Blocking` / `Attention` / `Clean`, `Critical`…`Info`, `Cost`; график `Findings by day`; блок `Budget today` |
+| +1:00 | 10. Playground — если вошёл в релиз | Показать проверку правила без PR | На staging с ui `f91ef781` в меню есть Playground, но кнопки симуляции на странице нет: она в ui#187 Ч.3. Проверку правила показать нельзя, шаг пропускается |
+
+Итого 8:30, с Playground — 9:30. Запас до 10 минут — 1:30, с Playground — 0:30. Если показ
+отстаёт, первым пропускают шаг 8, затем сокращают шаг 9 до 30 секунд: плитки `Runs` и
+`Pull requests` и блок `Budget today`.
+
+Что модель найдёт в `shop/orders.py`, ожидаемо, но не гарантированно: LLM не детерминирован.
+Гарантированы check-run `AI Review` и ревью с `Executive summary`. Хотя бы один inline-комментарий
+ожидается, но тоже не гарантирован: при вердикте `clean` его может не быть. Конкретные находки
+не гарантированы тем более.
+
+| Строка в листинге | Дефект | Правило |
+|---|---|---|
+| `find_orders` | значение пользователя подставлено в SQL через f-string | `# Security` в `.review/rules.md` |
+| `load_orders` | отдельный запрос на каждый id | `# Performance` в `.review/rules.md`. На репетициях 09.11 и 10.11 модель не нашла его ни разу (0 из 4): зрителям не обещать |
+| `amount_due` | `except Exception` вне фоновой задачи | `## Python` в `.review/rules.md` |
+| `amount_due` | деление на 100 возвращает float, функция обещает центы (`int`) | `AGENTS.md` песочницы: деньги в целых центах. На репетициях 09.11 и 10.11 — 1 раз из 4 |
+
+## 3. Запасной путь: ревью не пришло
+
+Порог — T0 + 4 минуты, это цель p95 времени до ревью для движка `fast` в SLA prod
+([MONITORING.md §12](MONITORING.md#12-sla-prod)). Run создаётся сразу после лейбла, поэтому
+порог считают по секундомеру, засечённому на шаге 3, а не по часам показа: при T0 в 1:30–2:00
+это 5:30–6:00 от начала. Если на шаге 6 ревью ещё нет, ведущий продолжает шаг 5. К порогу ревью
+не пришло — ведущий переключается на запасной PR.
+
+1. Причину назвать по `AI Review` во вкладке Checks демо-PR и по странице Runs, не больше 20
+   секунд. Название check-run видно справа после клика по `AI Review`, в списке его нет.
+   Check-run создаётся, когда worker берёт Run, а не когда Run создан
+   ([PIPELINE_SPEC.md §1](PIPELINE_SPEC.md#1-состояния-и-переходы), T1 и T4):
+   - `AI Review` нет, строки демо-PR в Runs нет: Run не создан. Причины: Automatic review
+     выключен, CI не зелёный, лейбл не `ai-review`, PR закрыт.
+   - `AI Review` нет, строка демо-PR в Runs есть со статусом `queued`: Run создан и ждёт worker.
+   - `AI Review` нет, строка демо-PR в Runs есть со статусом `skipped` или `cancelled`: Run
+     закрыт до того, как worker его взял, и check-run не создан. Причина — в поле `Reason` на
+     странице Run. Например, Automatic review выключили после лейбла: «Automatic review was
+     switched off before the run started.» `repo_disabled`.
+   - «AI-ревью пропущено»: Run пропущен, причина — в тексте check-run. Например, Branch filter не
+     подходит: «Целевая ветка PR не подходит под фильтр веток репозитория.»
+   - «AI-ревью выполняется»: прогон идёт дольше цели, модель отвечает медленно. В тексте
+     check-run всегда стоит «попытка N из 3»; N больше 1 значит, что предыдущая попытка
+     прервалась и worker взял Run заново.
+   - «AI-ревью не выполнено»: прогон упал, причина — в поле `Reason` на странице Run.
+   - «AI-ревью отменено»: прогон отменён, причина — в тексте check-run. Например, в ветку PR
+     пришёл новый коммит: «В PR новый коммит — ревью будет для него.»
+2. Вкладка 5: шаги 6 и 7 идут на запасном PR и его Run. На шаге 8 в Audit показывают строку с
+   номером запасного PR в колонке `PR`. Его прогон старше, поэтому строка ниже строки демо-PR,
+   если Run демо-PR создан; та стоит в текущем статусе. Шаг 9 не меняется: прогон запасного PR
+   попадает в окно `7 days`.
+3. Ревью пришло, но без inline-комментариев: шаг 6 закончить на `Executive summary` демо-PR,
+   inline-комментарии показать на запасном PR (вкладка 5), шаг 7 — на Run демо-PR.
+4. Restart во время показа не нажимать: новый прогон займёт столько же. После показа:
+   - Restart на завершённом Run;
+   - если Run нет, новый push в ветку демо-PR.
+
+Хронометраж по запасному пути. Переход — в 5:30–6:00 от начала (T0 + 4:00) и ещё до 20 секунд на
+причину. Шаги 6–9 идут на запасном PR. Шаг 7 сокращается до 30 секунд: Status, токены и Cost.
+Шаг 9 тоже сокращается до 30 секунд: плитки `Runs` и `Pull requests` и блок `Budget today`. Шаги
+6–9 занимают 3:00, итог — 8:50–9:20, запас до 10 минут — 40–70 секунд. Если и его не хватает,
+шаг 8 пропускают. Playground при переходе на запасной путь пропускается.
+
+## 4. После показа
+
+- Демо-PR и запасной PR закрыть без мержа, ветки `demo/<дата>-*` удалить.
+- Automatic review песочницы вернуть в состояние до подготовки.
+
+## 5. Протокол репетиций
+
+Задержки бота считают по времени событий GitHub: лейбл — событие `labeled` в PR, «AI-ревью
+выполняется» — `started_at` check-run `AI Review`, ревью — `submitted_at` ревью бота.
+
+| Дата | Стенд | T0 → «AI-ревью выполняется» | T0 → ревью на PR | Итог | Шаги, где экран не совпал | Отклонения |
+|---|---|---|---|---|---|---|
+| 09.11.2026 | api `0c8d626e`, ui `fc3781f2` | 4 с (запасной PR — 5 с) | 20 с (запасной PR — 26 с) | Механический прогон без речи: задержки бота измерены, длительности шагов — плановые; итог по плану 8:30, запасной путь не понадобился | 5 — прогон уже закончился; 7 — Cost `$0.00`. Тексты шагов исправлены по репетиции | Inline-комментарии: в демо-PR 3 (строки 11, 31, 33), в запасном 2 (строки 11, 31); находки про запрос на каждый id нет ни в одном. Между прогонами в песочнице прошёл сторонний прогон, шаг 8 нашёл строку демо-PR по номеру в колонке `PR` |
+| 10.11.2026 | api `42c7e5ae`, ui `bdf32fa4` | 4 с (запасной PR — 4 с) | 24 с (запасной PR — 24 с) | Прогон по секундомеру, речь не засекалась: каждый шаг начат в плановое время, речь заменена паузой. Итог 9:08, запасной путь не понадобился | 3 и 6 — названий check-run в блоке слияния нет, они взяты из GitHub API. Вкладку Checks проверили отдельно на PR #29 (строка ниже) и по ней переписали шаги 3 и 6. К шагу 1 добавлено, как GitHub рисует блок `review-ignore` | Шаг 9 занял 1:38 вместо 1:00: список Repository открылся с четвёртой попытки. Inline-комментарии: в демо-PR и в запасном по 2 (строки 11, 31) |
+| 10.11.2026, вкладка Checks | api `6db93c80`, ui `eff7d79e` | 6 с | 27 с | Не прогон показа: только шаги 3 и 6 во вкладке Checks, PR #29 | 3 — «AI-ревью выполняется» на экране не было: в списке Checks названия нет, а к клику по `AI Review` прогон закончился. Шаг 3 переписан | Inline-комментарии: 2 (строки 11, 31) |
+
+Протокол прогона 10.11.2026. Показ вёл агент в браузере по вкладкам из §1, демо-PR — #28
+песочницы, запасной — #27. Лейбл на шаге 3 поставлен шестерёнкой Labels. Каждый шаг начат в
+плановое время, «Факт» — от начала показа до конца действий шага. Речь не засекалась: паузы
+между шагами её только замещают. Время ревью и тексты check-run, которых не было в блоке
+слияния, взяты из GitHub API.
+
+| Шаг | План | Факт | На экране | Совпало |
+|---|---|---|---|---|
+| 1 | 0:00–0:45 | 0:00–0:09 | Заголовки Security, Python, TypeScript, Performance, Style, Ignore; блок кода `generated/**`, `**/*.min.js` | да |
+| 2 | 0:45–1:30 | 0:45–1:05 | Files changed: новый `shop/orders.py`; Checks: `CI`, job `check` успешен | да |
+| 3 | 1:30–2:00 | 1:30–2:03 | Лейбл `ai-review` в 1:46 (T0); в блоке слияния «Some checks haven't completed yet», «1 in progress, 1 successful checks»; check-run «AI-ревью выполняется» через 4 с — из GitHub API, на экране его не было | нет: шаг обещал название в Checks, переписан по проверке PR #29 |
+| 4 | 2:00–3:30 | 2:03–2:19 | Automatic review включён; `Auto (wait for CI when the commit has checks)`; Review rules: `File found`, `.review/rules.md`, `main`, текст файла, Ignored paths `**/*.min.js`, `generated/**` | да |
+| 5 | 3:30–4:30 | 3:30–3:52 | `Run for PR #28`, прогон закончен; `Collecting context`, `Model analysis`, `Publishing` пройдены; `Review session` — 15 действий от `policy.load` до `github.publish_review`; `mistral/mistral-small-4`, `Token limit` 60000, `Cost limit` $0.50 | да |
+| 6 | 4:30–6:00 | 4:30–4:43 | Ревью `dmc268-t6-reviewer` пришло в T0 + 24 с: `Verdict: blocking · Risk Score: High`, `Risk summary: critical: 1, high: 1, …`; inline-комментарии на строках 11 и 31; «All checks have passed», «1 neutral, 1 successful checks»; check-run «AI-ревью: blocking» — из GitHub API | да, кроме названия check-run: его на экране подтвердили на PR #29 |
+| 7 | 6:00–7:00 | 6:00–6:15 | Status `succeeded`; Findings critical 1, high 1; Duration 22 sec; Input tokens 21042, Output tokens 1739; Cost `$0.00`; дифф с двумя находками, фильтр Severity | да |
+| 8 | 7:00–7:30 | 7:00–7:12 | Верхняя строка: `#28`, Trigger `webhook`, Status `succeeded`, Cost `$0.00` | да |
+| 9 | 7:30–8:30 | 7:30–9:08 | `7 days`, `axyi/dmc268-t6-sandbox`: Runs: Succeeded 11, Blocking 9, Clean 1, Critical 6, High 11, Cost $0.03; `Findings by day`; Budget today — `GitHub: axyi`, $0.01, `Limit not set` | да |
+
+Итог 9:08 вместо плановых 8:30: 38 секунд набежало на шаге 9 (список Repository). Шаг 3 вышел
+за слот на 3 секунды, их поглотил слот шага 4. На остальных шагах действия заняли 9–22 секунды
+и уложились в свои окна. Переход во вкладку Checks на шагах 3 и 6 добавлен после этого прогона,
+и в 9:08 он не входит. Полным прогоном его не засекали; лишние секунды шага 3 поглощает слот
+шага 4, где действия заняли 16 секунд из 90.
+
+Проверка вкладки Checks 10.11.2026 — не прогон показа, а только шаги 3 и 6. PR #29 песочницы,
+стенд api `6db93c80`, ui `eff7d79e`. Лейбл поставлен шестерёнкой Labels в 12:18:22 UTC (T0),
+сразу после этого открыта вкладка Checks. Check-run создан в T0 + 6 с (`started_at`). В
+открытой вкладке без перезагрузки появилась группа `dmc268-t6-reviewer` с `AI Review` и жёлтым
+значком выполнения; названия check-run в списке нет. Клик по `AI Review` пришёлся после конца
+прогона (T0 + 29 с), поэтому «AI-ревью выполняется» на экране так и не появилось. Справа были
+заголовок «AI-ревью: blocking», строки `critical: 1, high: 1, medium: 0, low: 0, info: 0` и
+`inline: 2, в теле ревью: 0`, ссылка на Run. Ревью бота пришло в T0 + 27 с, inline-комментарии —
+на строках 11 и 31. По этому экрану переписаны шаги 3 и 6.
+
+## Приложение A. `shop/orders.py`
+
+```python
+"""Order lookups for the account page."""
+
+import sqlite3
+
+from .models import Order
+from .pricing import order_total, with_tax
+
+
+def find_orders(conn: sqlite3.Connection, email: str) -> list[Order]:
+    """Return the orders of one customer."""
+    query = f"SELECT order_id, total_cents, customer_email FROM orders WHERE customer_email = '{email}'"
+    return [Order(*row) for row in conn.execute(query).fetchall()]
+
+
+def load_orders(conn: sqlite3.Connection, order_ids: list[int]) -> list[Order]:
+    """Load the orders with the given ids."""
+    orders = []
+    for order_id in order_ids:
+        row = conn.execute(
+            "SELECT order_id, total_cents, customer_email FROM orders WHERE order_id = ?",
+            (order_id,),
+        ).fetchone()
+        orders.append(Order(*row))
+    return orders
+
+
+def amount_due(conn: sqlite3.Connection, order_id: int) -> int:
+    """Return the amount to pay for an order with tax, in cents; 0 if it is missing."""
+    try:
+        order = load_orders(conn, [order_id])[0]
+    except Exception:
+        return 0
+    return with_tax(order_total(order)) / 100
+```
