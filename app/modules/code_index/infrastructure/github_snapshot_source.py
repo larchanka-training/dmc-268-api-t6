@@ -379,6 +379,12 @@ class _SnapshotPolicySource:
     def _error(self, code: PolicyErrorCode, message: str) -> PolicyError:
         return PolicyError(code, message, policy_base_sha=self._sha)
 
+    def _http_error(self, exc: httpx.HTTPError, *, body: bytes = b"") -> PolicyError:
+        # A fresh installation token can heal this index read; review keeps its own code.
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401:
+            return self._error(PolicyErrorCode.FETCH_TRANSIENT, "GitHub answered 401")
+        return classify_policy_http_error(exc, policy_base_sha=self._sha, body=body)
+
     async def list_entries(self, tree_oid: str | None) -> Mapping[str, PolicyTreeEntry]:
         sha = commit_sha_segment(self._sha if tree_oid is None else tree_oid)
         source = self._snapshot
@@ -389,9 +395,7 @@ class _SnapshotPolicySource:
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise classify_policy_http_error(
-                exc, policy_base_sha=self._sha, body=plain_error_body(exc)
-            ) from None
+            raise self._http_error(exc, body=plain_error_body(exc)) from None
         except ValueError:
             raise self._error(
                 PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an unreadable token"
@@ -422,7 +426,7 @@ class _SnapshotPolicySource:
                 refuse_encoded_policy_blob(response, policy_base_sha=self._sha)
                 body = await capped_body(response, MAX_DOCUMENT_BYTES)
         except httpx.HTTPError as exc:
-            raise classify_policy_http_error(exc, policy_base_sha=self._sha) from None
+            raise self._http_error(exc) from None
         except ValueError:
             raise self._error(
                 PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an unreadable blob"
