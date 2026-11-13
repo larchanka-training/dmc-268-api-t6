@@ -8,6 +8,7 @@ shell steps run as scripts with a stub ``docker`` on PATH.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -123,9 +124,11 @@ def _bash(
         },
         capture_output=True,
         text=True,
+        # A cut multi-byte character reaches the runner as U+FFFD, as the SSH action's JSON does.
+        errors="replace",
         check=False,
     )
-    return result, summary.read_text()
+    return result, summary.read_text(encoding="utf-8")
 
 
 def _docker_calls(tmp_path: Path) -> list[str]:
@@ -408,14 +411,61 @@ def test_the_host_prints_a_few_lines_per_container_and_counts_all(tmp_path: Path
     assert ["STAT", "worker", "8", "0", "8"] in _records(result.stdout, "STAT")
 
 
-def test_a_long_line_is_cut_on_the_host(tmp_path: Path) -> None:
-    line = _json_line("worker", "x" * 5000, RUN_ID)
-    _containers(tmp_path, {"api": [[]], "worker": [[line]], "webhook-worker": [[]]})
+def _with_exc_info(line: str, exc_info: str) -> str:
+    """The record with an `exc_info` after its `run_id`, as the formatter orders the keys."""
+    record = json.loads(line)
+    record["exc_info"] = exc_info
+    return json.dumps(record, ensure_ascii=False)
 
+
+# A long value before the field (message), a long value after it (exc_info), and a multi-byte
+# message across every cut: the evidence line must keep the field and stay bounded.
+LONG_LINES = {
+    "message-before": lambda: _json_line("worker", "m" * 200, RUN_ID),
+    "huge-message-before": lambda: _json_line("worker", "m" * 5000, RUN_ID),
+    "exc-info-after": lambda: _with_exc_info(_json_line("worker", "boom", RUN_ID), "e" * 5000),
+    "both": lambda: _with_exc_info(_json_line("worker", "m" * 3000, RUN_ID), "e" * 3000),
+    "cyrillic-0": lambda: _json_line("worker", "ж" * 400, RUN_ID),
+    "cyrillic-1": lambda: _json_line("worker", "я" + "ж" * 400, RUN_ID),
+    "cyrillic-exc": lambda: _with_exc_info(_json_line("worker", "ж" * 400, RUN_ID), "щ" * 400),
+    "cyrillic-exc-1": lambda: _with_exc_info(
+        _json_line("worker", "я" + "ж" * 400, RUN_ID), "щ" * 401
+    ),
+}
+
+
+@pytest.mark.parametrize("name", LONG_LINES)
+def test_a_long_line_keeps_the_run_id_field_and_stays_bounded(tmp_path: Path, name: str) -> None:
+    line = LONG_LINES[name]()
+    field = f'"run_id": "{RUN_ID}"'
+    assert len(line.encode()) > 300  # the old cut of the summary
+    _containers(tmp_path, {"api": [[]], "worker": [[line]], "webhook-worker": [[]]})
+    result, _ = _lookup(tmp_path)
+    assert result.returncode == 0, result.stderr
+    (record,) = _records(result.stdout, "LINE")
+
+    code, stderr, summary = _show(tmp_path, result.stdout)
+
+    assert code == 0, stderr
+    (shown,) = [row for row in summary.splitlines() if row.startswith('{"ts"')]
+    assert field in shown
+    assert shown.startswith(line[:100])
+    assert shown.endswith(line[-20:]) or "[...]" in shown
+    assert len(shown.encode()) <= 900
+    assert len("".join(record[2:]).encode()) <= 800
+    assert "\ufffd" not in summary  # no half of a multi-byte character
+    summary.encode("utf-8")  # valid UTF-8
+
+
+def test_a_line_that_fits_is_shown_whole(tmp_path: Path) -> None:
+    line = _json_line("worker", "ж" * 100, RUN_ID)
+    assert len(line.encode()) <= 700
+    _containers(tmp_path, {"api": [[]], "worker": [[line]], "webhook-worker": [[]]})
     result, _ = _lookup(tmp_path)
 
-    (printed,) = _records(result.stdout, "LINE")
-    assert printed[2] == line[:400]
+    _, _, summary = _show(tmp_path, result.stdout)
+
+    assert f"\n{line}\n" in summary
 
 
 def test_a_failing_docker_logs_fails_the_lookup_and_names_the_container(tmp_path: Path) -> None:
@@ -555,17 +605,20 @@ def test_the_summary_adds_up_replicas_and_shows_at_most_five_lines_per_service(
     assert "#### api" not in summary and "#### webhook-worker" not in summary
 
 
-def test_the_summary_cuts_long_lines(tmp_path: Path) -> None:
-    long = _json_line("worker", "y" * 2000, RUN_ID)[:400]
+def test_the_summary_joins_the_pieces_of_a_long_line_and_drops_cut_characters(
+    tmp_path: Path,
+) -> None:
+    field = f'"run_id": "{RUN_ID}"'
     stdout = _stdout(
         stats=[("api", 0, 0, 0), ("worker", 1, 0, 1), ("webhook-worker", 0, 0, 0)],
-        lines=[("worker", long)],
+        lines=[
+            ("worker", f'{{"ts": "t", "message": "ж\ufffd\t\ufffdm{field}ж\ufffd\ufffd\t\ufffd"}}')
+        ],
     )
 
     _, _, summary = _show(tmp_path, stdout)
 
-    (shown,) = [line for line in summary.splitlines() if line.startswith('{"ts"')]
-    assert shown == long[:300]
+    assert f'\n{{"ts": "t", "message": "ж [...] m{field}ж [...] "}}\n' in summary
 
 
 def test_the_summary_says_when_a_service_has_no_container(tmp_path: Path) -> None:

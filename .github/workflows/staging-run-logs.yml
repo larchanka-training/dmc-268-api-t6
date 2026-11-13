@@ -125,7 +125,7 @@ jobs:
             # own banner, so that step keeps only these):
             #   CONTAINERS <service> <count>               containers of the service
             #   STAT <service> <json> <non-json> <match>   per container: lines in the window
-            #   LINE <service> <line>                      the first 5 matching lines per container
+            #   LINE <service> <piece> [<piece> ...]       the first 5 matching lines per container
             # A line is a match only when it is a JSON log record (it starts with the `ts` key the
             # formatter writes first) holding the `run_id` field as the formatter serializes it.
             # json.dumps escapes the quotes inside a string value, so a message cannot pose as the
@@ -142,12 +142,33 @@ jobs:
                   # docker logs or awk must not look like an empty result.
                   codes=(0 0)
                   docker logs --since 168h "${id}" 2>&1 | awk -v service="${service}" -v needle="\"run_id\": \"${run_id}\"" '
+                    # A matching line of up to 720 bytes goes out whole; a longer one as three
+                    # pieces (the start, a window round the field, the end; overlaps merged), so
+                    # the field survives however long the message before it or the exc_info after
+                    # it is. The next step joins the pieces and drops a character cut at an edge.
+                    function pieces(line, at,   n, s, e, c, i, out) {
+                      n = length(line)
+                      if (n <= 720) return line
+                      s[1] = 1; e[1] = 250
+                      s[2] = at - 120; if (s[2] < 1) s[2] = 1
+                      e[2] = at + length(needle) + 119; if (e[2] > n) e[2] = n
+                      s[3] = n - 129; e[3] = n
+                      c = 1
+                      for (i = 2; i <= 3; i++) {
+                        if (s[i] <= e[c] + 1) { if (e[i] > e[c]) e[c] = e[i] }
+                        else { c++; s[c] = s[i]; e[c] = e[i] }
+                      }
+                      out = substr(line, s[1], e[1] - s[1] + 1)
+                      for (i = 2; i <= c; i++) out = out "\t" substr(line, s[i], e[i] - s[i] + 1)
+                      return out
+                    }
                     { sub(/\r$/, "") }
                     index($0, "{\"ts\": \"") == 1 {
                       json++
-                      if (index($0, needle) > 0) {
+                      at = index($0, needle)
+                      if (at > 0) {
                         found++
-                        if (found <= 5) printf "LINE\t%s\t%s\n", service, substr($0, 1, 400)
+                        if (found <= 5) printf "LINE\t%s\t%s\n", service, pieces($0, at)
                       }
                       next
                     }
@@ -178,42 +199,68 @@ jobs:
           LOOKUP_STDOUT: ${{ steps.lookup.outputs.stdout }}
         run: |
           # The SSH action appends its own banner to stdout: only the records of the host script
-          # are read. Backticks are dropped so log text cannot close the code fence of the summary,
-          # and a line is cut again. At most 5 lines per service are shown, from the first
-          # containers; the counts cover all of them.
-          # shellcheck disable=SC2016  # Markdown code spans and fence, not shell
-          summary="$(printf '%s\n' "${LOOKUP_STDOUT}" | tr -d '`\r' | awk -F'\t' -v run_id="${RUN_ID,,}" '
-            BEGIN { n = split("api worker webhook-worker", order, " ") }
-            $1 == "CONTAINERS" { seen[$2] = 1; containers[$2] += $3 }
-            $1 == "STAT" { json[$2] += $3; raw[$2] += $4; found[$2] += $5 }
-            $1 == "LINE" && shown[$2] < 5 { shown[$2]++; text[$2] = text[$2] substr($3, 1, 300) "\n" }
-            END {
-              for (i = 1; i <= n; i++) {
-                if (!(order[i] in seen)) {
-                  print "no lookup output for " order[i] " (the host script did not finish)" > "/dev/stderr"
-                  exit 1
-                }
-              }
-              fence = "```"
-              printf "### Staging run logs\n\n- Run: `%s`\n", run_id
-              print "- Window: the last 168 h of each container'"'"'s log; a container recreated by a later deploy has lost its log\n"
-              print "| Service | Containers | JSON lines | Non-JSON lines | Lines with this `run_id` |"
-              print "|---|---:|---:|---:|---:|"
-              for (i = 1; i <= n; i++) {
-                s = order[i]
-                printf "| %s | %d | %d | %d | %d |\n", s, containers[s], json[s], raw[s], found[s]
-              }
-              for (i = 1; i <= n; i++) {
-                s = order[i]
-                if (containers[s] == 0) printf "\n- No `%s` container in `dmc-268-api-staging`: nothing was read\n", s
-              }
-              for (i = 1; i <= n; i++) {
-                s = order[i]
-                if (found[s] == 0) continue
-                note = found[s] == 1 ? "1 line" : found[s] " lines"
-                if (found[s] > shown[s]) note = note ", the first " shown[s] " shown"
-                printf "\n#### %s: %s\n\n%stext\n%s%s\n", s, note, fence, text[s], fence
-              }
-            }
-          ')"
-          printf '%s\n' "${summary}" >> "${GITHUB_STEP_SUMMARY}"
+          # are read. Backticks are dropped so log text cannot close the code fence of the summary.
+          # The pieces of a long line are joined with [...]; a multi-byte character the host cut at
+          # a piece edge arrives as U+FFFD and is dropped. At most 5 lines per service are shown,
+          # from the first containers; the counts cover all of them. Nothing is written when a
+          # service is missing from the output.
+          python3 - <<'PY'
+          import os
+          import sys
+
+          run_id = os.environ["RUN_ID"].lower()
+          services = ("api", "worker", "webhook-worker")
+          containers = dict.fromkeys(services, 0)
+          counts = {service: [0, 0, 0] for service in services}  # JSON, non-JSON, matching lines
+          seen = set()
+          shown: dict[str, list[str]] = {service: [] for service in services}
+
+          for record in os.environ["LOOKUP_STDOUT"].replace("\r", "").split("\n"):
+              kind, _, rest = record.partition("\t")
+              service, _, rest = rest.partition("\t")
+              if service not in services:
+                  continue
+              fields = rest.split("\t")
+              if kind == "CONTAINERS" and len(fields) == 1 and fields[0].isdigit():
+                  seen.add(service)
+                  containers[service] += int(fields[0])
+              elif kind == "STAT" and len(fields) == 3 and all(f.isdigit() for f in fields):
+                  for index, value in enumerate(fields):
+                      counts[service][index] += int(value)
+              elif kind == "LINE" and len(shown[service]) < 5:
+                  pieces = [piece.replace("`", "").strip("\ufffd") for piece in fields]
+                  shown[service].append(" [...] ".join(pieces))
+
+          for service in services:
+              if service not in seen:
+                  print(f"no lookup output for {service} (the host script did not finish)", file=sys.stderr)
+                  sys.exit(1)
+
+          fence = "`" * 3
+          out = [
+              "### Staging run logs",
+              "",
+              f"- Run: `{run_id}`",
+              "- Window: the last 168 h of each container's log; a container recreated by a later"
+              " deploy has lost its log",
+              "",
+              "| Service | Containers | JSON lines | Non-JSON lines | Lines with this `run_id` |",
+              "|---|---:|---:|---:|---:|",
+          ]
+          for service in services:
+              json_lines, raw_lines, found = counts[service]
+              out.append(f"| {service} | {containers[service]} | {json_lines} | {raw_lines} | {found} |")
+          for service in services:
+              if containers[service] == 0:
+                  out += ["", f"- No `{service}` container in `dmc-268-api-staging`: nothing was read"]
+          for service in services:
+              found = counts[service][2]
+              if found == 0:
+                  continue
+              note = "1 line" if found == 1 else f"{found} lines"
+              if found > len(shown[service]):
+                  note += f", the first {len(shown[service])} shown"
+              out += ["", f"#### {service}: {note}", "", f"{fence}text", *shown[service], fence]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(out) + "\n")
+          PY
