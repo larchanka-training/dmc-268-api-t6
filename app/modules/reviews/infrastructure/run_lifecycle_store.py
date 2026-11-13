@@ -44,6 +44,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMe
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.application.verdict import (
     HashedFinding,
+    ReviewEvent,
     findings_hash,
     review_event,
     severity_counts,
@@ -508,7 +509,7 @@ class SqlAlchemyRunLifecycleStore:
             ),
         )
 
-    async def _published_review_event(self, run_id: UUID) -> str | None:
+    async def _published_review_event(self, run_id: UUID) -> ReviewEvent | None:
         """The event GitHub accepted this Run's review with, from its publication trace (§7).
 
         Read back from ``run_actions`` so every re-render, RunGuard's included, shows the
@@ -527,7 +528,11 @@ class SqlAlchemyRunLifecycleStore:
             .limit(1)
         )
         event = None if request is None else request.get(TRACE_REVIEW_EVENT)
-        return event if isinstance(event, str) else None
+        if event == "COMMENT":
+            return "COMMENT"
+        if event == "REQUEST_CHANGES":
+            return "REQUEST_CHANGES"
+        return None
 
     async def _publish_pointer(self, run: Run, repository: Repository) -> ReviewPublishPointer:
         findings = await self._published_findings(run.id)

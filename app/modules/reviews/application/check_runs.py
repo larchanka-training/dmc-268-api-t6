@@ -8,7 +8,7 @@ from typing import Protocol
 from uuid import UUID
 
 from app.modules.reviews.application.run_failures import MAX_ATTEMPTS
-from app.modules.reviews.application.verdict import severity_count_phrase
+from app.modules.reviews.application.verdict import ReviewEvent, Verdict, severity_count_phrase
 
 # Plan D-5. The size line is only ``diff_too_large``; the other two reasons never use it.
 SUMMARY_ONLY_LINES = {
@@ -132,7 +132,7 @@ class CheckRunReport:
     error_code: str | None = None
     # Where a policy failure is: document, line and position, limit and actual value.
     error_detail: str | None = None
-    verdict: str | None = None
+    verdict: Verdict | None = None
     severity_counts: dict[str, int] = field(default_factory=dict)
     inline_count: int = 0
     body_count: int = 0
@@ -146,7 +146,7 @@ class CheckRunReport:
     coverage_status: str | None = None
     saved_summary: dict[str, str] | None = None
     # The event this Run's review was posted with (``review.publish``); None never fails.
-    review_event: str | None = None
+    review_event: ReviewEvent | None = None
 
 
 type RunProviderCheckpoint = Callable[[], Awaitable[None]]
@@ -187,7 +187,7 @@ def is_summary_only_stop(summary: object) -> bool:
     return "reviewable_lines" not in summary
 
 
-def _succeeded_conclusion(verdict: str | None, review_event: str | None) -> str:
+def _succeeded_conclusion(verdict: Verdict | None, review_event: ReviewEvent | None) -> str:
     """§7: ``failure`` only for a blocking verdict whose review requested changes."""
     if verdict is None:
         return "neutral"
