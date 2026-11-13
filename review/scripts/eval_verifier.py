@@ -43,6 +43,7 @@ from app.modules.reviews.application.policy_snapshot import (
     PINNED_PROMPT_CHECKSUMS,
     PolicySnapshot,
 )
+from app.modules.reviews.application.prepare_policy_snapshot import PRIORITY_MATCHER_VERSION
 from app.modules.reviews.application.prompt_builder import (
     DEFAULT_BACKEND_V1_CHECKSUM,
     ChangedFile,
@@ -59,6 +60,13 @@ from app.modules.reviews.application.reflection_pass import (
     VerificationUnavailableError,
     verification_answer_errors,
 )
+from app.modules.reviews.application.review_ignore import (
+    BUILTIN_EXCLUSIONS_VERSION,
+    LIMITS_VERSION,
+    MATCHER_VERSION,
+    PARSER_PROFILE,
+    PARSER_VERSION,
+)
 from app.modules.reviews.application.review_output import ReviewFindingV2
 from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.infrastructure.llm.answers import InvalidAnswer, validate_verifier_answer
@@ -67,7 +75,7 @@ from app.modules.reviews.infrastructure.llm.ecb_fx import (
     EcbFxRateAdapter,
     FxQuoteProvider,
 )
-from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
+from app.modules.reviews.infrastructure.llm.gateway import FxQuoteUnavailableError, LlmGateway
 from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.models import GatewayVerifierModel
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
@@ -109,7 +117,7 @@ class _CaptureTransport:
         return response
 
 
-def _invalid_call_count(
+def _invalid_call_ids(
     captured: _CaptureTransport,
     candidates: tuple[CandidateFindingItem, ...],
     context: ReviewContext,
@@ -130,7 +138,7 @@ def _invalid_call_count(
         except (InvalidAnswer, ValueError):
             invalid.add(entry.manifest.call_id)
             continue
-        if entry is not None and verification_answer_errors(
+        if verification_answer_errors(
             output,
             candidates=candidates,
             manifest=entry.manifest,
@@ -211,12 +219,12 @@ def _context(case: dict[str, Any], settings: LlmSettings) -> ReviewContext:
         agents=agents,
         ignore_patterns=(),
         ignore_digest="id_0",
-        parser_profile="rules-markdown/v1",
-        parser_version="4.0.0",
-        matcher_version="review-ignore/v1",
-        limits_version="policy-limits/v1",
-        builtin_exclusions_version="builtin-exclusions/v1",
-        priority_matcher_version="priority-matcher/v1",
+        parser_profile=PARSER_PROFILE,
+        parser_version=PARSER_VERSION,
+        matcher_version=MATCHER_VERSION,
+        limits_version=LIMITS_VERSION,
+        builtin_exclusions_version=BUILTIN_EXCLUSIONS_VERSION,
+        priority_matcher_version=PRIORITY_MATCHER_VERSION,
         service_defaults_rule_version_id=uuid5(NAMESPACE, "defaults"),
         defaults_checksum=DEFAULT_BACKEND_V1_CHECKSUM,
         prompt_bindings=eval_prompt_bindings(PINNED_PROMPT_CHECKSUMS["review.system:v5"], "v5"),
@@ -342,10 +350,7 @@ async def run_case(
         result["error_code"] = exc.error_code
         if isinstance(exc.__cause__, LlmCallFailed):
             result["gateway_error_code"] = exc.__cause__.error_code.value
-        if (
-            isinstance(exc.__cause__, LlmCallFailed)
-            and str(exc.__cause__) == "llm_unavailable: ECB EUR/USD quote unavailable"
-        ):
+        if isinstance(exc.__cause__, FxQuoteUnavailableError):
             result["error_code"] = "verification_fx_unavailable"
     except PolicyError as exc:
         result["status"] = "failed"
@@ -366,7 +371,7 @@ async def run_case(
     ]
     result["cost_usd"] = str(sum((item.cost_usd for item in usage), Decimal(0)))
     result["calls"] = len(trace.records)
-    invalid_call_ids = _invalid_call_count(captured, candidates, context)
+    invalid_call_ids = _invalid_call_ids(captured, candidates, context)
     invalid_call_ids.update(
         record.call_id
         for _, record in trace.records
