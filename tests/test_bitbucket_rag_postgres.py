@@ -93,7 +93,7 @@ from app.worker import (
     process_review_run,
 )
 from tests.bitbucket_connection_postgres_support import _config
-from tests.test_llm_gateway import PRIMARY, completion
+from tests.llm_gateway_fakes import PRIMARY, completion
 from tests.test_prompt_builder import _metadata_context
 
 pytest_plugins = ("tests.bitbucket_connection_postgres_support",)
@@ -179,6 +179,18 @@ class _ModelHttp:
 
 
 class _AcceptedOutput:
+    async def resume_finalized(self, run_id: UUID) -> None:
+        return None
+
+    async def load_accepted_output(self, run_id: UUID) -> None:
+        return None
+
+    async def checkpoint_candidates(
+        self, run_id: UUID, raw_output: object, candidate_ids: tuple[str, ...], **kwargs: object
+    ) -> bool:
+        assert candidate_ids
+        return True
+
     async def execute(self, run_id: UUID, raw_output: object) -> bool:
         assert raw_output is not None
         return True

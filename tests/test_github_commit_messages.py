@@ -36,9 +36,9 @@ from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.modules.reviews.infrastructure.vcs_failures import ClassifiedVcsProvider
+from tests.github_vcs_payload_fakes import _pull_payload
 from tests.portal_postgres import HEAD, RUN_ATTEMPTED, Env
-from tests.test_github_vcs_provider import _pull_payload
-from tests.test_retired_installation_postgres import DiscardTokenCache
+from tests.retired_installation_fakes import DiscardTokenCache
 from tests.test_run_origin_guard_postgres import prepare
 from tests.test_run_publication_origin_postgres import retire
 from tests.test_run_vcs_origin_postgres import vcs_env as vcs_env

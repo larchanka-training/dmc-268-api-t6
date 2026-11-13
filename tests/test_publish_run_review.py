@@ -265,6 +265,7 @@ def run(
     reviews: Reviews | None,
     sleeps: list[float] | None = None,
     gitlab: GitLabReviews | None = None,
+    pointer: ReviewPublishPointer = POINTER,
 ) -> tuple[Trace, CheckRuns]:
     trace, check_runs = Trace(), CheckRuns()
     pauses = sleeps if sleeps is not None else []
@@ -285,7 +286,7 @@ def run(
             sleep=sleep,
             now=lambda: NOW,
             **publisher_kwargs,
-        ).execute(POINTER)
+        ).execute(pointer)
     )
     return trace, check_runs
 
@@ -319,6 +320,31 @@ def test_publication_succeeds_with_one_trace_record_and_a_neutral_check_run() ->
     assert [(v.status, v.conclusion, v.title) for v in check_runs.views] == [
         ("completed", "neutral", "AI-ревью: blocking")
     ]
+
+
+def test_stale_review_event_does_not_publish() -> None:
+    store = Store(context(review_event="REQUEST_CHANGES"))
+    reviews = Reviews([SubmittedReview(501, (9001,))])
+
+    trace, check_runs = run(store, reviews)
+
+    assert store.state == "publishing"
+    assert store.completed == []
+    assert reviews.submissions == []
+    assert trace.records == []
+    assert check_runs.views == []
+
+
+def test_matching_review_event_publishes_the_saved_event() -> None:
+    store = Store(context(review_event="REQUEST_CHANGES"))
+    reviews = Reviews([SubmittedReview(501, (9001,))])
+    pointer = ReviewPublishPointer(RUN, HEAD, HASH, "REQUEST_CHANGES")
+
+    trace, _ = run(store, reviews, pointer=pointer)
+
+    assert store.state == "succeeded"
+    assert reviews.submissions[0].event == "REQUEST_CHANGES"
+    assert trace.records[0][1]["review_event"] == "REQUEST_CHANGES"
 
 
 def test_coordinate_fallback_with_no_inline_findings_fails_after_one_retry() -> None:

@@ -21,9 +21,9 @@ from app.modules.reviews.application.review_context_stage import (
     ReviewContextStage,
 )
 from app.modules.reviews.application.run_failures import RunSkipped
+from tests.run_coverage_fakes import code_snapshot, empty_snapshot
 from tests.test_prepare_policy_snapshot import Store, Uow
 from tests.test_review_context_stage import Parser, Policy, Repository, Runs, Trace, Vcs
-from tests.test_run_coverage import code_snapshot, empty_snapshot
 
 _RUN = UUID(int=2)
 

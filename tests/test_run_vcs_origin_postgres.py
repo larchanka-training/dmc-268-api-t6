@@ -21,8 +21,8 @@ from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from tests.portal_postgres import INSTALL_A, REPO_A, RUN_ATTEMPTED, Env, portal_schema
+from tests.retired_installation_fakes import DiscardTokenCache
 from tests.test_app_reinstall_postgres import FreshGitHub, apply
-from tests.test_retired_installation_postgres import DiscardTokenCache
 from tests.test_run_origin_guard_postgres import prepare
 from tests.test_run_publication_origin_postgres import retire
 
@@ -177,8 +177,9 @@ def test_processor_stops_each_subsequent_page_refetch_and_blob_without_swallowin
         SqlAlchemyRunProcessingUnitOfWork,
     )
     from app.modules.reviews.infrastructure.vcs_failures import ClassifiedVcsProvider
+    from tests.github_vcs_payload_fakes import _pull_payload
     from tests.portal_postgres import HEAD
-    from tests.test_github_vcs_provider import _file, _pull_payload
+    from tests.test_github_vcs_provider import _file
 
     async def exercise() -> None:
         engine = vcs_env.engine()
@@ -303,8 +304,8 @@ def test_processor_stops_each_subsequent_page_refetch_and_blob_without_swallowin
 def test_cached_run_source_still_checks_original_identity_before_next_request(
     vcs_env: Env, operation: str, origin: str
 ) -> None:
+    from tests.github_vcs_payload_fakes import _pull_payload
     from tests.portal_postgres import HEAD
-    from tests.test_github_vcs_provider import _pull_payload
 
     async def exercise() -> None:
         engine = vcs_env.engine()

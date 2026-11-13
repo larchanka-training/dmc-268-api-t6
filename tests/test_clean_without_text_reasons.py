@@ -25,10 +25,10 @@ from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
     VcsFile,
 )
+from tests.clean_without_text_fakes import finalize
 from tests.installation_onboarding_fakes import provider_checkpoint
+from tests.run_coverage_fakes import code_snapshot, coverage, empty_snapshot
 from tests.test_clean_without_text import EmptyAdditionProvider
-from tests.test_clean_without_text_result import finalize
-from tests.test_run_coverage import code_snapshot, coverage, empty_snapshot
 
 
 @pytest.mark.parametrize(
@@ -166,9 +166,9 @@ def test_unknown_policy_fallback_never_displays_possibly_withheld_paths() -> Non
 def test_qualified_empty_reason_after_twenty_diagnostics_keeps_canonical_text() -> None:
     from app.modules.reviews.application.get_run_diff import DiffSnapshot
     from app.modules.reviews.application.run_coverage import restore_run_coverage
+    from tests.clean_without_text_fakes import finalize
+    from tests.run_coverage_fakes import code_snapshot, coverage
     from tests.test_clean_without_text_coverage_record import diff_for
-    from tests.test_clean_without_text_result import finalize
-    from tests.test_run_coverage import code_snapshot, coverage
     from tests.vcs_facts import EMPTY_BLOB_SHA
 
     ordinary = [
@@ -212,8 +212,8 @@ def test_qualified_empty_reason_after_twenty_diagnostics_keeps_canonical_text() 
 def test_persisted_empty_reason_variant_cannot_exceed_trusted_snapshot_capacity() -> None:
     from app.modules.reviews.application.get_run_diff import DiffSnapshot
     from app.modules.reviews.application.run_coverage import restore_run_coverage
+    from tests.run_coverage_fakes import code_snapshot, coverage
     from tests.test_clean_without_text_coverage_record import diff_for
-    from tests.test_run_coverage import code_snapshot, coverage
     from tests.vcs_facts import EMPTY_BLOB_SHA
 
     snapshots = [
@@ -240,8 +240,8 @@ def test_persisted_empty_reason_variant_cannot_exceed_trusted_snapshot_capacity(
     ],
 )
 def test_saved_reason_variant_schema_rejects_invalid_aggregates(variants: object) -> None:
-    from tests.test_clean_without_text_result import finalize
-    from tests.test_run_coverage import code_snapshot, coverage, empty_snapshot
+    from tests.clean_without_text_fakes import finalize
+    from tests.run_coverage_fakes import code_snapshot, coverage, empty_snapshot
 
     repository, _ = finalize(coverage([code_snapshot(), empty_snapshot()]))
     repository.response["coverage"]["reason_variant_counts"] = variants
@@ -251,8 +251,8 @@ def test_saved_reason_variant_schema_rejects_invalid_aggregates(variants: object
 def test_legacy_aggregate_does_not_infer_empty_qualification_from_added_status() -> None:
     from app.modules.reviews.application.get_run_diff import DiffSnapshot
     from app.modules.reviews.application.run_coverage import restore_run_coverage
+    from tests.run_coverage_fakes import code_snapshot, coverage
     from tests.test_clean_without_text_coverage_record import diff_for
-    from tests.test_run_coverage import code_snapshot, coverage
     from tests.vcs_facts import EMPTY_BLOB_SHA
 
     snapshots = (
@@ -276,7 +276,7 @@ def test_legacy_aggregate_does_not_infer_empty_qualification_from_added_status()
 
 def test_ignored_empty_paths_do_not_enter_semantic_aggregates_or_diagnostics() -> None:
     from app.modules.reviews.application.get_run_diff import DiffSnapshot
-    from tests.test_run_coverage import code_snapshot, coverage
+    from tests.run_coverage_fakes import code_snapshot, coverage
     from tests.vcs_facts import EMPTY_BLOB_SHA
 
     snapshots = (
@@ -300,8 +300,8 @@ def test_ignored_empty_paths_do_not_enter_semantic_aggregates_or_diagnostics() -
 
 def test_saved_reason_variants_cannot_reclassify_visible_generic_diagnostics() -> None:
     from app.modules.reviews.application.get_run_diff import DiffSnapshot
-    from tests.test_clean_without_text_result import finalize
-    from tests.test_run_coverage import code_snapshot, coverage
+    from tests.clean_without_text_fakes import finalize
+    from tests.run_coverage_fakes import code_snapshot, coverage
     from tests.vcs_facts import EMPTY_BLOB_SHA
 
     snapshots = (

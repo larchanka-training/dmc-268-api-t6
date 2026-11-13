@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.bootstrap.seed_prompts import PromptAsset, load_prompt_assets, seed_prompt_versions
+from app.bootstrap.seed_prompts import PromptAsset
 from app.modules.repositories.infrastructure.models import RuleVersion
 from app.modules.reviews.application.conventions import (
     CachedConventions,
@@ -67,10 +67,12 @@ from tests.portal_postgres import (
     Env,
     portal_schema,
 )
+from tests.prompt_assets_fakes import _packaged, _seed
+from tests.publication_settings_postgres import _insert, _ready
 from tests.test_prepare_policy_snapshot import AGENTS_BLOB_OID, Source
 from tests.test_review_context_stage import Parser, Vcs, _checkpoint
 from tests.test_review_context_stage import Repository as SourceTree
-from tests.test_run_publication_settings_postgres import _claim, _insert, _ready
+from tests.test_run_publication_settings_postgres import _claim
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # The checksum portal_schema seeds for RULE_A: the last digit of REPO_A's external id
@@ -93,16 +95,6 @@ def env() -> Iterator[Env]:
         yield schema
 
 
-def _packaged(*keys: str) -> tuple[PromptAsset, ...]:
-    # portal_schema seeds a fake review.system v1 whose checksum is not the packaged file's;
-    # seeding that version again would be refused as an immutable prompt change.
-    return tuple(
-        asset
-        for asset in load_prompt_assets(REPO_ROOT / "review" / "prompts")
-        if (asset.key, asset.version) != ("review.system", 1) and (not keys or asset.key in keys)
-    )
-
-
 def _row(asset: PromptAsset) -> PromptRow:
     return (asset.key, asset.version, asset.checksum)
 
@@ -117,11 +109,6 @@ def _newer(key: str) -> PromptAsset:
     version = _newest(key)[1] + 1
     content = f"---\nkey: {key}\nversion: {version}\n---\nPinned by a #130 test.\n"
     return PromptAsset(key, version, content, sha256(content.encode("utf-8")).hexdigest())
-
-
-async def _seed(factory: async_sessionmaker[AsyncSession], assets: tuple[PromptAsset, ...]) -> None:
-    async with factory.begin() as session:
-        await seed_prompt_versions(session, assets)
 
 
 async def _prompt_id(factory: async_sessionmaker[AsyncSession], key: str, version: int) -> UUID:

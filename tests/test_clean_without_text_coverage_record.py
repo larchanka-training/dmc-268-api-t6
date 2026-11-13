@@ -12,8 +12,8 @@ from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.run_coverage import restore_run_coverage, snapshot_vcs_file
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from tests.installation_onboarding_fakes import provider_checkpoint
+from tests.run_coverage_fakes import code_snapshot, coverage, empty_snapshot
 from tests.test_review_context_stage import Vcs
-from tests.test_run_coverage import code_snapshot, coverage, empty_snapshot
 
 
 def diff_for(files: list[DiffSnapshot]) -> DiffMap:

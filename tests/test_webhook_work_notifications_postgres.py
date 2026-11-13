@@ -7,7 +7,7 @@ import contextlib
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import TracebackType
 from typing import Any, Self
 from uuid import UUID, uuid4
@@ -262,8 +262,10 @@ class LinkedInstallationGitHub:
         return AuthenticatedGitHubInstallations(41, (GitHubInstallation(99, "octo", (101,)),))
 
 
-DEFERRED_AT = datetime(2026, 10, 5, 12, tzinfo=UTC)
-RETRY_AT = datetime(2026, 10, 5, 13, tzinfo=UTC)
+# Stay inside receipt retention while making revival eligible and retry not yet due.
+_FIXTURE_NOW = datetime.now(UTC)
+DEFERRED_AT = _FIXTURE_NOW - timedelta(hours=1)
+RETRY_AT = _FIXTURE_NOW + timedelta(hours=1)
 
 
 async def seed_deferred_receipt(

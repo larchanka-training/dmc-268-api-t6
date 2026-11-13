@@ -45,7 +45,7 @@ async def load_review_results(
             # list renders, binds and parses each one on every request (#456).
             .where(
                 RunAction.run_id == any_(bindparam("run_ids", list(heads), type_=ARRAY(Uuid()))),
-                RunAction.tool == "review.postprocess",
+                RunAction.tool.in_(("review.finalize", "review.postprocess")),
             )
             .order_by(RunAction.run_id, RunAction.index.desc())
             .distinct(RunAction.run_id)

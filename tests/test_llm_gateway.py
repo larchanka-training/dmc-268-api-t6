@@ -85,6 +85,7 @@ from app.modules.reviews.infrastructure.llm.transport import (
     TransportRateLimited,
 )
 from tests.llm_fakes import context_checkpoint
+from tests.llm_gateway_fakes import FALLBACK, PRIMARY, completion
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_ID = UUID("00000000-0000-0000-0000-000000003301")
@@ -93,24 +94,6 @@ PROMPT_VERSION_ID = UUID("00000000-0000-0000-0000-000000003303")
 RULE_VERSION_ID = UUID("00000000-0000-0000-0000-000000003304")
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 
-PRIMARY = ModelProfile(
-    provider="eurouter",
-    base_url="https://router.test/api/v1",
-    model="primary-model",
-    context_window=100_000,
-    max_output_tokens=1_000,
-    price=ModelPrice(Decimal("1"), Decimal("2")),
-    api_keys=("sk-primary-1",),
-)
-FALLBACK = ModelProfile(
-    provider="eurouter",
-    base_url="https://router.test/api/v1",
-    model="fallback-model",
-    context_window=100_000,
-    max_output_tokens=1_000,
-    price=ModelPrice(Decimal("1"), Decimal("2")),
-    api_keys=("sk-fallback-1",),
-)
 
 VALID_OUTPUT: dict[str, Any] = {
     "findings": [
@@ -151,45 +134,6 @@ CONTEXT = ReviewContext(
 )
 
 type Reply = httpx.Response | Callable[[httpx.Request], httpx.Response] | Exception
-
-
-def completion(
-    content: str | None,
-    *,
-    model: str = "primary-model-2026-09-01",
-    prompt_tokens: int = 1200,
-    completion_tokens: int = 300,
-    cached_tokens: int = 0,
-    cost: float | None = None,
-    cost_currency: str | None = None,
-    finish_reason: str = "stop",
-) -> httpx.Response:
-    usage: dict[str, Any] = {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": prompt_tokens + completion_tokens,
-        "prompt_tokens_details": {"cached_tokens": cached_tokens},
-    }
-    if cost is not None:
-        usage["cost"] = cost
-    if cost_currency is not None:
-        usage["cost_currency"] = cost_currency
-    return httpx.Response(
-        200,
-        json={
-            "id": "chatcmpl-1",
-            "object": "chat.completion",
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": content},
-                    "finish_reason": finish_reason,
-                }
-            ],
-            "usage": usage,
-        },
-    )
 
 
 def valid(**kwargs: Any) -> httpx.Response:

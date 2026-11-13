@@ -34,10 +34,10 @@ from app.modules.reviews.application.run_coverage import (
 from app.modules.reviews.application.saved_review_result import read_saved_review_result
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsPullRequest
 from app.modules.reviews.application.verdict import severity_counts
+from tests.run_coverage_fakes import code_snapshot, empty_snapshot
 from tests.test_review_context_stage import Trace, Vcs
 from tests.test_review_context_stage import _stage as _context_stage
 from tests.test_review_path import _store
-from tests.test_run_coverage import code_snapshot, empty_snapshot
 
 _RUN = UUID(int=2)
 _HEAD = "a" * 40

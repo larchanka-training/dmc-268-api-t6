@@ -7,7 +7,6 @@ import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -60,6 +59,7 @@ from app.modules.repositories.infrastructure.installation_repository_unit_of_wor
     SqlAlchemyInstallationRepositoriesUnitOfWork,
 )
 from tests.portal_postgres import INSTALL_A, REPO_A, RULE_A, WS_A, Env, portal_schema
+from tests.retired_installation_fakes import DiscardTokenCache
 from tests.test_app_reinstall_postgres import FreshGitHub, apply, seed_archive
 
 
@@ -585,18 +585,6 @@ def test_new_installation_created_before_oauth_is_deferred_then_resumes_with_sav
             await engine.dispose()
 
     asyncio.run(exercise())
-
-
-class DiscardTokenCache:
-    """Each phase mints a token so the inner HTTP boundary is exercised."""
-
-    async def get(self, installation_external_id: int) -> None:
-        return None
-
-    async def set(
-        self, installation_external_id: int, access_token: str, expires_at: datetime
-    ) -> None:
-        pass
 
 
 @pytest.mark.integration

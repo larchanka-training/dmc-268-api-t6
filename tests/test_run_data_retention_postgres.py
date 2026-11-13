@@ -27,6 +27,8 @@ from app.modules.reviews.infrastructure.models import (
     CodeChangeDiff,
     ContextManifest,
     ContextPayload,
+    FinalReviewResult,
+    ReviewCandidateCheckpoint,
     Run,
     RunAction,
 )
@@ -243,6 +245,67 @@ def test_a_terminal_run_past_the_period_loses_its_diff_text_and_manifests(
         assert await _manifests(factory, RUN_DONE) == 0
         assert await _marker(factory, RUN_DONE) == _NOW
         assert await _updated_at(factory, RUN_DONE) == event_id
+
+    _on_database(portal_env, body)
+
+
+def test_expired_run_drops_candidate_checkpoint_but_keeps_final_result(portal_env: Env) -> None:
+    async def body(factory: Factory) -> None:
+        await _store_run_data(factory, RUN_DONE, PR_OPEN)
+        await _finish(factory, RUN_DONE, "succeeded")
+        await _finish(factory, RUN_CLOSED, "succeeded", _NOW - timedelta(days=1))
+        async with factory.begin() as session:
+            session.add_all(
+                [
+                    ReviewCandidateCheckpoint(
+                        run_id=run_id,
+                        attempt=1,
+                        accepted_output={"summary": "private review text"},
+                        fitted_context={"changed_files": [{"lines": [[1, "add", "private code"]]}]},
+                        candidates=[],
+                        dropped=[],
+                        incomplete_paths=[],
+                        payload_sha256="0" * 64,
+                    )
+                    for run_id in (RUN_DONE, RUN_CLOSED)
+                ]
+                + [
+                    FinalReviewResult(
+                        run_id=RUN_DONE,
+                        source_attempt=1,
+                        result={"verdict": "attention"},
+                        publication_plan={"body": "retained final result"},
+                        digest="1" * 64,
+                    )
+                ]
+            )
+
+        assert await _task(factory).run(30) is False
+
+        async with factory() as session:
+            assert (
+                await session.scalar(
+                    select(ReviewCandidateCheckpoint).where(
+                        ReviewCandidateCheckpoint.run_id == RUN_DONE
+                    )
+                )
+                is None
+            )
+            young = await session.scalar(
+                select(ReviewCandidateCheckpoint).where(
+                    ReviewCandidateCheckpoint.run_id == RUN_CLOSED
+                )
+            )
+            assert young is not None
+            assert young.fitted_context["changed_files"][0]["lines"][0][2] == "private code"
+            final = await session.get(FinalReviewResult, RUN_DONE)
+            assert final is not None
+            assert final.result == {"verdict": "attention"}
+            assert final.publication_plan == {"body": "retained final result"}
+        assert await _diff_rows(factory, RUN_DONE) == _PURGED_ROWS
+        assert await _manifests(factory, RUN_DONE) == 0
+        assert await _marker(factory, RUN_DONE) == _NOW
+        assert await _marker(factory, RUN_CLOSED) is None
 
     _on_database(portal_env, body)
 

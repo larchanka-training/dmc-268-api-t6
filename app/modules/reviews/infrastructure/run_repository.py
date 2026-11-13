@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
+from hashlib import sha256
 from typing import Any
 from typing import cast as type_cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import (
     ColumnElement,
@@ -54,6 +57,12 @@ from app.modules.reviews.application.get_run_comments import PublishedComment
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.get_run_file_lines import BlobCacheKey
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem, RunProvider, RunUsage
+from app.modules.reviews.application.policy_snapshot import (
+    CallManifest,
+    ManifestBlock,
+    RecoveryKind,
+    SourceRole,
+)
 from app.modules.reviews.application.post_processing_diff_map import diff_map_from_snapshots
 from app.modules.reviews.application.process_run import (
     RunConventionsInput,
@@ -74,7 +83,11 @@ from app.modules.reviews.application.run_coverage import (
 )
 from app.modules.reviews.application.run_events import RunChange
 from app.modules.reviews.application.run_failures import RunCancelled
-from app.modules.reviews.application.store_review_output import PublishingGuard
+from app.modules.reviews.application.store_review_output import (
+    AcceptedReviewCheckpoint,
+    FinalizedReviewPlan,
+    PublishingGuard,
+)
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.bitbucket_run_origin import (
     active_bitbucket_run_origin,
@@ -83,13 +96,18 @@ from app.modules.reviews.infrastructure.bitbucket_run_origin import (
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
     CodeChangeDiff,
+    ContextManifest,
     ContextPayload,
+    FinalReviewResult,
     Finding,
     PromptVersion,
+    ReviewCandidateCheckpoint,
     Run,
     RunAction,
     RunActionResponseBody,
 )
+from app.modules.reviews.infrastructure.publication_findings import published_finding_from_row
+from app.modules.reviews.infrastructure.publication_plan import SavedPublicationPlan
 from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition, origin_active
@@ -848,6 +866,192 @@ class SqlAlchemyReviewOutputRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def load_finalized_plan(self, run_id: UUID) -> FinalizedReviewPlan | None:
+        saved = await self._session.get(FinalReviewResult, run_id)
+        if saved is None:
+            return None
+        plan = SavedPublicationPlan.from_json(saved.publication_plan)
+        return FinalizedReviewPlan(plan.head_sha, plan.findings_hash, plan.review_event)
+
+    async def enter_publishing_from_final(self, run_id: UUID, *, lease_until: datetime) -> bool:
+        run = await self._session.scalar(select(Run).where(Run.id == run_id).with_for_update())
+        saved = await self._session.get(FinalReviewResult, run_id)
+        if run is None or saved is None or run.state is not RunState.RUNNING:
+            return False
+        plan = SavedPublicationPlan.from_json(saved.publication_plan)
+        if plan.head_sha != run.head_sha or plan.idempotency_key != run.idempotency_key:
+            return False
+        await self._record_publish_start(run, saved)
+        run.state = RunState.PUBLISHING
+        run.lease_until = lease_until
+        await self._session.flush()
+        await notify_run_state(self._session, run_id, RunState.PUBLISHING)
+        return True
+
+    async def _record_publish_start(self, run: Run, saved: FinalReviewResult) -> None:
+        existing = await self._session.scalar(
+            select(RunAction.id).where(
+                RunAction.run_id == run.id,
+                RunAction.tool == "review.publish_start",
+                RunAction.request["attempt"].as_integer() == run.attempt,
+            )
+        )
+        if existing is not None:
+            return
+        plan = SavedPublicationPlan.from_json(saved.publication_plan)
+        await insert_run_action(
+            self._session,
+            run_id=run.id,
+            tool="review.publish_start",
+            request={
+                "attempt": run.attempt,
+                "source_attempt": saved.source_attempt,
+                "final_result_id": str(run.id),
+                "digest": saved.digest,
+            },
+            response={
+                "head_sha": plan.head_sha,
+                "findings_hash": plan.findings_hash,
+                "review_event": plan.review_event,
+            },
+            started_at=datetime.now(UTC),
+            duration_ms=0,
+        )
+
+    async def load_review_checkpoint(self, run_id: UUID) -> AcceptedReviewCheckpoint | None:
+        checkpoint = await self._session.scalar(
+            select(ReviewCandidateCheckpoint)
+            .where(ReviewCandidateCheckpoint.run_id == run_id)
+            .order_by(ReviewCandidateCheckpoint.attempt.desc())
+            .limit(1)
+        )
+        if checkpoint is None:
+            return None
+        manifest: CallManifest | None = None
+        if checkpoint.accepted_call_id is not None:
+            saved_manifest = await self._session.scalar(
+                select(ContextManifest).where(
+                    ContextManifest.run_id == run_id,
+                    ContextManifest.call_id == checkpoint.accepted_call_id,
+                    ContextManifest.stage == "review",
+                )
+            )
+            if saved_manifest is not None:
+                blocks = []
+                for value in saved_manifest.blocks:
+                    block = dict(value)
+                    block["source_role"] = SourceRole(block["source_role"])
+                    block["shown_ranges"] = tuple(tuple(pair) for pair in block["shown_ranges"])
+                    repository_id = block["repository_id"]
+                    block["repository_id"] = (
+                        UUID(repository_id) if isinstance(repository_id, str) else None
+                    )
+                    blocks.append(ManifestBlock(**block))
+                manifest = CallManifest(
+                    call_id=checkpoint.accepted_call_id,
+                    stage="review",
+                    blocks=tuple(blocks),
+                    recovery_kind=type_cast(RecoveryKind, saved_manifest.recovery_kind),
+                    run_id=run_id,
+                )
+        return AcceptedReviewCheckpoint(
+            output=checkpoint.accepted_output,
+            accepted_call_id=checkpoint.accepted_call_id,
+            manifest=manifest,
+            incomplete_paths=tuple(checkpoint.incomplete_paths),
+            source_attempt=checkpoint.attempt,
+            fitted_context=checkpoint.fitted_context,
+        )
+
+    async def checkpoint_review_candidates(
+        self,
+        run_id: UUID,
+        *,
+        model_output: dict[str, object],
+        candidates: list[dict[str, object]],
+        dropped: list[dict[str, object]],
+        accepted_call_id: UUID | None,
+        expected_attempt: int,
+        incomplete_paths: tuple[str, ...],
+        fitted_context: dict[str, object],
+        started_at: datetime,
+        duration_ms: int,
+    ) -> None:
+        """Persist the full private checkpoint and its bounded diagnostic actions."""
+        run = await self._session.scalar(select(Run).where(Run.id == run_id).with_for_update())
+        assert run is not None and run.state is RunState.RUNNING and run.attempt == expected_attempt
+        existing = await self._session.scalar(
+            select(ReviewCandidateCheckpoint)
+            .where(ReviewCandidateCheckpoint.run_id == run_id)
+            .order_by(ReviewCandidateCheckpoint.attempt.desc())
+            .limit(1)
+        )
+        if existing is not None:
+            changed = (
+                existing.accepted_output != model_output
+                or existing.fitted_context != fitted_context
+                or existing.candidates != candidates
+                or existing.dropped != dropped
+                or existing.incomplete_paths != list(incomplete_paths)
+                or existing.accepted_call_id != accepted_call_id
+            )
+            if existing.attempt == expected_attempt and changed:
+                raise ValueError("accepted review checkpoint changed within attempt")
+            if not changed:
+                return
+        payload = {
+            "accepted_output": model_output,
+            "fitted_context": fitted_context,
+            "candidates": candidates,
+            "dropped": dropped,
+            "incomplete_paths": list(incomplete_paths),
+        }
+        digest = sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        checkpoint = ReviewCandidateCheckpoint(
+            id=uuid4(),
+            run_id=run_id,
+            attempt=run.attempt,
+            accepted_output=model_output,
+            fitted_context=fitted_context,
+            candidates=candidates,
+            dropped=dropped,
+            incomplete_paths=list(incomplete_paths),
+            accepted_call_id=accepted_call_id,
+            payload_sha256=digest,
+        )
+        self._session.add(checkpoint)
+        await self._session.flush()
+        request = {"attempt": run.attempt, "checkpoint_id": str(checkpoint.id), "digest": digest}
+        await insert_run_action(
+            self._session,
+            run_id=run_id,
+            tool="llm.review_output",
+            request={
+                **request,
+                "accepted_call_id": None if accepted_call_id is None else str(accepted_call_id),
+            },
+            response=model_output,
+            started_at=started_at,
+            duration_ms=0,
+        )
+        await insert_run_action(
+            self._session,
+            run_id=run_id,
+            tool="review.postprocess",
+            request={**request, "phase": "candidate"},
+            response={
+                "candidate_ids": [item["candidate_id"] for item in candidates],
+                "dropped": [
+                    {"index": item["position"], "drop_reason": item["drop_reason"]}
+                    for item in dropped
+                ],
+            },
+            started_at=started_at,
+            duration_ms=duration_ms,
+        )
+
     async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput | None:
         """Snapshot the durable diff and immutable rule version for post-processing.
 
@@ -968,6 +1172,147 @@ class SqlAlchemyReviewOutputRepository:
             github_repository_full_name=full_name if provider == "github" else None,
         )
 
+    async def finalize_review(
+        self,
+        run_id: UUID,
+        *,
+        model_output: dict[str, object] | None,
+        processed: ProcessedReviewOutput,
+        result: dict[str, Any],
+        review_event: str,
+        findings_hash: str,
+        verify_request: dict[str, Any] | None,
+        verify_response: dict[str, Any] | None,
+        started_at: datetime,
+        duration_ms: int,
+    ) -> None:
+        """Commit one immutable result and publication plan while the Run is running."""
+        run = await self._session.scalar(select(Run).where(Run.id == run_id).with_for_update())
+        assert run is not None and run.state is RunState.RUNNING
+        existing = await self._session.get(FinalReviewResult, run_id)
+        if existing is not None:
+            saved_plan = SavedPublicationPlan.from_json(existing.publication_plan)
+            if (
+                existing.result != result
+                or saved_plan.review_event != review_event
+                or saved_plan.findings_hash != findings_hash
+                or saved_plan.review_body != processed.review_body
+            ):
+                raise ValueError("final review result changed on replay")
+            return
+
+        records = (*processed.inline, *processed.body_only, *processed.dropped)
+        rows = [_to_finding(run_id, item) for item in records]
+        self._session.add_all(rows)
+        await self._session.flush()
+        inline = [row for row, item in zip(rows, records, strict=True) if item.bucket == "inline"]
+        provider = await self._session.scalar(
+            select(ProviderInstallation.provider)
+            .join(Repository, Repository.provider_installation_id == ProviderInstallation.id)
+            .join(CodeChange, CodeChange.repository_id == Repository.id)
+            .where(CodeChange.id == run.code_change_id)
+        )
+        if provider is None:
+            raise ValueError("finalization requires a publication provider")
+        diff_map = (
+            await load_publication_diff_map(self._session, run_id)
+            if inline and provider in {"gitlab", "bitbucket"}
+            else None
+        )
+        findings = []
+        for row in inline:
+            finding = asdict(published_finding_from_row(row, diff_map, provider=provider))
+            finding["finding_id"] = str(row.id)
+            findings.append(finding)
+        plan = SavedPublicationPlan.from_json(
+            {
+                "head_sha": run.head_sha,
+                "idempotency_key": run.idempotency_key,
+                "review_event": review_event,
+                "findings_hash": findings_hash,
+                "review_body": processed.review_body,
+                "finding_ids": [
+                    str(row.id)
+                    for row, item in zip(rows, records, strict=True)
+                    if item.bucket != "dropped"
+                ],
+                "findings": findings,
+            }
+        )
+        plan_json = plan.to_json()
+        checkpoint = await self._session.scalar(
+            select(ReviewCandidateCheckpoint)
+            .where(ReviewCandidateCheckpoint.run_id == run_id)
+            .order_by(ReviewCandidateCheckpoint.attempt.desc())
+            .limit(1)
+        )
+        review_call_id = None if checkpoint is None else checkpoint.accepted_call_id
+        verifier_value = None if verify_request is None else verify_request.get("accepted_call_id")
+        verifier_call_id = UUID(verifier_value) if isinstance(verifier_value, str) else None
+        digest = sha256(
+            json.dumps(
+                {"result": result, "publication_plan": plan_json},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self._session.add(
+            FinalReviewResult(
+                run_id=run_id,
+                source_attempt=run.attempt,
+                accepted_review_call_id=review_call_id,
+                accepted_verifier_call_id=verifier_call_id,
+                result=result,
+                publication_plan=plan_json,
+                digest=digest,
+            )
+        )
+        run.review_body = processed.review_body
+        await self._session.flush()
+        if checkpoint is None and model_output is not None:
+            await insert_run_action(
+                self._session,
+                run_id=run_id,
+                tool="llm.review_output",
+                request={"attempt": run.attempt},
+                response=model_output,
+                started_at=started_at,
+                duration_ms=0,
+            )
+        if verify_request is not None:
+            await insert_run_action(
+                self._session,
+                run_id=run_id,
+                tool="llm.verify",
+                request={**verify_request, "attempt": run.attempt},
+                response=verify_response,
+                started_at=started_at,
+                duration_ms=0,
+            )
+        await insert_run_action(
+            self._session,
+            run_id=run_id,
+            tool="review.finalize",
+            request={
+                "attempt": run.attempt,
+                "accepted_review_call_id": (
+                    None if review_call_id is None else str(review_call_id)
+                ),
+                "accepted_verifier_call_id": (
+                    None if verifier_call_id is None else str(verifier_call_id)
+                ),
+                "digest": digest,
+            },
+            response={
+                key: value
+                for key, value in result.items()
+                if key not in {"findings", "severity_threshold", "max_inline"}
+            },
+            started_at=started_at,
+            duration_ms=duration_ms,
+        )
+
     async def store_review_output(
         self,
         run_id: UUID,
@@ -975,7 +1320,7 @@ class SqlAlchemyReviewOutputRepository:
         parsed: ReviewOutput,
         processed: ProcessedReviewOutput,
     ) -> ReviewPublication | None:
-        """Flush one validated answer; the use case commits it before networking.
+        """Enter publishing using the committed final findings when available.
 
         ``model_output`` is the gateway's normalized answer (PIPELINE_SPEC §9); the raw
         provider answer stays only in the ``llm.call`` trace. None is a backend result
@@ -991,17 +1336,17 @@ class SqlAlchemyReviewOutputRepository:
                 RunAction.tool == "llm.review_output",
             )
         )
-        if existing is None:
-            if model_output is not None:
-                await insert_run_action(
-                    self._session,
-                    run_id=run_id,
-                    tool="llm.review_output",
-                    request={},
-                    response=model_output,
-                    started_at=datetime.now(UTC),
-                    duration_ms=0,
-                )
+        if existing is None and model_output is not None:
+            await insert_run_action(
+                self._session,
+                run_id=run_id,
+                tool="llm.review_output",
+                request={},
+                response=model_output,
+                started_at=datetime.now(UTC),
+                duration_ms=0,
+            )
+        if run.review_body is None:
             findings = tuple(_to_published_finding(item.finding) for item in processed.inline)
             records = (*processed.inline, *processed.body_only, *processed.dropped)
             self._session.add_all([_to_finding(run_id, item) for item in records])
@@ -1061,6 +1406,7 @@ class SqlAlchemyReviewOutputRepository:
             head_sha=run.head_sha,
             head_current=run.head_sha == pr_head_sha,
             repository_review_event=repository_review_event.value,
+            attempt=run.attempt,
         )
 
     async def enter_publishing(
@@ -1075,12 +1421,17 @@ class SqlAlchemyReviewOutputRepository:
         verify_request: dict[str, Any] | None = None,
         verify_response: dict[str, Any] | None = None,
     ) -> None:
-        """Record ``review.postprocess``, the publishing lease and NOTIFY (T8); flush only.
+        """Renew the publishing lease and NOTIFY in T8; flush only.
 
-        A verifier trace is recorded first as ``llm.verify``, once per run like
-        ``llm.review_output`` (CVS §7.4); a run without a verifier pass writes none.
+        Historical direct callers without a final result keep their verifier and
+        postprocess trace in this transaction.
         """
-        if verify_request is not None:
+        finalized = await self._session.get(FinalReviewResult, run_id)
+        if finalized is not None:
+            run = await self._session.scalar(select(Run).where(Run.id == run_id).with_for_update())
+            assert run is not None and run.state is RunState.PUBLISHING
+            await self._record_publish_start(run, finalized)
+        if finalized is None and verify_request is not None:
             existing = await self._session.scalar(
                 select(RunAction.id).where(
                     RunAction.run_id == run_id,
@@ -1097,15 +1448,16 @@ class SqlAlchemyReviewOutputRepository:
                     started_at=started_at,
                     duration_ms=0,
                 )
-        await insert_run_action(
-            self._session,
-            run_id=run_id,
-            tool="review.postprocess",
-            request=postprocess_request,
-            response=postprocess_response,
-            started_at=started_at,
-            duration_ms=duration_ms,
-        )
+        if finalized is None:
+            await insert_run_action(
+                self._session,
+                run_id=run_id,
+                tool="review.postprocess",
+                request=postprocess_request,
+                response=postprocess_response,
+                started_at=started_at,
+                duration_ms=duration_ms,
+            )
         await self._session.execute(
             update(Run).where(Run.id == run_id).values(lease_until=lease_until)
         )

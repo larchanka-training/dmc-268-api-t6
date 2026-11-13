@@ -27,7 +27,6 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bootstrap.llm_gateway import build_gateway
-from app.bootstrap.seed_prompts import PromptAsset
 from app.modules.reviews.application.ast_resolution import RevisionTree
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.conventions import (
@@ -85,14 +84,15 @@ from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.worker import process_review_run
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
+from tests.llm_gateway_fakes import FALLBACK, PRIMARY, completion
 from tests.policy_snapshot_fakes import make_complete_execution_profile
 from tests.portal_postgres import NOW, REPO_A, RULE_A, WS_A, Env, portal_schema
-from tests.test_llm_gateway import FALLBACK, PRIMARY, completion
+from tests.prompt_assets_fakes import _live_assets, _seed
+from tests.publication_settings_postgres import _insert, _ready
 from tests.test_prepare_policy_snapshot import Source
 from tests.test_review_context_stage import Parser, Vcs, _checkpoint
 from tests.test_review_prompt_pins_postgres import _bind_v4
-from tests.test_run_prompt_pins_postgres import _packaged, _seed
-from tests.test_run_publication_settings_postgres import _insert, _ready
 
 _HEAD = "f" * 40
 _PATH = "app/charge.py"
@@ -229,7 +229,7 @@ class Provider:
 
 
 @dataclass
-class Output:
+class Output(_AcceptingCheckpointPublisher):
     answers: list[object]
 
     async def execute(self, run_id: UUID, model_output: object) -> bool:
@@ -262,13 +262,6 @@ async def _claim(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> Non
             )
             == 1
         )
-
-
-def _live_assets() -> tuple[PromptAsset, ...]:
-    # Bound to v3 explicitly: a newer packaged review.system (F2's v4) is not seeded here.
-    return tuple(
-        asset for asset in _packaged() if not (asset.key == "review.system" and asset.version > 3)
-    )
 
 
 async def _exercise(

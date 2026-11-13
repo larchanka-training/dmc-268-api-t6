@@ -37,10 +37,12 @@ from app.modules.reviews.infrastructure.policy_snapshot_unit_of_work import (
     SqlAlchemyPolicySnapshotUnitOfWork,
 )
 from tests.portal_postgres import PR_B, PROMPT, RULE_A, RULE_B, RUN_DONE, Env, portal_schema
+from tests.prompt_assets_fakes import _packaged, _seed
+from tests.publication_settings_postgres import _insert, _ready
 from tests.test_policy_snapshot_postgres import _RAW, _documents
 from tests.test_prepare_policy_snapshot import Source
-from tests.test_run_prompt_pins_postgres import _newer, _packaged, _prompt_id, _seed
-from tests.test_run_publication_settings_postgres import _claim, _insert, _ready
+from tests.test_run_prompt_pins_postgres import _newer, _prompt_id
+from tests.test_run_publication_settings_postgres import _claim
 
 _PROFILE = ExecutionProfile.fast("model-a", "", "model-c")
 _RULES: dict[str, Any] = {"id": RUN_DONE, "path": RULES_DOCUMENT_PATH}

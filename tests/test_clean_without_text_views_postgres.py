@@ -26,11 +26,11 @@ from app.modules.reviews.infrastructure.review_output_unit_of_work import (
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.modules.reviews.infrastructure.saved_review_results import load_review_results
+from tests.clean_without_text_fakes import answer
 from tests.portal_postgres import HEAD, REPO_A, RUN_ATTEMPTED, Env
-from tests.test_clean_without_text_result import answer
+from tests.run_coverage_fakes import code_snapshot, empty_snapshot
 from tests.test_clean_without_text_result_postgres import prepare_result
 from tests.test_clean_without_text_result_postgres import result_env as result_env
-from tests.test_run_coverage import code_snapshot, empty_snapshot
 from tests.test_severity_threshold_postgres import RecordingQueue
 
 
@@ -49,6 +49,7 @@ async def finalize_run(
             lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
             queue,
             worker_id="worker",
+            expected_attempt=1,
             run_url=lambda _: None,
         ).execute(RUN_ATTEMPTED, answer() if output is None else output)
 
@@ -71,7 +72,7 @@ async def finalize_run(
     async with factory() as session:
         action = await session.scalar(
             select(RunAction).where(
-                RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.postprocess"
+                RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.finalize"
             )
         )
         assert action is not None and isinstance(action.response, dict)
@@ -178,7 +179,7 @@ def test_views_use_referenced_body_and_conservatively_replace_stale_or_legacy_su
             async with factory.begin() as session:
                 action = await session.scalar(
                     select(RunAction).where(
-                        RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.postprocess"
+                        RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.finalize"
                     )
                 )
                 assert action is not None
@@ -193,10 +194,17 @@ def test_views_use_referenced_body_and_conservatively_replace_stale_or_legacy_su
                         "coverage": saved["coverage"] | {"head_sha": "0" * 40}
                     }
                 elif kind == "newer_invalid":
+                    latest_index = await session.scalar(
+                        select(RunAction.index)
+                        .where(RunAction.run_id == RUN_ATTEMPTED)
+                        .order_by(RunAction.index.desc())
+                        .limit(1)
+                    )
+                    assert latest_index is not None
                     session.add(
                         RunAction(
                             run_id=RUN_ATTEMPTED,
-                            index=action.index + 1,
+                            index=latest_index + 1,
                             tool="review.postprocess",
                             request={},
                             response={"coverage": {"version": 99}},

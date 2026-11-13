@@ -2,7 +2,7 @@
 
 ``ExecuteReviewRun`` on the snapshot path, its verifier and the real ``StoreReviewOutput``:
 the agent's text reaches the stored body signed, a failed call leaves it out and the run
-still publishes, and ``review.postprocess`` says which happened.
+still publishes, and the saved ``review.finalize`` result says which happened.
 """
 
 from __future__ import annotations
@@ -107,6 +107,7 @@ def _pipeline(
         cast(Any, lambda: FakeUnitOfWork(reviews)),
         FakeQueue(),
         worker_id=WORKER_ID,
+        expected_attempt=1,
         run_url=lambda _: None,
     )
     pipeline = ExecuteReviewRun(
@@ -144,13 +145,13 @@ def test_change_summary_follows_the_verifier_and_its_text_is_signed_in_the_store
     assert [item.finding.title for item in processed.inline + processed.body_only] == [
         "Unchecked input"
     ]
-    [entered] = reviews.entered
-    assert entered["postprocess_response"]["change_summary"] == {
+    [finalized] = reviews.finalized
+    assert finalized["change_summary"] == {
         "status": "shown",
         "received": 2,
         "shown": 2,
     }
-    assert entered["postprocess_response"]["verdict"] == "blocking"
+    assert finalized["verdict"] == "blocking"
 
 
 def test_change_summary_follows_the_review_when_it_has_no_candidate() -> None:
@@ -162,8 +163,8 @@ def test_change_summary_follows_the_review_when_it_has_no_candidate() -> None:
     assert agent.verifier.prompts == []
     [processed] = reviews.stored
     assert f"{SIGNED}Adds a lookup by id." in processed.review_body
-    [entered] = reviews.entered
-    assert entered["postprocess_response"]["change_summary"] == {
+    [finalized] = reviews.finalized
+    assert finalized["change_summary"] == {
         "status": "shown",
         "received": 1,
         "shown": 1,
@@ -194,8 +195,8 @@ def test_change_summary_text_over_the_block_limit_is_cut_and_traced(
     reviews = _run(_ChangeSummaryModel(ChangeSummary(sentences)))
 
     [processed] = reviews.stored
-    [entered] = reviews.entered
-    assert entered["postprocess_response"]["change_summary"] == trace
+    [finalized] = reviews.finalized
+    assert finalized["change_summary"] == trace
     if kept is None:
         assert "**What changed**" not in processed.review_body
     else:
@@ -232,14 +233,14 @@ def test_change_summary_failure_publishes_the_review_without_the_text(
     assert agent.verifier_prompts_before == [1]
     [processed] = reviews.stored
     assert "**What changed**" not in processed.review_body
-    [entered] = reviews.entered
-    assert entered["postprocess_response"]["change_summary"] == {
+    [finalized] = reviews.finalized
+    assert finalized["change_summary"] == {
         "status": "failed",
         "error_code": error_code,
     }
-    [reference] = with_text.entered
+    [reference] = with_text.finalized
     for key in ("verdict", "findings_hash", "severity_counts"):
-        assert entered["postprocess_response"][key] == reference["postprocess_response"][key]
+        assert finalized[key] == reference[key]
 
 
 @pytest.mark.parametrize(
@@ -282,8 +283,8 @@ def test_change_summary_is_not_called_without_a_verified_snapshot_review(
     assert agent.requests == []
     [processed] = reviews.stored
     assert "**What changed**" not in processed.review_body
-    [entered] = reviews.entered
-    assert "change_summary" not in entered["postprocess_response"]
+    [finalized] = reviews.finalized
+    assert "change_summary" not in finalized
 
 
 @pytest.mark.parametrize(

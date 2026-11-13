@@ -51,10 +51,12 @@ from app.modules.reviews.infrastructure.models import (
     CodeChangeDiff,
     Comment,
     ContextPayload,
+    FinalReviewResult,
     Finding,
     Run,
 )
 from app.modules.reviews.infrastructure.publication_findings import published_finding_from_row
+from app.modules.reviews.infrastructure.publication_plan import SavedPublicationPlan
 from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition, origin_active
@@ -500,6 +502,15 @@ class SqlAlchemyRunLifecycleStore:
         )
 
     async def _publish_pointer(self, run: Run, repository: Repository) -> ReviewPublishPointer:
+        saved = await self._session.get(FinalReviewResult, run.id)
+        if saved is not None:
+            plan = SavedPublicationPlan.from_json(saved.publication_plan)
+            return ReviewPublishPointer(
+                run_id=run.id,
+                head_sha=plan.head_sha,
+                findings_hash=plan.findings_hash,
+                review_event=plan.review_event,
+            )
         findings = await self._published_findings(run.id)
         result = (
             await load_review_results(
@@ -531,6 +542,8 @@ class SqlAlchemyRunLifecycleStore:
         installation: ProviderInstallation,
         findings: list[Finding],
     ) -> PublishContext:
+        saved = await self._session.get(FinalReviewResult, run.id)
+        plan = None if saved is None else SavedPublicationPlan.from_json(saved.publication_plan)
         active = await _origin_active(self._session, run, repository, installation)
         original = installation if installation.id == run.origin_provider_installation_id else None
         if original is None and run.origin_provider_installation_id is not None:
@@ -566,7 +579,7 @@ class SqlAlchemyRunLifecycleStore:
         )
         diff_map = (
             await load_publication_diff_map(self._session, run.id)
-            if provider in {"gitlab", "bitbucket"}
+            if plan is None and provider in {"gitlab", "bitbucket"}
             else None
         )
         return PublishContext(
@@ -580,13 +593,22 @@ class SqlAlchemyRunLifecycleStore:
             installation_id=installation.external_id if active else None,
             repository_full_name=repository.full_name,
             pr_number=pr.external_number,
-            review_body=run.review_body or "",
-            findings=tuple(
-                published_finding_from_row(item, diff_map, provider=provider)
-                for item in findings
-                if item.inline_comment
+            review_body=run.review_body or "" if plan is None else plan.review_body,
+            findings=(
+                tuple(
+                    published_finding_from_row(item, diff_map, provider=provider)
+                    for item in findings
+                    if item.inline_comment
+                )
+                if plan is None
+                else plan.findings
             ),
-            findings_hash=findings_hash(_hashed(item) for item in findings),
+            findings_hash=(
+                findings_hash(_hashed(item) for item in findings)
+                if plan is None
+                else plan.findings_hash
+            ),
+            review_event=None if plan is None else plan.review_event,
             provider=installation.provider,
             project_id=repository.external_id,
             workspace_id=installation.workspace_id if active else None,
@@ -662,6 +684,24 @@ class SqlAlchemyRunLifecycleStore:
             return RunState.CANCELLED.value
         pr_head_sha, pr_state = pr.head_sha, pr.state
         inline = [item for item in findings if item.inline_comment]
+        publishable = findings
+        saved = await self._session.get(FinalReviewResult, run_id)
+        if saved is not None:
+            plan = SavedPublicationPlan.from_json(saved.publication_plan)
+            by_id = {item.id: item for item in findings}
+            frozen_ids = plan.finding_ids
+            ordered_ids = plan.inline_finding_ids
+            if (
+                len(frozen_ids) != len(set(frozen_ids))
+                or not set(frozen_ids) <= by_id.keys()
+                or len(ordered_ids) != len(set(ordered_ids))
+                or not set(ordered_ids) <= set(frozen_ids)
+            ):
+                return None
+            inline = [by_id[finding_id] for finding_id in ordered_ids]
+            publishable = [by_id[finding_id] for finding_id in frozen_ids]
+            for item in inline:
+                item.inline_comment = True
         if moved_to_body_finding_ids:
             moved = frozenset(moved_to_body_finding_ids)
             for item in inline:
@@ -680,7 +720,7 @@ class SqlAlchemyRunLifecycleStore:
                     )
                     .on_conflict_do_nothing()
                 )
-        for item in findings:
+        for item in publishable:
             item.published = True
         reason = cancellation_reason(
             pr_open=pr_state == CodeChangeState.OPEN,
