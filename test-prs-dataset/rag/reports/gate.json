@@ -388,5 +388,12 @@
   },
   "schema_version": 1,
   "verdict": "FAIL",
-  "warnings": []
+  "warnings": [
+    "A-run1: Static input digest mismatch; refresh the complete baseline",
+    "A-run2: Static input digest mismatch; refresh the complete baseline",
+    "A-run3: Static input digest mismatch; refresh the complete baseline",
+    "B-run1: Static input digest mismatch; refresh the complete baseline",
+    "B-run2: Static input digest mismatch; refresh the complete baseline",
+    "B-run3: Static input digest mismatch; refresh the complete baseline"
+  ]
 }
