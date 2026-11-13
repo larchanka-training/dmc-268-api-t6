@@ -286,7 +286,7 @@ def test_delta_recall_ignores_matches_outside_the_reverse_edge_cases() -> None:
 @pytest.mark.parametrize(
     ("a_found", "b_found", "wins", "status"),
     [
-        # case 1: B 2/3, A 1/3 -> a win; case 2: B only 1/3; case 3: B 3/3 but A found 2/3
+        # Case 1 wins with B 2/3 vs A 1/3; case 2 has B 1/3; case 3 has B 3/3 with A finding 2/3
         (((1, 3), (3,), ()), ((1, 3), (1, 3), (2, 3)), 1, "fail"),
         # three clean wins
         (((), (), ()), ((1, 2, 3), (1, 2, 3), ()), 3, "pass"),

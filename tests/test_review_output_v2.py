@@ -224,7 +224,7 @@ def test_validate_v2_attribution_checks_manifest_evidence_and_policy() -> None:
 
 
 def test_review_finding_v2_line_and_title_validation() -> None:
-    # start_line >= line
+    # Validation must fail when start_line is not strictly before line.
     with pytest.raises(ValidationError, match="start_line must be strictly earlier than line"):
         make_valid_finding_v2(start_line=15, line=15)
 
