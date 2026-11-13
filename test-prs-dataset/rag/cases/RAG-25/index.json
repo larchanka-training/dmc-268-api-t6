@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "0f7797273079bca9c9779fbbb6293689370cdac2",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 7,
+  "files": [
+    {
+      "path": "booklend/__init__.py",
+      "blob_sha": "fdfcf86e2bbead796b95be6e442d064e59a9817a"
+    },
+    {
+      "path": "booklend/catalog.py",
+      "blob_sha": "8feaff7e626fd26af2504f8ec212ba94f1a15806"
+    },
+    {
+      "path": "booklend/loans.py",
+      "blob_sha": "55e0f07dcd3b0180c66bf706e3bdfb80e654e63a"
+    },
+    {
+      "path": "booklend/notices.py",
+      "blob_sha": "be33a4a6c137ecc7abdd602e7f62266639330e65"
+    },
+    {
+      "path": "booklend/records.py",
+      "blob_sha": "30e4619d31d0b2ed631ed162ea5d28c619db940b"
+    },
+    {
+      "path": "booklend/renewals.py",
+      "blob_sha": "81b0e9e3043af0def2d3ebf529dd82d5a99f5634"
+    }
+  ],
+  "edges": [
+    {
+      "path": "booklend/loans.py",
+      "kind": "imports",
+      "target_path": "booklend/records.py",
+      "target_name": ""
+    },
+    {
+      "path": "booklend/loans.py",
+      "kind": "uses_imported",
+      "target_path": "booklend/records.py",
+      "target_name": "LOANS"
+    },
+    {
+      "path": "booklend/renewals.py",
+      "kind": "imports",
+      "target_path": "booklend/loans.py",
+      "target_name": ""
+    },
+    {
+      "path": "booklend/renewals.py",
+      "kind": "imports",
+      "target_path": "booklend/notices.py",
+      "target_name": ""
+    },
+    {
+      "path": "booklend/renewals.py",
+      "kind": "uses_imported",
+      "target_path": "booklend/loans.py",
+      "target_name": "extend_due_date"
+    },
+    {
+      "path": "booklend/renewals.py",
+      "kind": "uses_imported",
+      "target_path": "booklend/notices.py",
+      "target_name": "send_notice"
+    }
+  ]
+}

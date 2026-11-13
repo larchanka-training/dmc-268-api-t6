@@ -1,6 +1,6 @@
 # Graph-RAG v1 evaluation corpus
 
-Inputs for the graph-RAG contribution eval of [issue #146](https://github.com/larchanka-training/dmc-268-api-t6/issues/146): 24 synthetic cases that compare a review without retrieved code (arm A) against one with the retrieved reverse-edge blocks (arm B). The method is [TEST_PLAN §3.5.1](../../docs/TEST_PLAN.md#351-запись-replay-и-гейт-146); the decision and the corpus shape are [ADR 0001 §12](../../docs/adr/0001-graph-rag-v1.md). The corpus shares [the case schema](../schema/case.schema.json) with the main benchmark but is validated by its own profile; the main `--final` rejects its cases.
+Inputs for the graph-RAG contribution eval of [issue #146](https://github.com/larchanka-training/dmc-268-api-t6/issues/146): 25 synthetic cases that compare a review without retrieved code (arm A) against one with the retrieved reverse-edge blocks (arm B). The method is [TEST_PLAN §3.5.1](../../docs/TEST_PLAN.md#351-запись-replay-и-гейт-146); the decision and the corpus shape are [ADR 0001 §12](../../docs/adr/0001-graph-rag-v1.md). The corpus shares [the case schema](../schema/case.schema.json) with the main benchmark but is validated by its own profile; the main `--final` rejects its cases.
 
 ## Case layout
 
@@ -44,8 +44,9 @@ cases/RAG-01/
 | [RAG-22](cases/RAG-22/README.md) | injection | python | tightened_invariant | `dispatch/windows.py:11` | high |
 | [RAG-23](cases/RAG-23/README.md) | clean | python | - | none | none |
 | [RAG-24](cases/RAG-24/README.md) | clean | typescript | - | none | none |
+| [RAG-25](cases/RAG-25/README.md) | injection | python | new_required_param | `booklend/loans.py:8` | high |
 
-Distribution: 10 reverse_edge, 6 control, 4 depth2, 2 injection, 2 clean; 15 Python and 9 TypeScript; truths: 3 critical, 18 high, 1 medium; the renamed or removed exports are RAG-05, RAG-09 and RAG-10 (anchored on a RIGHT line). The table is generated from the `case.json` files.
+Distribution: 10 reverse_edge, 6 control, 4 depth2, 3 injection, 2 clean; 16 Python and 9 TypeScript; truths: 3 critical, 19 high, 1 medium; the renamed or removed exports are RAG-05, RAG-09 and RAG-10 (anchored on a RIGHT line). The table is generated from the `case.json` files.
 
 ## Commands
 
@@ -68,12 +69,12 @@ All content is synthetic, authored for api#146; no third-party code. Each `case.
 
 ## Captures
 
-`responses/` holds the six recorded `eval-live` runs of the gate (`corpus=rag`, `policy_arm=none`, `review_prompt=v5`, `export_raw_responses=true`, model `mistral-small-4`, all `baseline_publishable`): the raw first answers of the 24 cases plus the `manifest.json` that `eval_replay.py` reads, copied unchanged from the `eval-live-raw-rag-…` artifacts.
+`responses/` holds the live captures: the six recorded `eval-live` runs of #498 Part 3 (`corpus=rag`, `policy_arm=none`, `review_prompt=v7`, `export_raw_responses=true`, model `mistral-small-4`, all `baseline_publishable`), the raw first answers of the 25 cases plus the `manifest.json` that `eval_replay.py` reads, copied unchanged from the `eval-live-raw-rag-…` artifacts. All six were dispatched on 11 November 2026 from branch commit `62fa0ca7829c429953c21b69eada0af2234ffdd0`.
 
 | Directory | Arm (`rag_arm`) | Run id |
 | --- | --- | --- |
-| `A-run1`, `A-run2`, `A-run3` | A, no retrieved code (`none`) | 41720614606, 41724358586, 41725329228 |
-| `B-run1`, `B-run2`, `B-run3` | B, reverse-edge blocks (`graph`) | 41720730389, 41724449009, 41725470313 |
+| `A-run1`, `A-run2`, `A-run3` | A, no retrieved code (`none`) | 43057528812, 43058347228, 43058718773 |
+| `B-run1`, `B-run2`, `B-run3` | B, reverse-edge blocks (`graph`) | 43057534364, 43058389467, 43058978846 |
 
 ```sh
 for d in test-prs-dataset/rag/responses/*/; do
@@ -81,8 +82,8 @@ for d in test-prs-dataset/rag/responses/*/; do
 done
 ```
 
-The recorded result and the computed gate verdict are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md); `reports/gate.json` is the gate script's output it quotes.
+`reports/gate.json` is the gate script's output over these six captures, run without `--oracle` (the tech lead's decision of #498: the hallucination condition stays `undefined`). The injection measurement and its reading are in [the v7 report](../../docs/test-plan/RAG_V7_INJECTION_REPORT.md); `tests/test_rag_report_v7.py` pins its numbers to `gate.json` and the manifests.
 
-`oracle/hallucination.json` is the hallucination oracle the gate takes with `--oracle`: the 34 of 76 findings of the valid answers the tech lead confirmed in the second pass over all 76 findings on 2026-11-08 (part 1 partly pre-labelled by an LLM, every mark checked by hand); the decisions are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md#оракул-галлюцинаций).
+`reports/146-v5/` is the frozen record of the accepted #146 eval (prompt v5, 24 cases): its six captures (`responses/`, run ids 41720614606, 41724358586, 41725329228 for arm A and 41720730389, 41724449009, 41725470313 for arm B), the gate output ([`gate.json`](reports/146-v5/gate.json)) and the hallucination oracle (`oracle/`). It is never edited; the live captures are compared against it. The recorded result and the computed gate verdict of #146 are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md); `reports/146-v5/oracle/hallucination.json` is the oracle the gate took with `--oracle`: the 34 of 76 findings of the valid answers the tech lead confirmed in the second pass over all 76 findings on 2026-11-08 (part 1 partly pre-labelled by an LLM, every mark checked by hand); the decisions are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md#оракул-галлюцинаций).
 
-A replay needs no network and no key; it rebuilds every case from its frozen `index.json` and takes about 40 seconds. The CI step "RAG sub-corpus" runs it for all six and fails on a non-zero exit; `tests/test_rag_captures.py` fails when a capture is missing, mislabelled or from a different model, prompt or corpus.
+A replay needs no network and no key; it rebuilds every case from its frozen `index.json` and takes about 40 seconds. The CI step "RAG sub-corpus" runs it for all six live captures and fails on a non-zero exit; `tests/test_rag_captures.py` fails when a capture is missing, mislabelled or from a different model, prompt (v7) or corpus, and `tests/test_rag_report.py` pins the frozen #146 record.

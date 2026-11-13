@@ -1,16 +1,17 @@
-"""The six RAG captures of #146 (``test-prs-dataset/rag/responses``) are all there and labelled.
+"""The six RAG captures of #498 (``test-prs-dataset/rag/responses``) are all there and labelled.
 
 Three runs of arm A (``rag_arm`` ``none``) and three of arm B (``graph``), all recorded by the
-paid ``eval-live`` workflow on one model, one prompt and one corpus. The CI step "RAG sub-corpus"
-replays every one of them offline; this file is the fast local signal that a capture was not
-dropped, relabelled or mixed in from another run. A replay takes about 40 seconds of CPU (it
-revalidates the 24 cases), so it is left to that CI step and not repeated in the unit job. The
-user messages of the hallucination oracle (``oracle/context``) and the v5 system prompt are
-bound here to the ``prompt_digest`` recorded for each answer.
+paid ``eval-live`` workflow on one model, one prompt (``review.system`` v7) and one corpus of 25
+cases. The CI step "RAG sub-corpus" replays every one of them offline; this file is the fast local
+signal that a capture was not dropped, relabelled or mixed in from another run. A replay takes
+about 40 seconds of CPU (it revalidates the 25 cases), so it is left to that CI step and not
+repeated in the unit job. The frozen #146 record (v5, 24 cases, with its hallucination oracle)
+lives in ``reports/146-v5/`` and is pinned by ``tests/test_rag_report.py``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from collections.abc import Callable
@@ -19,15 +20,14 @@ from typing import Any
 
 import pytest
 
+from app.modules.reviews.application.policy_snapshot import PINNED_PROMPT_CHECKSUMS
 from review.scripts.eval_ab import SAME_PROVENANCE, SAME_RUN_METADATA
-from review.scripts.eval_live import _prompt_digest
-from review.scripts.validate_findings import validate_review_output_v2
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "test-prs-dataset" / "rag"
 CAPTURES = CORPUS / "responses"
-PROMPTS = CORPUS / "oracle" / "context"
-SYSTEM_PROMPT = ROOT / "review" / "prompts" / "review.system.v5.md"  # the captures record v5
+SYSTEM_PROMPT = ROOT / "review" / "prompts" / "review.system.v7.md"  # the captures record v7
+PROMPT_SHA = PINNED_PROMPT_CHECKSUMS["review.system:v7"]
 EXPECTED = {
     f"{arm}-run{run}": rag_arm
     for run in (1, 2, 3)
@@ -88,14 +88,17 @@ def _problems(captures: Path, case_ids: set[str]) -> list[str]:
         if len(values) > 1:
             problems.append(f"captures disagree on run_metadata.{name}")
     prompt_versions = {manifest["prompt_version"] for manifest in manifests.values()}
-    if prompt_versions - {"v5"}:
-        problems.append(f"prompt_version {sorted(prompt_versions)}, not v5")
+    if prompt_versions - {"v7"}:
+        problems.append(f"prompt_version {sorted(prompt_versions)}, not v7")
+    prompt_shas = {manifest["prompt_sha"] for manifest in manifests.values()}
+    if prompt_shas - {PROMPT_SHA}:
+        problems.append(f"prompt_sha {sorted(prompt_shas)}, not the pinned v7 {PROMPT_SHA}")
     return problems
 
 
 def test_six_labelled_publishable_captures_share_one_model_prompt_and_corpus() -> None:
     assert _problems(CAPTURES, _case_ids()) == []
-    assert len(_case_ids()) == 24
+    assert len(_case_ids()) == 25
 
 
 def _rewrite(directory: Path, mutate: Callable[[dict[str, Any]], object]) -> None:
@@ -172,7 +175,8 @@ MUTATIONS: list[tuple[str, Callable[[Path], object], str]] = [
         ),
         "disagree on run_metadata.fallback_model_id",
     ),
-    ("prompt not v5 everywhere", lambda c: _set_all(c, prompt_version="v4"), "not v5"),
+    ("prompt not v7 everywhere", lambda c: _set_all(c, prompt_version="v5"), "not v7"),
+    ("prompt sha not the pin", lambda c: _set_all(c, prompt_sha="0" * 64), "not the pinned v7"),
     ("extra file", lambda c: (c / "A-run1" / "notes.txt").write_text("x"), "A-run1: files on disk"),
     ("missing answer", lambda c: (c / "B-run2" / "RAG-07.json").unlink(), "B-run2: files on disk"),
     ("answer with an extra key", _add_key, "A-run1: RAG-01.json is not exactly"),
@@ -192,29 +196,5 @@ def test_a_missing_or_mislabelled_capture_is_reported(
     assert any(fragment in problem for problem in _problems(copy, _case_ids()))
 
 
-def _prompt_files(captures: Path) -> dict[str, str]:
-    """File name -> recorded digest of the prompt of every (run, case) with findings to review.
-
-    The gate reviews the findings of the valid answers only; an answer the validator refuses
-    is left out, as it was for the tech lead.
-    """
-    wanted: dict[str, str] = {}
-    for name in sorted(EXPECTED):
-        manifest = _manifest(captures / name)
-        for case_id, raw in sorted(manifest["responses"].items()):
-            answer = json.loads((captures / name / Path(raw).name).read_text(encoding="utf-8"))
-            if answer["findings"] and not validate_review_output_v2(answer):
-                digest = manifest["run_metadata"]["rag_evidence"][case_id]["prompt_digest"]
-                wanted[f"{case_id}-{digest.removeprefix('sha256-v1:')[:12]}.txt"] = digest
-    return wanted
-
-
-def test_the_oracle_holds_the_exact_prompt_of_every_valid_answer_with_findings() -> None:
-    """The user messages the tech lead read are committed byte for byte, pinned to the recording."""
-    wanted = _prompt_files(CAPTURES)
-    system = SYSTEM_PROMPT.read_bytes().decode("utf-8")
-
-    assert {path.name for path in PROMPTS.iterdir()} == set(wanted)
-    for name, digest in wanted.items():
-        user = (PROMPTS / name).read_bytes().decode("utf-8")
-        assert _prompt_digest(system, user) == digest, name
+def test_the_captures_record_the_packaged_v7_system_prompt() -> None:
+    assert hashlib.sha256(SYSTEM_PROMPT.read_bytes()).hexdigest() == PROMPT_SHA

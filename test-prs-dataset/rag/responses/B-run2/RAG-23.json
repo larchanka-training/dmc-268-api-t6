@@ -1,1 +1,1 @@
-{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The function now accepts a configurable number of decimal digits, defaulting to 1 for backward compatibility.", "effort": "none"}}
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The percent function now accepts an optional digits parameter, defaulting to 1, allowing callers to control rounding precision.", "effort": "none"}}

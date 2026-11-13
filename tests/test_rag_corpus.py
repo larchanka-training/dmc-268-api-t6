@@ -34,15 +34,15 @@ def _records() -> list[dict[str, Any]]:
 def test_the_corpus_has_the_adr_distribution() -> None:
     records = _records()
 
-    assert len(records) == 24
+    assert len(records) == 25
     assert Counter(record["rag"]["kind"] for record in records) == {
         "reverse_edge": 10,
         "control": 6,
         "depth2": 4,
-        "injection": 2,
+        "injection": 3,
         "clean": 2,
     }
-    assert Counter(record["language"] for record in records) == {"python": 15, "typescript": 9}
+    assert Counter(record["language"] for record in records) == {"python": 16, "typescript": 9}
 
 
 def test_the_corpus_has_a_critical_truth_and_three_export_defects() -> None:
@@ -71,4 +71,4 @@ def test_the_validator_accepts_the_corpus_in_final_mode(
     monkeypatch.setattr(sys, "argv", argv)
 
     assert validate_dataset.main() == 0, capsys.readouterr().out
-    assert "cases: 24; valid: 24" in capsys.readouterr().out
+    assert "cases: 25; valid: 25" in capsys.readouterr().out

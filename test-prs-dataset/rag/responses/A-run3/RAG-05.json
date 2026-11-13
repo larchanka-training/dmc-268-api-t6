@@ -1,1 +1,1 @@
-{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The function name was updated from `get_forecast` to `fetch_forecast`, which better reflects its purpose of retrieving data.", "effort": "none"}}
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The function name was updated from `get_forecast` to `fetch_forecast`, which better reflects its intent to retrieve data.", "effort": "none"}}

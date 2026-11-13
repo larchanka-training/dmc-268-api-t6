@@ -291,16 +291,16 @@ def test_a_tiny_corpus_prints_the_projection_and_skips_the_gate(
         "fake transport (nothing left the process)"
     )
     assert lines[1] == "cases: 2; runs: 3 per arm"
-    # Snapshot literals: the estimate of the v5 prompt, the v1 rules JSON and the context builder
+    # Snapshot literals: the estimate of the v7 prompt, the v1 rules JSON and the context builder
     # over the two fixture cases. A deliberate change to any of them moves these four numbers:
     # regenerate them then (run the command on these two cases), do not loosen the test.
     assert lines[2] == (
-        "input tokens, arm A (rag_off): total 59262, median 9877.0 over 6 review calls"
+        "input tokens, arm A (rag_off): total 61086, median 10181.0 over 6 review calls"
     )
     assert (
-        lines[3] == "input tokens, arm B (rag_on): total 59928, median 9988.0 over 6 review calls"
+        lines[3] == "input tokens, arm B (rag_on): total 61752, median 10292.0 over 6 review calls"
     )
-    assert lines[4] == "median B/A: 1.0112 (exact 9988/9877); gate threshold <= 1.30: pass"
+    assert lines[4] == "median B/A: 1.0109 (exact 10292/10181); gate threshold <= 1.30: pass"
     assert lines[5] == "gate skipped: the corpus needs exactly 10 reverse-edge cases, it has 1"
     assert len(lines) == 6
 

@@ -1,1 +1,1 @@
-{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The function now accepts a configurable number of decimal digits, defaulting to 1 for backward compatibility. Existing call sites continue to work without modification.", "effort": "none"}}
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The function now accepts a configurable number of decimal digits, defaulting to 1 for backward compatibility.", "effort": "none"}}

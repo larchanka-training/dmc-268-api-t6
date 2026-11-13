@@ -1,1 +1,1 @@
-{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The module docstring now clarifies that route lengths are in minutes, and the booking function validates timezone-awareness of the start time.", "effort": "none"}}
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The module docstring now clarifies that route lengths are in minutes, and the booking function validates timezone-aware start times.", "effort": "none"}}
