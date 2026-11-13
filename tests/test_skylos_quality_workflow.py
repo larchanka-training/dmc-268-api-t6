@@ -156,13 +156,13 @@ def test_two_gated_passes_with_the_pinned_skylos(tmp_path: Path) -> None:
 
 def test_the_checker_runs_on_the_project_python_through_uv(tmp_path: Path) -> None:
     reports = tmp_path / "reports"
-    python = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["tool"]["mypy"]["python_version"]
 
     result, _ = _run_script(tmp_path, "origin/main", str(reports))
 
     assert result.returncode == 0, result.stderr
+    # The project's Python (AGENTS.md: Python 3.13), not a value read back from the config.
     assert (tmp_path / "uv.log").read_text(encoding="utf-8").splitlines() == [
-        f"run --no-project --python {python} scripts/skylos_changed_functions.py "
+        "run --no-project --python 3.13 scripts/skylos_changed_functions.py "
         f"{reports}/changed-functions.json {','.join(FUNCTION_RULES)}"
     ]
 
