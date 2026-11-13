@@ -1473,8 +1473,8 @@ summary-only по оставшемуся scope; T не увеличивают п
 доказанный чистый rename/mode-only без поддерживаемого анализа — unsupported_change, T.
 При полном inventory, известных relevant counters ≤3 000 и только incomplete
 с возможными E/T, без анализируемого текста — целевой исход backend partial, summaryOnly=false,
-findings=[], verdict=null; 0 LLM, затем succeeded/neutral. Пока маршрута no-text partial нет,
-этот набор публикуется как summary-only `no_reviewable_files`, coverage partial, 0 LLM.
+findings=[], verdict=null; 0 LLM, затем succeeded/neutral. На snapshot path (v4+) маршрут построен
+с #497 ч.3; legacy (≤ v3) публикует этот набор как summary-only `no_reviewable_files`, coverage partial, 0 LLM.
 Анализируемый текст — разрешённые hunks вне E/T, включая сохранившиеся
 hunks truncated в L1: обычное review/partial, blocking возможен; без hunks —
 no-text ветка. Relevant counters — additions/deletions вне E/T, включая
@@ -1901,13 +1901,13 @@ push и сверка с HEAD, а задание будит leader-рассылк
   отказ `StoreReviewOutput` без backend summary;
 - тексты none в body и check-run;
 - публичный gate summary/saved_result, исторические succeeded без republish;
-- zero-LLM `none` на snapshot path с #130 F5 (legacy ≤ v3 по-прежнему вызывает модель) и summary-only с `NoModelAnswer`.
+- zero-LLM `none` на snapshot path с #130 F5 (legacy ≤ v3 по-прежнему вызывает модель), no-text partial
+  на snapshot path с #497 ч.3 (legacy ≤ v3 — summary-only `no_reviewable_files`) и summary-only с `NoModelAnswer`.
 
 Не объявлено реализованным в #213:
 
 - нового публичного coverage DTO, LLM-полей, `result_id` или таблиц результата нет;
-- полный #107, общий run-owned `file_omissions` #130/#168 и zero-LLM lifecycle no-text partial остаются целевыми,
-  а не активированными #213;
+- полный #107 и общий run-owned `file_omissions` #130/#168 остаются целевыми, а не активированными #213;
 - остальные reflection coordinate drops, `evidence_not_shown` и verifier `insufficient_context` остаются за lifecycle #107/#130; их общее влияние на
   coverage не объявляется реализованным в #213.
 

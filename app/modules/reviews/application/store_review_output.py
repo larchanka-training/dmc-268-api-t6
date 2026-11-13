@@ -92,10 +92,11 @@ class PublishingUnitOfWork(UnitOfWork, Protocol):
 class NoModelAnswer(Mapping[str, object]):
     """The backend result of a run that made no model call: a marker, never an answer.
 
-    A snapshot-path change of technical skips only (coverage none, CVS §2.2) is finished
-    without the review model (#130 F5). It is stored as any result, but nothing is parsed,
-    no ``llm.review_output`` is written, and the post-processor's backend summary is the
-    only one. Empty, so the inline ``PublishReviewOutput`` refuses it as an invalid answer.
+    A snapshot-path change without analysable text (coverage none, #130 F5, or no-text
+    partial, CVS §2.2) and a summary-only stop are finished without the review model. It is
+    stored as any result, but nothing is parsed, no ``llm.review_output`` is written, and
+    the post-processor's backend summary is the only one. Empty, so the inline
+    ``PublishReviewOutput`` refuses it as an invalid answer.
     """
 
     def __getitem__(self, key: str) -> object:
