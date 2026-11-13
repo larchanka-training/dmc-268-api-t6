@@ -47,6 +47,7 @@ from app.modules.reviews.application.run_failures import (
 )
 from app.modules.reviews.application.run_trace import traced_step
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
+from app.modules.reviews.application.verdict import ReviewEvent, Verdict
 from app.modules.reviews.infrastructure.github_policy_source import classify_policy_http_error
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
 from app.modules.reviews.infrastructure.vcs_failures import (
@@ -500,6 +501,88 @@ def test_check_run_view_follows_the_pipeline_spec_table(
     assert view.conclusion != "failure"
 
 
+def _succeeded(
+    *,
+    verdict: Verdict | None = None,
+    severity_counts: dict[str, int] | None = None,
+    inline_count: int = 0,
+    summary_only: bool = False,
+    coverage_status: str | None = None,
+    review_event: ReviewEvent | None = None,
+) -> CheckRunReport:
+    return CheckRunReport(
+        CheckRunTarget(1, "o/r", HEAD, RUN),
+        "succeeded",
+        1,
+        verdict=verdict,
+        severity_counts={} if severity_counts is None else severity_counts,
+        inline_count=inline_count,
+        summary_only=summary_only,
+        coverage_status=coverage_status,
+        review_event=review_event,
+    )
+
+
+@pytest.mark.parametrize(
+    ("report", "conclusion"),
+    [
+        (_succeeded(verdict="clean", coverage_status="complete"), "success"),
+        (_succeeded(verdict="attention", severity_counts={"medium": 1}), "success"),
+        (
+            _succeeded(verdict="attention", review_event="REQUEST_CHANGES"),
+            "success",
+        ),
+        (_succeeded(verdict="blocking", review_event="COMMENT"), "neutral"),
+        (_succeeded(verdict="blocking", review_event="REQUEST_CHANGES"), "failure"),
+        (_succeeded(verdict="blocking"), "neutral"),
+        (
+            # A review with findings only in its body: the event alone decides.
+            _succeeded(verdict="blocking", review_event="REQUEST_CHANGES", inline_count=0),
+            "failure",
+        ),
+        (
+            _succeeded(verdict="blocking", review_event="REQUEST_CHANGES", summary_only=True),
+            "neutral",
+        ),
+        (_succeeded(verdict=None, review_event="REQUEST_CHANGES"), "neutral"),
+        (_succeeded(verdict=None, coverage_status="none"), "neutral"),
+    ],
+    ids=[
+        "clean",
+        "attention",
+        "attention-request-changes",
+        "blocking-comment",
+        "blocking-request-changes",
+        "blocking-no-event",
+        "blocking-request-changes-no-inline",
+        "summary-only-blocking-request-changes",
+        "partial-request-changes",
+        "coverage-none",
+    ],
+)
+def test_succeeded_check_run_conclusion_follows_the_verdict_and_review_event(
+    report: CheckRunReport, conclusion: str
+) -> None:
+    view = check_run_view(report)
+    assert (view.status, view.conclusion) == ("completed", conclusion)
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "failed", 3, "llm_timeout"),
+        CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "cancelled", 1, "superseded"),
+        CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "skipped", 0, "budget_paused"),
+    ],
+    ids=["failed", "cancelled", "skipped"],
+)
+def test_service_failure_never_fails_the_check_run_even_for_a_request_changes_repository(
+    report: CheckRunReport,
+) -> None:
+    view = check_run_view(replace(report, verdict="blocking", review_event="REQUEST_CHANGES"))
+    assert view.conclusion != "failure"
+
+
 @pytest.mark.parametrize(
     ("run_url", "details_url"),
     [("https://app.test/runs/1", "https://app.test/runs/1"), (None, None)],
@@ -851,6 +934,33 @@ def test_check_run_update_passes_the_run_url_to_the_view_as_details_url() -> Non
     assert [view.details_url for view in check_runs.views] == [
         "https://review.example/runs/11111111-1111-1111-1111-111111111111"
     ]
+
+
+@pytest.mark.parametrize(
+    ("review_event", "conclusion"),
+    [("REQUEST_CHANGES", "failure"), ("COMMENT", "neutral"), (None, "neutral")],
+    ids=["request-changes", "comment", "no-event"],
+)
+def test_check_run_update_keeps_the_stored_review_event_on_every_render(
+    review_event: ReviewEvent | None, conclusion: str
+) -> None:
+    class BlockingStore(FakeStore):
+        async def check_run_report(self, run_id: UUID) -> CheckRunReport | None:
+            return CheckRunReport(
+                CheckRunTarget(17, "octo/repo", HEAD, run_id),
+                "succeeded",
+                1,
+                verdict="blocking",
+                review_event=review_event,
+            )
+
+    check_runs = CheckRuns()
+    store = BlockingStore(FakeRun())
+    # The publisher's render and a later RunGuard re-render read the same stored report.
+    for _ in range(2):
+        asyncio.run(update_check_run(lambda: FakeUow(store), check_runs, RUN, lambda _: None))
+
+    assert [view.conclusion for view in check_runs.views] == [conclusion, conclusion]
 
 
 def test_failed_commit_fetch_check_run_names_commit_messages() -> None:
