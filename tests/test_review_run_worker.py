@@ -47,6 +47,7 @@ from app.modules.reviews.application.run_failures import (
 )
 from app.modules.reviews.application.run_trace import traced_step
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
+from app.modules.reviews.application.verdict import ReviewEvent
 from app.modules.reviews.infrastructure.github_policy_source import classify_policy_http_error
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
 from app.modules.reviews.infrastructure.vcs_failures import (
@@ -923,7 +924,7 @@ def test_check_run_update_passes_the_run_url_to_the_view_as_details_url() -> Non
     ids=["request-changes", "comment", "no-event"],
 )
 def test_check_run_update_keeps_the_stored_review_event_on_every_render(
-    review_event: str | None, conclusion: str
+    review_event: ReviewEvent | None, conclusion: str
 ) -> None:
     class BlockingStore(FakeStore):
         async def check_run_report(self, run_id: UUID) -> CheckRunReport | None:
