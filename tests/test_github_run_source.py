@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from typing import Any, cast
 from uuid import uuid4
 
@@ -21,9 +22,9 @@ from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from tests.github_run_source_fakes import BASE, HEAD, LOCATOR, Blobs, Runs
 
 
-def _source(tree: dict[str, Any], blobs: Blobs) -> GitHubRunSource:
+def _source(tree: dict[str, Any], blobs: Blobs, *, revision: str = HEAD) -> GitHubRunSource:
     def github(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == f"/repos/octo/repo/git/trees/{HEAD}"
+        assert request.url.path == f"/repos/octo/repo/git/trees/{revision}"
         return httpx.Response(200, json=tree)
 
     return GitHubRunSource(
@@ -39,6 +40,18 @@ def _source(tree: dict[str, Any], blobs: Blobs) -> GitHubRunSource:
 
 def _blob(path: str, sha: str, size: int = 10) -> dict[str, Any]:
     return {"path": path, "sha": sha, "type": "blob", "size": size}
+
+
+class _FailingBlobs(Blobs):
+    def __init__(self, failure: RunFailure) -> None:
+        super().__init__()
+        self.failure = failure
+
+    async def get_blob(
+        self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+    ) -> bytes:
+        await checkpoint()
+        raise self.failure
 
 
 def test_truncated_tree_keeps_the_returned_part_and_warns(
@@ -105,6 +118,33 @@ def test_rate_limited_context_blob_is_skipped_with_a_warning(
 
     assert files == (RepositoryFile(path="ok.py", size=9, content="print(1)\n"),)
     assert "Skipping context file limited.py" in caplog.text
+
+
+def test_non_rate_limited_run_failure_in_context_blob_propagates() -> None:
+    failure = RunFailure("deadline_exceeded")
+    source = _source({"tree": [_blob("code.py", "1" * 40)]}, _FailingBlobs(failure))
+
+    async def scenario() -> None:
+        await source.fetch_tree(uuid4())
+        await source.fetch_files(uuid4(), ("code.py",))
+
+    with pytest.raises(RunFailure) as caught:
+        asyncio.run(scenario())
+
+    assert caught.value is failure
+
+
+def test_rate_limited_agents_md_blob_propagates() -> None:
+    failure = RunFailure("diff_fetch_failed", retry_after=timedelta(seconds=60), rate_limited=True)
+    source = _source(
+        {"tree": [_blob("AGENTS.md", "2" * 40)]}, _FailingBlobs(failure), revision=BASE
+    )
+
+    with pytest.raises(RunFailure) as caught:
+        asyncio.run(source.fetch_agents_md(uuid4()))
+
+    assert caught.value is failure
+    assert caught.value.retry_after == timedelta(seconds=60)
 
 
 def test_conventions_tree_and_files_come_from_the_base_revision_when_asked() -> None:
