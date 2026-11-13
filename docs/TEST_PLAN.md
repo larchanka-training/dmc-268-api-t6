@@ -315,6 +315,59 @@ uv run python review/scripts/eval_rag_gate.py --root test-prs-dataset/rag \
 
 Ожидание на v3 — эффект около нуля по построению: промпт v3 говорит модели, что инструкции дают только `<custom_instructions>`, и не описывает `<repository_rules>`. Поэтому живой A/B требует промпта snapshot-пути (`review_prompt=v4` или `v5`) и плеча не `legacy`. Прогоны AC8 сняты 2026-10-28 на v5 `review.system` (#144, часть 3b; v5 входит в `SNAPSHOT_REVIEW_PROMPT_VERSIONS` и в варианты `review_prompt`), результаты — в [отчёте](test-plan/RULES_MD_TEST_REPORT.md#ac8--живой-ab-на-v5). RAG-индекса в eval нет, поэтому v5 в eval шлёт пустой `<retrieved_excerpts>` — форма продакшна с выключенным тумблером RAG; AC8 меряет только reviewer, стадии verifier в eval нет (#217). До этих прогонов harness проверялся только офлайн, на fake transport.
 
+### 3.7. A/B сжатого промпта ревью v8 (#318)
+
+Цель — проверить, что `review.system` v8 (v7 с теми же правилами, конвертом и схемой ответа в меньшем
+числе входных токенов) снижает вход ревью не менее чем на 20 % без потери качества. Офлайн-оценка
+(`eval_tokens.py`, плечо `none`): 303 560 → 229 520, −24,4 %.
+
+Съёмки 2026-11-13: корпус `main` (gold, 24 кейса), `policy_arm=none`, модель `mistral-small-4`, по 3
+прогона на плечо строго по одному, оба плеча с одного ref `6855a89ca054e9c812e1b0d58da0e30f49c0fa73`.
+Run id: v8 — 43471144647, 43471647948, 43471992162; v7 — 43472327015, 43472715190, 43473043361.
+Критерий зафиксирован до первой съёмки
+([#318](https://github.com/larchanka-training/dmc-268-api-t6/issues/318#issuecomment-6859882433)).
+Решает колонка после нормализации шлюза (§3.2.6): по Validity, Precision, Recall, Critical Recall и
+verdict agreement среднее v8 не ниже минимума v7. Число обнулённых `rule_name` у v8 в среднем не выше
+максимума v7. Средний `tokens_in` v8 меньше, чем у v7, не менее чем на 20 %.
+
+`eval_ab.py --baseline v7 --markdown` (метрики в нём — строгой колонки raw-first):
+
+| Arm | Runs | Precision | Recall | Critical Recall | Validity | Rule constraints found | Exceptions respected | Exceptions flagged | Tokens in | Tokens out | Cost USD |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v8 | 3 | 36.3% (30.8%–42.9%) [4/13, 6/14, 6/17] | 28.1% (21.1%–31.6%) [4/19, 6/19, 6/19] | 60.0% (40.0%–80.0%) [3/5, 2/5, 4/5] | 83.3% (79.2%–87.5%) [19/24, 20/24, 21/24] | n/a (n/a–n/a) [0/0, 0/0, 0/0] | n/a (n/a–n/a) [0/0, 0/0, 0/0] | n/a (n/a–n/a) [0/0, 0/0, 0/0] | 190237 (190237–190237) | 8221 (8168–8278) | 0.017966 (0.015682–0.020156) |
+| v7 | 3 | 31.7% (25.0%–36.8%) [5/15, 7/19, 5/20] | 29.8% (26.3%–36.8%) [5/19, 7/19, 5/19] | 73.3% (60.0%–80.0%) [3/5, 4/5, 4/5] | 79.2% (75.0%–83.3%) [18/24, 20/24, 19/24] | n/a (n/a–n/a) [0/0, 0/0, 0/0] | n/a (n/a–n/a) [0/0, 0/0, 0/0] | n/a (n/a–n/a) [0/0, 0/0, 0/0] | 251949 (248413–259022) | 10668 (9532–12182) | 0.021595 (0.018451–0.025987) |
+
+Delta of the mean against `v7` (percentage points; tokens and USD as numbers):
+
+| Arm | Precision | Recall | Critical Recall | Validity | Rule constraints found | Exceptions respected | Exceptions flagged | Tokens in | Tokens out | Cost USD |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v8 | +4.6 pp | -1.8 pp | -13.3 pp | +4.2 pp | n/a | n/a | n/a | -61712 | -2447 | -0.003629 |
+| v7 | +0.0 pp | +0.0 pp | +0.0 pp | +0.0 pp | n/a | n/a | n/a | +0 | +0 | +0.000000 |
+
+После нормализации, среднее v8 против границы v7:
+
+- Validity: 100 % против 95,8 %.
+- Precision: 23,1 % против 17,1 %.
+- Recall: 36,8 % против 36,8 %.
+- Critical Recall: 73,3 % против 80,0 %.
+- Verdict agreement: 50,0 % против 45,8 %.
+- Обнулённых `rule_name`: 0 против 0.
+
+Пороги проходят все метрики, кроме Critical Recall. Расход, среднее на прогон, v8 против v7:
+
+- `tokens_in`: 190 237 против 251 949, −24,5 %.
+- `cache_read_tokens`: 126 928 против 181 939.
+- Стоимость: $0,0180 против $0,0216.
+
+Шесть прогонов вместе стоили $0,119. Таблица по прогонам — в
+[README корпуса](../test-prs-dataset/README.md#ab-of-reviewsystem-v7-and-v8-318).
+
+Отступления приняты решением техлида 2026-11-13:
+
+- Critical Recall ниже границы: один прогон v8 ответил на LOG-05 без находок, в двух других и во всех
+  трёх прогонах v7 находка есть (1 из 15 совпадений с critical).
+- Баланс EUrouter перед первым dispatch не проверялся.
+
 ## 4. Эталонные данные и исполнение
 
 Целевой каталог — `test-prs-dataset/cases/<id>/` с metadata JSON, `diff.patch` и pre-image; raw responses и manifest версионируются отдельно. Минимальный шаблон metadata (форма в [case schema](../test-prs-dataset/schema/case.schema.json)): `id`, `class`, `language`, `source {kind, url, revision, license_name, license_url, attribution}`, `base_path`, `patch_path`, `expected_verdict`, `expected_findings [{path, start_line, line, severity, category}]`. Для synthetic source URL/license могут быть неприменимы, но attribution обязателен. Отдельный response manifest после baseline хранит `model_id`, `prompt_sha`, `prompt_version`, metadata прогона и путь raw response. В case README фиксируются замены категорий и ручной оракул.
