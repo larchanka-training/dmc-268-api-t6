@@ -432,7 +432,7 @@ mode=100644/100755 и size=None/0; предел ответа — 1 500 000 сы�
 |---|---|---|
 | сбой попытки 1 | 30 с | `retry.30s.{engine}` |
 | сбой попытки 2 | 2 мин | `retry.2m.{engine}` |
-| сбой GitHub или GitLab с паузой провайдера: GitHub VCS — ответ любого статуса, кроме 404; GitHub политика — 429, лимитный 403 и 5xx; при `X-RateLimit-Remaining: 0` GitHub VCS и политика также учитывают время до `X-RateLimit-Reset`; `Retry-After` GitHub — целые секунды (ASCII-цифры) или HTTP-date: дата отсчитывается от заголовка `Date` ответа, без читаемого `Date` — от часов worker, прошедшая даёт 0 с и остаётся лимитом; 403/429 без читаемого `Retry-After` и `X-RateLimit-Remaining: 0`, но с вторичным лимитом в теле (§5.2), несут 60 с; GitLab (default-off, §8.4) — любой ответ-ошибка, `Retry-After` в секундах (до 10 цифр) или HTTP-date, у политики — на `policy_rate_limited` и `policy_fetch_transient` | не меньше 2 мин и не меньше большей из пауз `Retry-After` и `X-RateLimit-Reset` (если применим): пауза > 2 мин → 10 мин, > 10 мин → сама пауза, не больше суток | `retry.2m.{engine}` / `retry.10m.{engine}` |
+| сбой GitHub или GitLab с паузой провайдера: GitHub VCS вне blob-чтений — ответ любого статуса, кроме 404; GitHub blob — подтверждённый лимит при любом HTTP-статусе (§5.2); GitHub политика — 429, лимитный 403 и 5xx; при `X-RateLimit-Remaining: 0` GitHub VCS и политика также учитывают время до `X-RateLimit-Reset`; `Retry-After` GitHub — целые секунды (ASCII-цифры) или HTTP-date: дата отсчитывается от заголовка `Date` ответа, без читаемого `Date` — от часов worker, прошедшая даёт 0 с и остаётся лимитом; 403/429 без читаемого `Retry-After` и `X-RateLimit-Remaining: 0`, но с вторичным лимитом в теле (§5.2), несут 60 с; GitLab (default-off, §8.4) — любой ответ-ошибка, `Retry-After` в секундах (до 10 цифр) или HTTP-date, у политики — на `policy_rate_limited` и `policy_fetch_transient` | не меньше 2 мин и не меньше большей из пауз `Retry-After` и `X-RateLimit-Reset` (если применим): пауза > 2 мин → 10 мин, > 10 мин → сама пауза, не больше суток | `retry.2m.{engine}` / `retry.10m.{engine}` |
 | rate limit LLM: `llm_rate_limited` | не меньше 2 мин и не меньше наибольшего `Retry-After` из 429 одного вызова шлюза, правило то же, что у GitHub; без заголовка — 2 мин | `retry.2m.{engine}` / `retry.10m.{engine}` |
 | сбой попытки 3 | — | T10: `failed`, копия в `reviews.dlq` |
 
@@ -542,17 +542,18 @@ Fallback-модель — вторая модель шлюза с тем же st
 | 400/422 по body/event/schema, spam/abuse или неизвестная validation error | `github.publish_review` | endpoint + structured fields/codes; один HTTP-код 422 недостаточен | нет координатного fallback; подтверждённый rate limit классифицируется отдельно | `failed`, `github_publish_failed` | check-run `neutral` | причина в trace |
 | 401 | `github.publish_review` | подтверждённый отказ авторизации | одно обновление токена, безопасный повтор; затем access failure | `failed`, `github_forbidden` | check-run `neutral`, если доступен | `failed` |
 
+Ошибка при обновлении check-run состояние Run не меняет: пишется лог и метрика.
+
 Чтения GitHub blob (`get_blob` / `get_repository_blob`) просят `Accept-Encoding: identity`, чтобы
 прочитать до 4 KiB тела ошибки. Без заголовков лимита 403/429 с `message` JSON-тела, содержащим
 «secondary rate limit», даёт через `ClassifiedVcsProvider` retryable `diff_fetch_failed` с
 паузой 60 с. Заголовки `Retry-After` или `X-RateLimit-Remaining: 0` дают тот же результат при
 любом HTTP-статусе blob-чтения, включая 404 и 5xx. Без этих заголовков 429 без сообщения о
 secondary rate limit остаётся best effort для blob диффа. `fetch_files` пропускает контекстный
-файл и при подтверждённом лимите; чтение `AGENTS.md` передаёт retryable ошибку попытке.
-Остальные сбои blob диффа и контекстных файлов остаются best effort. Если сервер всё же вернул
-сжатое тело ошибки, оно не разбирается и без других признаков лимит не подтверждается.
-
-Ошибка при обновлении check-run состояние Run не меняет: пишется лог и метрика.
+файл при HTTP-ошибке, ошибке декодирования или `RunFailure.rate_limited=True`; другие
+`RunFailure` пробрасываются. Чтение `AGENTS.md` передаёт подтверждённый лимит попытке как
+retryable `diff_fetch_failed`. Остальные сбои blob диффа остаются best effort. Если сервер всё
+же вернул сжатое тело ошибки, оно не разбирается и без других признаков лимит не подтверждается.
 
 **Сбои GitLab (`gitlab.publish_review`, SD §8.4).**
 

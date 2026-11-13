@@ -326,6 +326,7 @@ def test_http_rate_limit_and_invalid_blob_fail_closed() -> None:
     [
         (403, {}, "You have exceeded a secondary rate limit. Please retry."),
         (403, {"Retry-After": "60"}, "Please retry."),
+        (404, {"Retry-After": "60"}, "Please retry."),
         (429, {}, "You have exceeded a secondary rate limit. Please retry."),
         (503, {"Retry-After": "60"}, "Please retry."),
     ],
