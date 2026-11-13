@@ -10,7 +10,10 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.modules.reviews.infrastructure.run_repository import SqlAlchemyReviewOutputRepository
+from app.modules.reviews.infrastructure.run_repository import (
+    SqlAlchemyReviewOutputRepository,
+    SqlAlchemyRunRepository,
+)
 from tests.code_index_postgres import C1
 from tests.portal_postgres import Env
 from tests.rag_review_context_fakes import _GREET_PATCH
@@ -393,7 +396,8 @@ def test_a_v4_run_without_text_is_published_partial_without_a_model_call(env: En
         "policy.load",
         "vcs.fetch_diff",
         "context.build",
-        "review.postprocess",
+        "review.finalize",
+        "review.publish_start",
     ]
     assert observed.manifests == []
     assert observed.bodies == []
@@ -406,12 +410,12 @@ def test_a_v4_run_without_text_is_published_partial_without_a_model_call(env: En
     assert build["coverage"]["reason_counts"] == {"missing_patch": 1}
     # The attempt's one context.build is also its context_payloads row (schema 2).
     assert observed.payloads == [(2, build)]
-    [(_, postprocess)] = observed.actions["review.postprocess"]
+    [(_, finalized)] = observed.actions["review.finalize"]
     # Restored from the context.build row, not the classification_unavailable fallback.
-    assert postprocess["coverage"] == build["coverage"]
-    assert postprocess["verdict"] is None
-    assert postprocess["inline"] == 0
-    assert postprocess["summary"]["problem"] == (
+    assert finalized["coverage"] == build["coverage"]
+    assert finalized["verdict"] is None
+    assert finalized["inline"] == 0
+    assert finalized["summary"]["problem"] == (
         "Подтверждённых замечаний нет; Проверка неполная: Отсутствует подтверждённый patch (1)."
     )
     assert _summary_only(env, observed.run_id) is False
