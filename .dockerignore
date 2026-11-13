@@ -16,6 +16,7 @@ docs
 terraform
 deploy
 *.md
+!app/modules/auth/api/agent_instructions.md
 !review/
 !review/prompts/
 !review/prompts/*.md

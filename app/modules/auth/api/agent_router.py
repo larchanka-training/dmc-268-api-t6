@@ -35,12 +35,12 @@ from app.modules.reviews.api.dtos import UtcDatetime
 
 agent_router = APIRouter(prefix="/api/agent", tags=["agent"], route_class=StrictJsonRoute)
 _LOGGER = logging.getLogger(__name__)
+_AGENT_INSTRUCTIONS = Path(__file__).with_name("agent_instructions.md").read_text(encoding="utf-8")
 
 
 @agent_router.get("/instructions", response_class=Response)
 async def agent_instructions() -> Response:
-    content = Path(__file__).with_name("agent_instructions.md").read_text(encoding="utf-8")
-    return Response(content, media_type="text/markdown")
+    return Response(_AGENT_INSTRUCTIONS, media_type="text/markdown")
 
 
 class DeviceStartRequestDto(BaseModel):

@@ -812,6 +812,15 @@ jobs:
       - name: Wait for the API healthcheck
         run: deploy/scripts/healthcheck.sh http://127.0.0.1:8000/healthcheck
 
+      - name: Agent instructions from built image
+        run: |
+          curl --fail --silent --show-error \
+            -D "${RUNNER_TEMP}/agent-guide.headers" \
+            -o "${RUNNER_TEMP}/agent-guide.md" \
+            http://127.0.0.1:8000/api/agent/instructions
+          grep -qi '^content-type: text/markdown' "${RUNNER_TEMP}/agent-guide.headers"
+          grep -Fq '/api/agent/device/start' "${RUNNER_TEMP}/agent-guide.md"
+
       - name: Signed webhook smoke
         run: uv run --locked python scripts/webhook_smoke.py --url http://127.0.0.1:8000/webhooks/github --count 50
 

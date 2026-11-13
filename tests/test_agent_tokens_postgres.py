@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.modules.auth.application.agent_tokens import AgentTokens, RepositoryNotAvailable
@@ -16,7 +16,7 @@ from app.modules.repositories.infrastructure.models import Repository
 from app.modules.repositories.infrastructure.repository_settings import (
     SqlAlchemyRepositorySettingsStore,
 )
-from tests.portal_postgres import REPO_A, Env
+from tests.portal_postgres import INSTALL_A, REPO_A, REPO_B, RUN_B, RUN_DONE, WS_A, Env, api
 
 pytest_plugins = ("tests.agent_postgres",)
 
@@ -60,5 +60,66 @@ def test_agent_token_persists_only_hash_and_limits_repository_queries(agent_sche
 
     try:
         asyncio.run(exercise())
+    finally:
+        asyncio.run(engine.dispose())
+
+
+@pytest.mark.integration
+def test_agent_token_cannot_access_another_repository_in_the_same_installation(
+    agent_schema: Env,
+) -> None:
+    engine = agent_schema.engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def seed_and_issue() -> AuthScope:
+        async with factory.begin() as session:
+            await session.execute(
+                update(Repository)
+                .where(Repository.id == REPO_B)
+                .values(provider_installation_id=INSTALL_A)
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO github_user_repository_access "
+                    "(github_user_id, provider_installation_id, repository_external_id) "
+                    "VALUES (42, :installation, 102)"
+                ),
+                {"installation": INSTALL_A},
+            )
+            await session.execute(
+                text(
+                    "UPDATE runs SET origin_provider_installation_id = :installation "
+                    "WHERE id = :run"
+                ),
+                {"installation": INSTALL_A, "run": RUN_B},
+            )
+        tokens = AgentTokens(lambda: SqlAlchemyAgentTokenUnitOfWork(factory))
+        issued = await tokens.issue(42, "octo/a")
+        scope = await tokens.resolve(issued.secret)
+        assert scope is not None
+        return scope
+
+    try:
+        scope = asyncio.run(seed_and_issue())
+        assert scope.workspace_ids == (WS_A,)
+        with api(agent_schema, AuthScope(42, (WS_A,))) as (client, _):
+            assert {item["id"] for item in client.get("/api/repos").json()} == {
+                str(REPO_A),
+                str(REPO_B),
+            }
+            assert client.get(f"/api/repos/{REPO_B}/pulls").status_code == 200
+            assert client.get(f"/api/runs/{RUN_B}").status_code == 200
+
+        with api(agent_schema, scope) as (client, _):
+            assert [item["id"] for item in client.get("/api/repos").json()] == [str(REPO_A)]
+            assert client.get(f"/api/repos/{REPO_A}/pulls").status_code == 200
+            assert client.get(f"/api/runs/{RUN_DONE}").status_code == 200
+            assert client.get(f"/api/repos/{REPO_B}").status_code == 404
+            assert client.patch(f"/api/repos/{REPO_B}", json={"enabled": False}).status_code == 404
+            assert client.get(f"/api/repos/{REPO_B}/pulls").status_code == 404
+            assert client.get(f"/api/runs/{RUN_B}").status_code == 404
+            assert str(RUN_B) not in {
+                item["id"] for item in client.get("/api/runs").json()["items"]
+            }
     finally:
         asyncio.run(engine.dispose())
