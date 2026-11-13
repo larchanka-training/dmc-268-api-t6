@@ -75,3 +75,30 @@ pythonpath = ["."]
 markers = [
     "integration: requires an explicitly configured disposable PostgreSQL database",
 ]
+
+# Skylos quality gate (#263): scripts/skylos_quality.sh, CI job `Skylos quality`, docs/CICD.md.
+# Skylos reads this table from the merge base of the diff, so a change applies after its merge.
+[tool.skylos]
+complexity = 10
+max_args = 5
+max_lines = 50
+# Fake test secrets (the .gitleaks.toml allowlist) need no entry, and Skylos has no config
+# allowlist for secrets: its secret scan skips test paths (tests/, test_*.py). A fake secret
+# elsewhere uses the FAKE_..._DO_NOT_USE marker of .gitleaks.toml, or carries
+# `# skylos: ignore[SKY-S101]` with a reason on its own line.
+exclude = [
+    # Teaching Terraform stacks (#264): CI never applies them, findings there are noise.
+    "terraform",
+    # Eval corpus with intended defects; editing it changes the pinned eval inputs.
+    "test-prs-dataset",
+    # SYNC copy of the ui skill: a finding there is fixed in ui first, or the copies drift.
+    ".agents/skills/create-issue",
+]
+
+[tool.skylos.gate]
+max_quality = 0
+max_high = 0
+# Unused helpers are the dead code this gate is for (#263).
+max_dead_code = 0
+# A diff scan lists these function metrics as advice, which max_quality does not count.
+rules = ["SKY-Q301", "SKY-C303", "SKY-C304"]

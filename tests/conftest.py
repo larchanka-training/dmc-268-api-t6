@@ -10,7 +10,7 @@ import pytest
 # Shared test modules, rewritten before their first import to keep the assertion operand diff.
 # Two reasons: a module loaded with `pytest_plugins` is imported by its test files before pytest
 # loads it as a plugin (and pytest warns that it is already imported), and the deploy and
-# monitoring fakes are plain modules whose helpers assert.
+# monitoring fakes and the ci-cd.yml helpers are plain modules whose helpers assert.
 pytest.register_assert_rewrite(
     "tests.worker_queue_postgres",
     "tests.webhook_notifications_postgres",
@@ -21,6 +21,7 @@ pytest.register_assert_rewrite(
     "tests.code_index_postgres",
     "tests.portal_postgres",
     "tests.code_index_indexer_support",
+    "tests.ci_workflow",
 )
 
 # ``configure_logging`` (the app lifespan, worker mains) changes these process-wide.
