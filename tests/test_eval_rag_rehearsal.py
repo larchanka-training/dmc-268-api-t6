@@ -50,8 +50,8 @@ from review.scripts.eval_rag_rehearsal import (
 )
 from review.scripts.rag_snapshot import INDEX_FILE, build_case_snapshot, render_snapshot
 from review.scripts.validate_dataset import validate_case
+from tests.eval_rag_fakes import FIXTURES, rag_root, window_without_rag
 from tests.rag_case_fakes import _rag_metadata
-from tests.test_eval_live_rag import FIXTURES, rag_root, window_without_rag
 
 
 def memoize_validation(patch: pytest.MonkeyPatch) -> None:
