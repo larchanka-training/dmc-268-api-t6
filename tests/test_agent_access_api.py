@@ -60,6 +60,9 @@ def test_public_agent_instructions_describe_complete_sequence() -> None:
     assert "restart from step 2" in response.text
     assert "add the `ai-review` label" in response.text
     assert "`status=present` and `sha` equals the commit" in response.text
+    assert "If the user requested no rules change" in response.text
+    assert "`missing` means the service defaults apply" in response.text
+    assert "opens **Agent tokens** from the AI Code Reviewer user menu" in response.text
     assert "remove and reapply the label" in response.text
     assert "If no run appears" in response.text
 

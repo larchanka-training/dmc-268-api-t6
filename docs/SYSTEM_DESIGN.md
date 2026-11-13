@@ -513,7 +513,7 @@ sequenceDiagram
 
 Для AI-агента (#249) browser JWT не используется: публичный device flow GitHub
 выдаёт после согласия человека отдельный 30-дневный opaque token для одного
-GitHub Repository ([ADR 0002](adr/0002-agent-access.md)). API хранит только хеш,
+GitHub Repository ([ADR 0004](adr/0004-agent-access.md)). API хранит только хеш,
 проверяет отзыв на каждом запросе и пересекает Repository ID с текущим личным
 грантом пользователя. Доступны настройки Repository и чтение результатов, но не
 ключ App, OAuth-токен, метрики или административные операции. Правила

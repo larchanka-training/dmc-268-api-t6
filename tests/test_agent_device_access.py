@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
-from typing import Self
+from typing import Literal, Self
 from uuid import UUID, uuid4
 
 import pytest
@@ -19,7 +19,10 @@ from app.modules.auth.application.agent_device_access import (
     DevicePollTooSoon,
 )
 from app.modules.auth.application.agent_tokens import IssuedAgentToken
-from app.modules.auth.application.exchange_github_code import AuthenticatedUser
+from app.modules.auth.application.exchange_github_code import (
+    AuthenticatedUser,
+    GitHubProviderUnavailable,
+)
 
 
 class FakeDeviceStore:
@@ -190,6 +193,92 @@ def test_github_slow_down_extends_poll_interval_by_at_least_five_seconds() -> No
     with pytest.raises(DevicePollTooSoon):
         clock[0] += timedelta(seconds=6)
         asyncio.run(flow.poll(challenge.device_code))
+
+
+@pytest.mark.parametrize("status", ["denied", "expired"])
+def test_terminal_device_poll_outcomes_consume_code(status: Literal["denied", "expired"]) -> None:
+    class TerminalGithub(FakeGithub):
+        async def poll_device(self, code: str) -> DevicePoll:
+            return DevicePoll(status)
+
+    clock = [datetime(2026, 11, 5, tzinfo=UTC)]
+    flow = AgentDeviceAccess(
+        github=TerminalGithub(),
+        profile=FakeProfile(),
+        linker=FakeLinker(),
+        tokens=FakeTokens(),
+        uow_factory=FakeDeviceStore().uow,
+        now=lambda: clock[0],
+    )
+    challenge = asyncio.run(flow.start("octo/repo"))
+    clock[0] += timedelta(seconds=5)
+    assert asyncio.run(flow.poll(challenge.device_code)).status == status
+    assert asyncio.run(flow.poll(challenge.device_code)).status == "expired"
+
+
+def test_authorized_poll_without_access_token_consumes_code() -> None:
+    class EmptyGithub(FakeGithub):
+        async def poll_device(self, code: str) -> DevicePoll:
+            return DevicePoll("authorized")
+
+    clock = [datetime(2026, 11, 5, tzinfo=UTC)]
+    store = FakeDeviceStore()
+    flow = AgentDeviceAccess(
+        github=EmptyGithub(),
+        profile=FakeProfile(),
+        linker=FakeLinker(),
+        tokens=FakeTokens(),
+        uow_factory=store.uow,
+        now=lambda: clock[0],
+    )
+    challenge = asyncio.run(flow.start("octo/repo"))
+    clock[0] += timedelta(seconds=5)
+    with pytest.raises(GitHubProviderUnavailable):
+        asyncio.run(flow.poll(challenge.device_code))
+    assert asyncio.run(flow.poll(challenge.device_code)).status == "expired"
+
+
+@pytest.mark.parametrize("failed_step", ["profile", "linker", "tokens"])
+def test_failed_post_authorization_step_consumes_code(failed_step: str) -> None:
+    class AuthorizedGithub(FakeGithub):
+        async def poll_device(self, code: str) -> DevicePoll:
+            return DevicePoll("authorized", "ghu_secret")
+
+    class Profile(FakeProfile):
+        async def get_user(self, token: str) -> AuthenticatedUser:
+            if failed_step == "profile":
+                raise RuntimeError("profile unavailable")
+            return await super().get_user(token)
+
+    class Linker(FakeLinker):
+        async def execute(
+            self, token: str, *, expected_user_id: int | None = None
+        ) -> tuple[UUID, ...]:
+            if failed_step == "linker":
+                raise RuntimeError("installation unavailable")
+            return await super().execute(token, expected_user_id=expected_user_id)
+
+    class Tokens(FakeTokens):
+        async def issue(self, user_id: int, repository: str) -> IssuedAgentToken:
+            if failed_step == "tokens":
+                raise RuntimeError("token unavailable")
+            return await super().issue(user_id, repository)
+
+    clock = [datetime(2026, 11, 5, tzinfo=UTC)]
+    store = FakeDeviceStore()
+    flow = AgentDeviceAccess(
+        github=AuthorizedGithub(),
+        profile=Profile(),
+        linker=Linker(),
+        tokens=Tokens(),
+        uow_factory=store.uow,
+        now=lambda: clock[0],
+    )
+    challenge = asyncio.run(flow.start("octo/repo"))
+    clock[0] += timedelta(seconds=5)
+    with pytest.raises(RuntimeError):
+        asyncio.run(flow.poll(challenge.device_code))
+    assert asyncio.run(flow.poll(challenge.device_code)).status == "expired"
 
 
 def test_overlapping_authorized_polls_issue_only_one_agent_token() -> None:
