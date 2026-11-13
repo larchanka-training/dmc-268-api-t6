@@ -605,6 +605,7 @@ def test_ordinary_fetch_failure_stays_an_optional_blob_omission() -> None:
     "failure",
     [
         RunFailure("bitbucket_request_budget_exceeded"),
+        RunFailure("bitbucket_response_budget_exceeded"),
         RunFailure("bitbucket_fetch_failed", rate_limited=True),
     ],
 )
