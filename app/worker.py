@@ -77,6 +77,7 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
 from app.modules.integrations.webhooks.infrastructure.redis_installation_token_cache import (
     installation_token_cache,
 )
+from app.modules.reviews.application.change_summary import ChangeSummaryModel
 from app.modules.reviews.application.check_runs import CheckRunGateway, RunProviderCheckpoint
 from app.modules.reviews.application.conventions import (
     ConventionsModel,
@@ -202,6 +203,7 @@ from app.modules.reviews.infrastructure.github_vcs import (
 from app.modules.reviews.infrastructure.llm.ecb_fx import EcbFxQuoteCache, EcbFxRateAdapter
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.models import (
+    GatewayChangeSummaryModel,
     GatewayConventionsModel,
     GatewayReviewModel,
     GatewayVerifierModel,
@@ -267,12 +269,14 @@ async def process_review_run(
     context_stage: ReviewContextStage | None = None,
     reflection_pass: ReflectionPass | None = None,
     vcs_provider_selector: VcsProviderSelector | None = None,
+    change_summary: ChangeSummaryModel | None = None,
 ) -> bool:
     """Process one run using the worker's already-created database pool.
 
     The queue worker passes ``output`` (store and hand over to ``review.publish``) and
     ``trace`` (``run_actions`` steps); without them the answer is published inline.
-    ``reflection_pass`` verifies a snapshot-path review; a legacy run never calls it.
+    ``reflection_pass`` verifies a snapshot-path review; a legacy run never calls it, nor
+    ``change_summary``, the agent that describes the change after the verifier (#316).
     """
 
     repository = SqlAlchemyRunRepository(session_factory, allow_unscoped=True)
@@ -306,7 +310,12 @@ async def process_review_run(
     if context_stage is None:
         # A caller without GitHub App adapters: the run is composed without the stage.
         return await ExecuteReviewRun(
-            processor, prompts, provider, publisher, reflection_pass=reflection_pass
+            processor,
+            prompts,
+            provider,
+            publisher,
+            reflection_pass=reflection_pass,
+            change_summary=change_summary,
         ).execute(run_id)
     return await ExecuteReviewRun(
         processor,
@@ -315,6 +324,7 @@ async def process_review_run(
         publisher,
         context_filter=context_stage,
         reflection_pass=reflection_pass,
+        change_summary=change_summary,
     ).execute(run_id)
 
 
@@ -414,16 +424,23 @@ class AttemptReviewProvider:
         conventions: ConventionsModel,
         review: GatewayReviewModel | UnconfiguredModel,
         reflection_pass: ReflectionPass | None = None,
+        change_summary: ChangeSummaryModel | None = None,
     ) -> None:
         self._source = source
         self._conventions = conventions
         self._review = review
         self._reflection_pass = reflection_pass
+        self._change_summary = change_summary
 
     @property
     def reflection_pass(self) -> ReflectionPass | None:
         """The attempt's verifier (R14); None on a worker without ``LLM_*``."""
         return self._reflection_pass
+
+    @property
+    def change_summary(self) -> ChangeSummaryModel | None:
+        """The attempt's change summary agent (#316); None on a worker without ``LLM_*``."""
+        return self._change_summary
 
     async def fetch_diff(self, *, code_change_id: UUID, head_sha: str) -> list[DiffSnapshot]:
         raise RuntimeError("the worker reads the diff through its VcsProvider")
@@ -813,6 +830,7 @@ def attempt_model_provider(
         GatewayConventionsModel(gateway, run),
         GatewayReviewModel(gateway, run, source),
         ReflectionPass(GatewayVerifierModel(gateway, run)),
+        GatewayChangeSummaryModel(gateway, run),
     )
 
 
@@ -905,6 +923,7 @@ def compose_worker_process(
             stage: ReviewContextStage | None,
         ) -> bool:
             reflection_pass: ReflectionPass | None = None
+            change_summary: ChangeSummaryModel | None = None
             if provider_factory is not None:
                 provider = provider_factory(claimed)
             else:
@@ -912,6 +931,7 @@ def compose_worker_process(
                 model_provider = attempt_model_provider(gateway, source, claimed)
                 provider = model_provider
                 reflection_pass = model_provider.reflection_pass
+                change_summary = model_provider.change_summary
             return await process_review_run(
                 claimed.run_id,
                 CheckpointedProvider(provider, checkpoint),
@@ -922,6 +942,7 @@ def compose_worker_process(
                 context_stage=stage,
                 reflection_pass=reflection_pass,
                 vcs_provider_selector=BoundVcsProviderSelector(expected.locator, vcs),
+                change_summary=change_summary,
             )
 
         if expected.provider == "gitlab":

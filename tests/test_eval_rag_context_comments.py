@@ -1,6 +1,6 @@
 """The offline RAG build of the eval asks the same gate as the review whether retrieved blocks
-hide their comments (#498): a recording of a prompt in that set sends no comment of unchanged
-code."""
+hide their comments (#498): a recording on v7 sends no comment of unchanged code, one on v5
+sends them as the captures recorded them."""
 
 from __future__ import annotations
 
@@ -19,27 +19,32 @@ _CALLER = "fleetlog/planner.py"
 _BAIT_LINES = (11, 12, 13)
 
 
-def _caller_lines() -> dict[int, str]:
-    arm = asyncio.run(build_arm_input(_RAG_21, "B", review_model="m"))
+def _caller_lines(version: str) -> dict[int, str]:
+    arm = asyncio.run(build_arm_input(_RAG_21, "B", review_model="m", version=version))
     (block,) = (item for item in arm.context.retrieved if item.source.path == _CALLER)
     numbers = [n for part in block.source.ranges for n in range(part.start_line, part.end_line + 1)]
     return dict(zip(numbers, block.text.split("\n"), strict=True))
 
 
-def test_a_prompt_that_hides_comments_sends_markers_in_place_of_the_bait(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        rag_index, "COMMENT_FREE_PROMPT_VERSIONS", frozenset({("review.system", "v5")})
-    )
-
-    lines = _caller_lines()
+def test_v7_sends_markers_in_place_of_the_bait() -> None:
+    lines = _caller_lines("v7")
 
     assert [lines[n] for n in _BAIT_LINES] == ["    # [comment removed]"] * 3
 
 
 def test_the_recorded_v5_prompt_still_sends_the_comments() -> None:
-    lines = _caller_lines()
+    lines = _caller_lines("v5")
 
     assert all(lines[n].startswith("    # ") for n in _BAIT_LINES)
     assert not any("[comment removed]" in line for line in lines.values())
+
+
+def test_the_build_asks_the_review_gate_not_the_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With the gate's set swapped to v5, v5 hides the bait and v7 sends it: the build follows
+    # the set, as the review does, and no version check of its own.
+    monkeypatch.setattr(
+        rag_index, "COMMENT_FREE_PROMPT_VERSIONS", frozenset({("review.system", "v5")})
+    )
+
+    assert [_caller_lines("v5")[n] for n in _BAIT_LINES] == ["    # [comment removed]"] * 3
+    assert not any("[comment removed]" in line for line in _caller_lines("v7").values())

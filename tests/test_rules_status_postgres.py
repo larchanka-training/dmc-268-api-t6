@@ -37,6 +37,7 @@ from app.modules.integrations.bitbucket.infrastructure.credential_cipher import 
     CredentialContext,
     CredentialPurpose,
 )
+from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     StaticGitHubInstallationAccessTokenProvider,
 )
@@ -68,8 +69,10 @@ from app.modules.repositories.infrastructure.rules_status import (
 )
 from app.webhook_worker import WorkerConfig, compose_rules_refresher
 from tests.github_raw_blobs import git_blob_oid
-from tests.portal_postgres import INSTALL_A, REPO_A, REPO_B, WS_A, Env, api, portal_schema, scalar
+from tests.portal_postgres import INSTALL_A, REPO_A, REPO_B, WS_A, Env, api, scalar
 from tests.test_rules_status import _HEAD, FakeGitHub, _read
+
+pytest_plugins = ("tests.portal_postgres",)
 
 _SCOPE = AuthScope(42, (WS_A,))
 _BITBUCKET_WORKSPACE_UUID = UUID("11111111-1111-4111-8111-111111111111")
@@ -77,17 +80,8 @@ _BITBUCKET_REPOSITORY_UUID = UUID("22222222-2222-4222-8222-222222222222")
 
 
 @pytest.fixture
-def env() -> Iterator[Env]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    with portal_schema(database_url, None) as schema:
-        yield schema
-
-
-@pytest.fixture
-def factory(env: Env) -> Iterator[async_sessionmaker[Any]]:
-    engine = env.engine()
+def factory(portal_env: Env) -> Iterator[async_sessionmaker[Any]]:
+    engine = portal_env.engine()
     try:
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
@@ -148,9 +142,9 @@ def _execute(factory: async_sessionmaker[Any], sql: str, **values: Any) -> None:
 
 
 @pytest.mark.integration
-def test_first_get_is_pending_and_the_worker_read_is_then_returned(env: Env) -> None:
+def test_first_get_is_pending_and_the_worker_read_is_then_returned(portal_env: Env) -> None:
     raw = b"# Rules\r\n```review-ignore\ndocs/**\n```\n"
-    with api(env, _SCOPE) as (client, factory):
+    with api(portal_env, _SCOPE) as (client, factory):
         first = client.get(f"/api/repos/{REPO_A}/rules-status")
         requested = _row(factory, REPO_A)
         again = client.get(f"/api/repos/{REPO_A}/rules-status")
@@ -187,8 +181,8 @@ def test_first_get_is_pending_and_the_worker_read_is_then_returned(env: Env) -> 
 
 
 @pytest.mark.integration
-def test_an_empty_file_is_stored_and_shown_as_present(env: Env) -> None:
-    with api(env, _SCOPE) as (client, factory):
+def test_an_empty_file_is_stored_and_shown_as_present(portal_env: Env) -> None:
+    with api(portal_env, _SCOPE) as (client, factory):
         client.get(f"/api/repos/{REPO_A}/rules-status")
         _refresh(factory, GitHubReader(FakeGitHub(rules=b"")))
         stored = _row(factory, REPO_A)
@@ -203,9 +197,9 @@ def test_an_empty_file_is_stored_and_shown_as_present(env: Env) -> None:
 @pytest.mark.integration
 @pytest.mark.parametrize("read_before", [False, True], ids=["never-read", "read-before"])
 def test_a_repository_the_app_lost_is_access_denied_and_not_requested(
-    env: Env, read_before: bool
+    portal_env: Env, read_before: bool
 ) -> None:
-    with api(env, _SCOPE) as (client, factory):
+    with api(portal_env, _SCOPE) as (client, factory):
         if read_before:
             client.get(f"/api/repos/{REPO_A}/rules-status")
             _refresh(factory, FixedReader(RulesReading(RulesStatusKind.MISSING, "main", _HEAD)))
@@ -256,8 +250,8 @@ def test_the_portal_store_fails_closed_without_a_scope(factory: async_sessionmak
 
 
 @pytest.mark.integration
-def test_a_repository_of_another_workspace_is_not_found_and_not_requested(env: Env) -> None:
-    with api(env, _SCOPE) as (client, factory):
+def test_a_repository_of_another_workspace_is_not_found_and_not_requested(portal_env: Env) -> None:
+    with api(portal_env, _SCOPE) as (client, factory):
         other = client.get(f"/api/repos/{REPO_B}/rules-status")
         unknown = client.get(f"/api/repos/{UUID(int=5)}/rules-status")
         rows = scalar(factory, "SELECT count(*) AS n FROM repository_rules_status").n
@@ -269,8 +263,8 @@ def test_a_repository_of_another_workspace_is_not_found_and_not_requested(env: E
 
 
 @pytest.mark.integration
-def test_missing_is_stored_with_the_defaults_version_and_shown(env: Env) -> None:
-    with api(env, _SCOPE) as (client, factory):
+def test_missing_is_stored_with_the_defaults_version_and_shown(portal_env: Env) -> None:
+    with api(portal_env, _SCOPE) as (client, factory):
         client.get(f"/api/repos/{REPO_A}/rules-status")
         _refresh(factory, GitHubReader(FakeGitHub(rules=None)))
         body = client.get(f"/api/repos/{REPO_A}/rules-status").json()
@@ -281,9 +275,9 @@ def test_missing_is_stored_with_the_defaults_version_and_shown(env: Env) -> None
 
 @pytest.mark.integration
 def test_missing_without_an_active_rule_version_is_unknown_and_logged(
-    env: Env, caplog: pytest.LogCaptureFixture
+    portal_env: Env, caplog: pytest.LogCaptureFixture
 ) -> None:
-    with api(env, _SCOPE) as (client, factory):
+    with api(portal_env, _SCOPE) as (client, factory):
         _execute(
             factory,
             "UPDATE rule_versions SET is_active = false WHERE repository_id = :id",
@@ -329,9 +323,9 @@ def test_missing_without_an_active_rule_version_is_unknown_and_logged(
     ids=["bad-mask", "too-large", "ambiguous-404", "truncated-tree", "access-denied"],
 )
 def test_failed_reads_are_stored_with_their_diagnostic(
-    env: Env, github: FakeGitHub, status: str, code: str
+    portal_env: Env, github: FakeGitHub, status: str, code: str
 ) -> None:
-    with api(env, _SCOPE) as (client, factory):
+    with api(portal_env, _SCOPE) as (client, factory):
         client.get(f"/api/repos/{REPO_A}/rules-status")
         _refresh(factory, GitHubReader(github))
         body = client.get(f"/api/repos/{REPO_A}/rules-status").json()
@@ -349,9 +343,9 @@ def test_failed_reads_are_stored_with_their_diagnostic(
     ids=["stopped-read", "listed-size"],
 )
 def test_a_too_large_actual_is_stored_and_shown_with_whether_it_is_a_lower_bound(
-    env: Env, unsized: bool, actual: int, flag: dict[str, bool]
+    portal_env: Env, unsized: bool, actual: int, flag: dict[str, bool]
 ) -> None:
-    with api(env, _SCOPE) as (client, factory):
+    with api(portal_env, _SCOPE) as (client, factory):
         client.get(f"/api/repos/{REPO_A}/rules-status")
         _refresh(factory, GitHubReader(FakeGitHub(rules=b"x" * 70_000, unsized=unsized)))
         (stored,) = _row(factory, REPO_A).diagnostics
@@ -373,7 +367,7 @@ def test_a_too_large_actual_is_stored_and_shown_with_whether_it_is_a_lower_bound
 
 
 @pytest.mark.integration
-def test_a_diagnostic_stored_without_the_lower_bound_flag_reads_as_exact(env: Env) -> None:
+def test_a_diagnostic_stored_without_the_lower_bound_flag_reads_as_exact(portal_env: Env) -> None:
     async def stored_flag(factory: async_sessionmaker[Any]) -> bool:
         async with SqlAlchemyRulesStatusUnitOfWork(factory, allow_unscoped=True) as uow:
             stored = await uow.rules_status.get(REPO_A)
@@ -381,7 +375,7 @@ def test_a_diagnostic_stored_without_the_lower_bound_flag_reads_as_exact(env: En
         (diagnostic,) = stored.status.diagnostics
         return diagnostic.actual_is_lower_bound
 
-    with api(env, _SCOPE) as (client, factory):
+    with api(portal_env, _SCOPE) as (client, factory):
         client.get(f"/api/repos/{REPO_A}/rules-status")
         _refresh(factory, GitHubReader(FakeGitHub(rules=b"x" * 70_000, unsized=True)))
         written = _row(factory, REPO_A).diagnostics[0]["actual_is_lower_bound"]
@@ -401,14 +395,14 @@ def test_a_diagnostic_stored_without_the_lower_bound_flag_reads_as_exact(env: En
 
 
 @pytest.mark.integration
-def test_a_stale_or_retryable_result_is_requested_again_on_get(env: Env) -> None:
+def test_a_stale_or_retryable_result_is_requested_again_on_get(portal_env: Env) -> None:
     transient = RulesReading(
         RulesStatusKind.UNAVAILABLE,
         "main",
         None,
         diagnostics=(RulesDiagnostic("policy_fetch_transient", "m", None, None, True),),
     )
-    with api(env, _SCOPE) as (client, factory):
+    with api(portal_env, _SCOPE) as (client, factory):
         client.get(f"/api/repos/{REPO_A}/rules-status")
         _refresh(factory, FixedReader(RulesReading(RulesStatusKind.MISSING, "main", _HEAD)))
         fresh = client.get(f"/api/repos/{REPO_A}/rules-status").json()
@@ -443,7 +437,7 @@ def test_a_stale_or_retryable_result_is_requested_again_on_get(env: Env) -> None
 
 
 @pytest.mark.integration
-def test_a_rate_limit_waits_for_its_retry_after_before_a_new_read(env: Env) -> None:
+def test_a_rate_limit_waits_for_its_retry_after_before_a_new_read(portal_env: Env) -> None:
     limited = RulesReading(
         RulesStatusKind.UNAVAILABLE,
         "main",
@@ -454,7 +448,7 @@ def test_a_rate_limit_waits_for_its_retry_after_before_a_new_read(env: Env) -> N
             ),
         ),
     )
-    with api(env, _SCOPE) as (client, factory):
+    with api(portal_env, _SCOPE) as (client, factory):
         client.get(f"/api/repos/{REPO_A}/rules-status")
         _refresh(factory, FixedReader(limited))
         _execute(
@@ -480,6 +474,24 @@ def test_a_rate_limit_waits_for_its_retry_after_before_a_new_read(env: Env) -> N
     }
     assert after_within is None
     assert after_pause is not None
+
+
+@pytest.mark.integration
+def test_oversized_retry_after_is_capped_in_the_saved_rules_status(portal_env: Env) -> None:
+    github = FakeGitHub(
+        rules=b"x",
+        failures={f"/git/trees/{_HEAD}": 429},
+        headers={"Retry-After": "1" * 5000},
+    )
+    with api(portal_env, _SCOPE) as (client, factory):
+        client.get(f"/api/repos/{REPO_A}/rules-status")
+        refreshed = _refresh(factory, GitHubReader(github))
+        stored = _row(factory, REPO_A)
+
+    assert refreshed == 1
+    assert stored.status == "unavailable"
+    assert stored.diagnostics[0]["code"] == "policy_rate_limited"
+    assert stored.diagnostics[0]["retry_after_seconds"] == 86400
 
 
 async def _request(factory: async_sessionmaker[Any]) -> None:
@@ -549,6 +561,23 @@ def test_a_claimed_request_is_taken_again_only_after_its_lease(
 
 
 @pytest.mark.integration
+def test_a_disconnected_repository_keeps_its_rules_read_request(
+    factory: async_sessionmaker[Any],
+) -> None:
+    asyncio.run(_request(factory))
+    _execute(
+        factory, "UPDATE repositories SET installation_available = false WHERE id = :id", id=REPO_A
+    )
+    reader = FixedReader(RulesReading(RulesStatusKind.MISSING, "main", _HEAD))
+
+    refreshed = _refresh(factory, reader)
+
+    assert refreshed == 0
+    assert reader.targets == []
+    assert _row(factory, REPO_A).refresh_requested_at is not None
+
+
+@pytest.mark.integration
 def test_a_read_whose_lease_ended_cannot_overwrite_the_newer_read(
     factory: async_sessionmaker[Any],
 ) -> None:
@@ -607,13 +636,13 @@ def test_a_read_whose_lease_ended_cannot_save_while_the_new_claim_reads(
 
 @pytest.mark.integration
 def test_an_unexpected_read_failure_is_stored_as_a_transient_error(
-    env: Env,
+    portal_env: Env,
 ) -> None:
     class Broken:
         async def read(self, target: RulesRefreshTarget) -> RulesReading:
             raise RuntimeError("bug")
 
-    with api(env, _SCOPE) as (client, factory):
+    with api(portal_env, _SCOPE) as (client, factory):
         client.get(f"/api/repos/{REPO_A}/rules-status")
         _refresh(factory, Broken())
         stored = _row(factory, REPO_A)
@@ -681,9 +710,47 @@ def test_a_push_requests_a_read_only_for_a_connected_repository(
 
 
 @pytest.mark.integration
-def test_a_request_wakes_the_worker_on_commit(env: Env, factory: async_sessionmaker[Any]) -> None:
+def test_composed_dispatcher_requests_rules_read_on_default_branch_push(
+    portal_env: Env, factory: async_sessionmaker[Any]
+) -> None:
+    engine = portal_env.engine()
+
+    async def dispatch() -> str:
+        async with httpx.AsyncClient(base_url="https://api.github.test") as client:
+            dispatcher = ReviewsApiResources(
+                engine, factory
+            ).github_installation_delivery_dispatcher(
+                client=client,
+                token_provider=StaticGitHubInstallationAccessTokenProvider("token"),
+            )
+            delivery = VerifiedGitHubDelivery(
+                "push-rules-status",
+                "push",
+                {
+                    "ref": "refs/heads/main",
+                    "installation": {"id": 17},
+                    "repository": {"id": 101, "default_branch": "main"},
+                },
+            )
+            return (await dispatcher.execute(delivery.to_receipt())).status
+
+    try:
+        status = asyncio.run(dispatch())
+        requested = _row(factory, REPO_A)
+    finally:
+        asyncio.run(engine.dispose())
+
+    assert status == "requested_rules_refresh"
+    assert requested.status is None
+    assert requested.refresh_requested_at is not None
+
+
+@pytest.mark.integration
+def test_a_request_wakes_the_worker_on_commit(
+    portal_env: Env, factory: async_sessionmaker[Any]
+) -> None:
     conninfo = (
-        make_url(env.database_url)
+        make_url(portal_env.database_url)
         .set(drivername="postgresql")
         .render_as_string(hide_password=False)
     )
@@ -705,10 +772,10 @@ def test_a_request_wakes_the_worker_on_commit(env: Env, factory: async_sessionma
 
 
 @pytest.mark.integration
-def test_the_worker_composition_reads_through_github_and_stores_the_result(env: Env) -> None:
+def test_the_worker_composition_reads_through_github_and_stores_the_result(portal_env: Env) -> None:
     raw = b"# Rules\n```review-ignore\ndocs/**\n```\n"
     github = FakeGitHub(rules=raw)
-    engine = env.engine()
+    engine = portal_env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def scenario() -> int:
@@ -857,7 +924,7 @@ _DIAGNOSTIC = '[{"code": "policy_fetch_transient", "message": "m", "retryable": 
         ({"checked_at": None}, "ck_repository_rules_status_read_complete"),
         ({"sha": "a" * 39}, "ck_repository_rules_status_sha"),
         ({"sha": "A" * 40}, "ck_repository_rules_status_sha"),
-        ({"sha": "a" * 64}, "value too long"),
+        ({"sha": "a" * 64}, "22001"),
         ({"checksum": "a" * 63 + "g"}, "ck_repository_rules_status_checksum"),
         ({"ignore_masks": None}, "ck_repository_rules_status_present"),
         ({"status": "missing"}, "ck_repository_rules_status_missing"),
@@ -902,8 +969,12 @@ def test_the_row_constraints_refuse_an_incomplete_read(
         unavailable.rollback()
 
     # A 64 hex SHA is refused by the column length before the CHECK runs.
-    with pytest.raises((IntegrityError, DataError), match=constraint):
+    with pytest.raises((IntegrityError, DataError)) as caught:
         connection.execute(insert, {"id": _REPOSITORY, **_VALID, **change})
+    diagnostic = getattr(caught.value.orig, "diag", None)
+    assert (
+        getattr(diagnostic, "constraint_name", None) or getattr(caught.value.orig, "sqlstate", None)
+    ) == constraint
 
 
 def _seed_bitbucket_binding(factory: async_sessionmaker[Any]) -> None:
@@ -950,8 +1021,8 @@ def _seed_bitbucket_binding(factory: async_sessionmaker[Any]) -> None:
 
 
 @pytest.mark.integration
-def test_an_inactive_bitbucket_binding_is_hidden_without_refresh(env: Env) -> None:
-    with api(env, _SCOPE) as (client, factory):
+def test_an_inactive_bitbucket_binding_is_hidden_without_refresh(portal_env: Env) -> None:
+    with api(portal_env, _SCOPE) as (client, factory):
         _seed_bitbucket_binding(factory)
         _execute(
             factory,
@@ -1041,7 +1112,7 @@ def test_bitbucket_read_cannot_save_after_its_binding_changes(
 
 @pytest.mark.integration
 def test_bitbucket_only_worker_turns_pending_terminal_and_preserves_github_request(
-    env: Env,
+    portal_env: Env,
 ) -> None:
     installation_id, remote_workspace, remote_repository = uuid4(), uuid4(), uuid4()
     cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
@@ -1064,7 +1135,7 @@ def test_bitbucket_only_worker_turns_pending_terminal_and_preserves_github_reque
             return httpx.Response(200, json={"values": []})
         raise AssertionError(path)
 
-    with api(env, _SCOPE) as (client, factory):
+    with api(portal_env, _SCOPE) as (client, factory):
 
         async def setup() -> UUID:
             async with factory() as session:
@@ -1111,7 +1182,7 @@ def test_bitbucket_only_worker_turns_pending_terminal_and_preserves_github_reque
         assert client.get(f"/api/repos/{REPO_A}/rules-status").json()["status"] == "pending"
         resources = app.state.reviews_api_resources
         bitbucket_config = WorkerConfig(
-            database_url=env.database_url,
+            database_url=portal_env.database_url,
             app_id=None,
             private_key=None,
             bot_login=None,
@@ -1148,7 +1219,7 @@ def test_bitbucket_only_worker_turns_pending_terminal_and_preserves_github_reque
         _execute(factory, "UPDATE repositories SET full_name='octo/repo' WHERE id=:id", id=REPO_A)
         github = FakeGitHub(rules=None, review_dir=False)
         github_config = WorkerConfig(
-            database_url=env.database_url,
+            database_url=portal_env.database_url,
             app_id=17,
             private_key="test",
             bot_login="reviewer[bot]",

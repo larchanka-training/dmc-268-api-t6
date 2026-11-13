@@ -41,7 +41,7 @@ _SECTION = re.compile(r"<retrieved_excerpts>.*?</retrieved_excerpts>", re.DOTALL
 
 
 def _build(arm: Arm) -> ArmInput:
-    return asyncio.run(build_arm_input(_SPIKE, arm, review_model=_MODEL))
+    return asyncio.run(build_arm_input(_SPIKE, arm, review_model=_MODEL, version="v5"))
 
 
 def test_arm_b_has_one_retrieved_block_for_the_caller_and_arm_a_has_none() -> None:
@@ -115,12 +115,12 @@ def test_a_system_prompt_that_is_not_the_pinned_v5_is_refused(
 ) -> None:
     monkeypatch.setitem(PINNED_PROMPT_CHECKSUMS, "review.system:v5", "0" * 64)
     with pytest.raises(PolicyError, match="review.system:v5"):
-        asyncio.run(build_arm_input(_SPIKE, "A", review_model=_MODEL))
+        asyncio.run(build_arm_input(_SPIKE, "A", review_model=_MODEL, version="v5"))
 
 
 def test_an_unknown_arm_is_refused() -> None:
     with pytest.raises(ValueError, match="arm"):
-        asyncio.run(build_arm_input(_SPIKE, "C", review_model=_MODEL))  # type: ignore[arg-type]
+        asyncio.run(build_arm_input(_SPIKE, "C", review_model=_MODEL, version="v5"))  # type: ignore[arg-type]
 
 
 # --- Task 4: the case of an arm as the gateway takes it ------------------------------------
@@ -131,7 +131,7 @@ def _send(arm: Arm) -> tuple[ArmInput, str]:
     guard) on a fake transport: the arm's offline prompt and the user message sent."""
     offline = _build(arm)
     transport = FakeTransport([answer("primary-model", VALID_ANSWER)])
-    case = asyncio.run(build_case_input(_SPIKE, arm, review_model=_MODEL))
+    case = asyncio.run(build_case_input(_SPIKE, arm, review_model=_MODEL, version="v5"))
     result = asyncio.run(review_case(case, settings(), transport=transport))
     assert [call.kind.value for call in result.calls] == ["primary"]
     (request,) = transport.requests
@@ -149,7 +149,7 @@ def test_the_gateway_accepts_each_arm_and_sends_the_offline_prompt(arm: Arm) -> 
 @pytest.mark.parametrize("arm", ["A", "B"])
 def test_the_case_carries_the_mapped_blocks_and_the_head_id(arm: Arm) -> None:
     offline = _build(arm)
-    case = asyncio.run(build_case_input(_SPIKE, arm, review_model=_MODEL))
+    case = asyncio.run(build_case_input(_SPIKE, arm, review_model=_MODEL, version="v5"))
 
     assert case.context_blocks == offline.context.context_blocks != ()
     assert case.retrieved == offline.context.retrieved
@@ -177,8 +177,8 @@ def test_the_build_uses_the_production_token_budget(monkeypatch: pytest.MonkeyPa
 
 
 def test_a_renamed_export_gives_a_broken_reference_with_its_left_definition() -> None:
-    arm_a = asyncio.run(build_arm_input(_RENAMED, "A", review_model=_MODEL))
-    arm_b = asyncio.run(build_arm_input(_RENAMED, "B", review_model=_MODEL))
+    arm_a = asyncio.run(build_arm_input(_RENAMED, "A", review_model=_MODEL, version="v5"))
+    arm_b = asyncio.run(build_arm_input(_RENAMED, "B", review_model=_MODEL, version="v5"))
 
     assert arm_a.payload.retrieved == ()
     place, definition = arm_b.payload.retrieved
@@ -222,7 +222,7 @@ def test_a_package_reimport_at_base_does_not_create_a_broken_reference(tmp_path:
         encoding="utf-8",
     )
 
-    arm = asyncio.run(build_arm_input(case, "B", review_model=_MODEL))
+    arm = asyncio.run(build_arm_input(case, "B", review_model=_MODEL, version="v5"))
 
     assert arm.payload.retrieved == ()
     assert arm.payload.rag is not None
@@ -240,7 +240,7 @@ def test_a_case_without_an_index_is_an_error_not_an_empty_graph(tmp_path: Path) 
     (case / "index.json").unlink()
 
     with pytest.raises(FileNotFoundError, match="index.json"):
-        asyncio.run(build_arm_input(case, "B", review_model=_MODEL))
+        asyncio.run(build_arm_input(case, "B", review_model=_MODEL, version="v5"))
 
 
 def test_an_index_of_another_revision_is_refused(tmp_path: Path) -> None:
@@ -249,7 +249,7 @@ def test_an_index_of_another_revision_is_refused(tmp_path: Path) -> None:
     case = _copy_case(tmp_path, _SPIKE, "renamed-elsewhere")
 
     with pytest.raises(ValueError, match="index.json.*base"):
-        asyncio.run(build_arm_input(case, "B", review_model=_MODEL))
+        asyncio.run(build_arm_input(case, "B", review_model=_MODEL, version="v5"))
 
 
 def test_a_changed_generated_file_is_refused_not_silently_dropped(tmp_path: Path) -> None:
@@ -268,12 +268,12 @@ def test_a_changed_generated_file_is_refused_not_silently_dropped(tmp_path: Path
     )
 
     with pytest.raises(ValueError, match="withholds"):
-        asyncio.run(build_arm_input(case, "A", review_model=_MODEL))
+        asyncio.run(build_arm_input(case, "A", review_model=_MODEL, version="v5"))
 
 
 def test_review_case_refuses_excerpts_its_prompt_would_not_show() -> None:
     """A miswired arm B must fail, not run as arm A."""
-    case = asyncio.run(build_case_input(_SPIKE, "B", review_model=_MODEL))
+    case = asyncio.run(build_case_input(_SPIKE, "B", review_model=_MODEL, version="v5"))
     assert case.policy_snapshot is not None
     settings_ = settings()
 

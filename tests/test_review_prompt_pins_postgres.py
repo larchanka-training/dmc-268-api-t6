@@ -57,6 +57,11 @@ from app.modules.reviews.infrastructure.run_repository import (
 )
 from tests.policy_snapshot_fakes import make_complete_execution_profile
 from tests.portal_postgres import INSTALL_A, PROMPT, REPO_A, RUN_ATTEMPTED, Env, portal_schema
+
+# test_clean_without_text_sent_context_postgres.py and test_snapshot_path_live_pin.py still import
+# _bind_v4 from here (both owned by open PR #478); they import tests.review_prompt_pins_postgres
+# at their next edit.
+from tests.review_prompt_pins_postgres import _bind_v4 as _bind_v4
 from tests.test_prepare_policy_snapshot import Source
 from tests.test_review_context_stage import Parser, Vcs, _checkpoint
 from tests.test_review_context_stage import Repository as SourceTree
@@ -253,55 +258,6 @@ def _assets(*keys: str) -> tuple[PromptAsset, ...]:
         for asset in _packaged(*keys)
         if not (asset.key == "review.system" and asset.version > 3)
     )
-
-
-def _packaged_review(version: int) -> PromptAsset:
-    return next(
-        asset
-        for asset in load_prompt_assets(REPO_ROOT / "review/prompts")
-        if (asset.key, asset.version) == ("review.system", version)
-    )
-
-
-# The packaged review.system v4 (F2) and v5 (#144), as the seed stores them.
-_V4 = _packaged_review(4)
-_V4_CONTENT = _V4.content
-_V5 = _packaged_review(5)
-_V5_CONTENT = _V5.content
-
-
-async def _bind_review(
-    factory: async_sessionmaker[AsyncSession], run_id: UUID, review: PromptAsset
-) -> UUID:
-    """Bind the run to an inactive row of a packaged review.system; these tests seed up to
-    v3 only."""
-    prompt = uuid4()
-    async with factory.begin() as session:
-        await session.execute(
-            text(
-                "INSERT INTO prompt_versions (id, key, version, content, checksum, is_active) "
-                "VALUES (:id, 'review.system', :version, :content, :checksum, false)"
-            ),
-            {
-                "id": prompt,
-                "version": review.version,
-                "content": review.content,
-                "checksum": review.checksum,
-            },
-        )
-        await session.execute(
-            text("UPDATE runs SET prompt_version_id=:prompt WHERE id=:id"),
-            {"prompt": prompt, "id": run_id},
-        )
-    return prompt
-
-
-async def _bind_v4(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> UUID:
-    return await _bind_review(factory, run_id, _V4)
-
-
-async def _bind_v5(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> UUID:
-    return await _bind_review(factory, run_id, _V5)
 
 
 def _stage(factory: async_sessionmaker[AsyncSession]) -> ReviewContextStage:

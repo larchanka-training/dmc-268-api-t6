@@ -10,25 +10,14 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
-from dataclasses import replace
 from hashlib import sha256
 from uuid import UUID
 
-from app.modules.code_index.domain.enums import EdgeKind
-from app.modules.reviews.application.context_provenance import LineRange, SourceRef, SourceRole
 from app.modules.reviews.application.diff_map import DiffSide
 from app.modules.reviews.application.policy_snapshot import PINNED_PROMPT_CHECKSUMS
 from app.modules.reviews.application.prompt_builder import (
     PromptBuilder,
-    ReviewContext,
     file_block_id,
-)
-from app.modules.reviews.application.rag_index import has_retrieved_section
-from app.modules.reviews.application.review_context import (
-    ContextLevel,
-    Representation,
-    RetrievedBlock,
-    snapshot_retrieved,
 )
 from app.modules.reviews.application.review_output import (
     ReviewFindingV2,
@@ -36,89 +25,27 @@ from app.modules.reviews.application.review_output import (
     validate_v2_coordinates,
 )
 from app.modules.reviews.infrastructure.llm.answers import review_answer_contract
-from tests.test_review_prompt_v4 import (
+from tests.review_prompt_fakes import (
+    BASE,
     EXAMPLES,
     HEAD,
+    INPUT_TAGS,
     PROMPTS,
     REPO_ROOT,
-    REPOSITORY_ID,
     V3_SHA256,
+    V4_SHA256,
+    V5_PATH,
+    _blocks,
+    _body,
     _context,
     _file,
+    _front_matter,
     _golden,
+    _retrieved,
+    _v5,
 )
 
-V5_PATH = PROMPTS / "review.system.v5.md"
-V4_SHA256 = "5738227c7352228d29975e0512b5b5d3354eff31c9d161ca72086a776e9c498f"
 GOLDEN_ENVELOPE = REPO_ROOT / "tests/fixtures/prompt_builder/sample.user.v5.txt"
-INPUT_TAGS = [
-    "repository_rules",
-    "project_conventions_document",
-    "service_defaults",
-    "repo_conventions",
-    "pr_meta",
-    "changed_files",
-    "context_excerpts",
-    "retrieved_excerpts",
-    "omitted_files",
-    "excluded_files",
-]
-_BLOCK_START = re.compile(rf"<({'|'.join(INPUT_TAGS)})[ >]")
-
-BASE = "3b9e0c71d4a85f26e0b7c4d9a1f36e28b5c0d417"
-
-
-def _v5(context: ReviewContext, retrieved: tuple[RetrievedBlock, ...] = ()) -> ReviewContext:
-    """``context`` as a v5-bound run renders it: the section follows the pinned version."""
-    snapshot = context.policy_snapshot
-    assert snapshot is not None
-    bindings = replace(
-        snapshot.prompt_bindings, review_system_checksum="5" * 64, review_system_version="v5"
-    )
-    return replace(
-        context,
-        policy_snapshot=replace(snapshot, prompt_bindings=bindings),
-        retrieved=retrieved,
-        retrieved_section=has_retrieved_section("review.system", bindings.review_system_version),
-    )
-
-
-def _retrieved(
-    path: str,
-    revision: str,
-    side: DiffSide,
-    ranges: tuple[tuple[int, int], ...],
-    text: str,
-    *,
-    signature: bool = False,
-    definitions: tuple[SourceRef, ...] = (),
-) -> RetrievedBlock:
-    source = SourceRef(
-        role=SourceRole.RETRIEVED_EXCERPT,
-        repository_id=REPOSITORY_ID,
-        revision=revision,
-        path=path,
-        blob_sha=None,
-        origin_paths=(),
-        side=side,
-        ranges=tuple(LineRange(start, end) for start, end in ranges),
-        reason="rag_broken_reference",
-    )
-    spans = ",".join(f"{start}-{end}" for start, end in ranges)
-    # The stage's id, renamed as the snapshot path shows and cites it.
-    return snapshot_retrieved(
-        RetrievedBlock(
-            block_id=f"RAG:{path}:{spans}",
-            level=ContextLevel.RAG,
-            source=source,
-            representation=Representation.SIGNATURE if signature else Representation.EXACT_LINES,
-            text=text,
-            tokens=len(text) // 4,
-            edge_kind=EdgeKind.IMPORTS,
-            index_commit_sha="c" * 40,
-            definitions=definitions,
-        )
-    )
 
 
 # The pull request renames ``read_session``; an unchanged caller still imports the old name.
@@ -156,33 +83,8 @@ _RETRIEVED = (_PLACE, _DEFINITION)
 EXAMPLES_V5 = tuple(_v5(context) for context in EXAMPLES)
 
 
-def _blocks(rendered: str) -> list[tuple[str, str]]:
-    """The top-level blocks of an input envelope: ``(tag, exact text)``, in order."""
-    lines = rendered.split("\n")
-    blocks: list[tuple[str, str]] = []
-    index = 0
-    while index < len(lines):
-        match = _BLOCK_START.match(lines[index])
-        assert match is not None, f"not a top-level tag: {lines[index]!r}"
-        tag = match.group(1)
-        end = index if lines[index].endswith(" />") else lines.index(f"</{tag}>", index)
-        blocks.append((tag, "\n".join(lines[index : end + 1])))
-        index = end + 1
-    return blocks
-
-
 def _text() -> str:
     return V5_PATH.read_text(encoding="utf-8")
-
-
-def _front_matter(text: str) -> str:
-    match = re.match(r"---\n(.*?)\n---\n", text, re.DOTALL)
-    assert match is not None
-    return match.group(1)
-
-
-def _body(text: str) -> list[str]:
-    return text.split("\n---\n", 1)[1].split("\n")
 
 
 def _input_tags() -> list[str]:

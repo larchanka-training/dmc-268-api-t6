@@ -11,7 +11,7 @@ Two seeds pick the review path through the active review prompt the run pins: ``
 v2: the snapshot path, where the rules.md text reaches the reviewer and the verifier). A case
 that fails while ``policy.load`` reads the documents runs on the v4 seed only.
 
-Each test module migrates one schema; each case starts from emptied tables with the same seed
+Each test module gets one migrated database; each case starts from emptied tables with the same seed
 and from a deleted review topology, so the cases stay isolated. The ``stack`` and ``seed``
 fixtures reach a test file through ``pytest_plugins``; the rest is imported.
 
@@ -37,13 +37,10 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.bootstrap.reviews_api import (
     ReviewsApiResources,
     get_github_webhook_receipt_uow_factory,
@@ -57,6 +54,7 @@ from app.modules.reviews.application.prompt_builder import file_block_id
 from app.modules.reviews.infrastructure.amqp import amqp_channels
 from app.worker import WorkerSettings, run_worker
 from tests.github_raw_blobs import blob_answer
+from tests.template_database import migrated_database
 from tests.worker_queue_postgres import (
     _APP_PEM,
     LLM_ENV,
@@ -396,9 +394,10 @@ class FakeLlm:
     """An OpenAI-compatible chat endpoint; each request body is kept as sent.
 
     It answers by the response schema: conventions list the changed paths, a review flags
-    the added line of ``app/service.py`` (a v2 review cites it in the file's block), and the
-    verifier supports every candidate. A request the fake cannot answer is recorded and
-    raises, so a test reports the harness gap instead of an odd ``llm_*`` failure of the run.
+    the added line of ``app/service.py`` (a v2 review cites it in the file's block), the
+    verifier supports every candidate and the change summary agent gets one sentence. A
+    request the fake cannot answer is recorded and raises, so a test reports the harness gap
+    instead of an odd ``llm_*`` failure of the run.
     """
 
     def __init__(self) -> None:
@@ -426,6 +425,9 @@ class FakeLlm:
             answer = self._review_v2(prompt)
         elif task == "VerificationOutput":
             answer = self._verification(prompt)
+        elif task == "ChangeSummaryOutput":
+            # The change summary agent (#316): the last call of a snapshot path attempt.
+            answer = {"sentences": ["Adds a function that returns a constant string."]}
         else:
             self._fail(f"the fake has no answer for the {task} schema")
         return httpx.Response(
@@ -598,7 +600,7 @@ _PROMPTS: dict[Seed, tuple[dict[str, Any], ...]] = {
 
 @pytest.fixture(scope="module")
 def stack() -> Iterator[Stack]:
-    """One migrated schema for the module; ``_reset`` empties and re-seeds it per case."""
+    """One migrated database for the module; ``_reset`` empties and re-seeds it per case."""
     database_url = os.environ.get("TEST_DATABASE_URL")
     # CI sets only RABBITMQ_URL; the zero-skips integration step must not skip here.
     rabbitmq_url = os.environ.get("TEST_RABBITMQ_URL") or (
@@ -607,25 +609,8 @@ def stack() -> Iterator[Stack]:
     if database_url is None or rabbitmq_url is None:
         pytest.skip("set TEST_DATABASE_URL and TEST_RABBITMQ_URL to run the rules.md E2E tests")
     schema = f"test_rules_e2e_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                config = Config("alembic.ini")
-                config.attributes["connection"] = connection
-                command.upgrade(config, "head")
-                connection.commit()
-                yield Stack(database_url, rabbitmq_url, schema)
-            finally:
-                connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
-    finally:
-        engine.dispose()
+    with migrated_database(database_url, schema) as clone_url:
+        yield Stack(clone_url, rabbitmq_url, schema)
 
 
 @pytest.fixture(params=list(Seed), ids=str)

@@ -28,14 +28,13 @@
   nothing; converge disarming an index while a PATCH turns RAG on ends either purged and
   re-armed or live, never live with RAG off.
 
-Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
-Each test migrates its own schema to head and drops it afterwards.
+Opt-in: TEST_DATABASE_URL must target a test database whose user can create databases.
+Each test gets a clone of a database migrated to head, dropped afterwards.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -44,12 +43,10 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.modules.code_index.application.build_index import (
     BuildMode,
     BuildStatus,
@@ -145,7 +142,6 @@ from tests.code_index_postgres import (
     _importer,
     _Index,
     _marker,
-    _migration_config,
     _module,
     _pause_after_lock,
     _purge,
@@ -160,7 +156,10 @@ from tests.code_index_postgres import (
     graph_rows,
     publish_index,
 )
+from tests.template_database import MigratedDatabase
 from tests.test_github_installation_dispatch import _merge_delivery, _push_delivery
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 
 @dataclass(frozen=True)
@@ -175,54 +174,38 @@ class _Fleet:
 
 
 @pytest.fixture
-def fleet() -> Iterator[_Fleet]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_code_index_lifecycle_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                command.upgrade(_migration_config(connection), "head")
-                a = UUID(_repository(connection, installation_external_id=17))
-                b = UUID(_repository(connection, installation_external_id=18))
-                installation = connection.scalar(
-                    text("SELECT provider_installation_id FROM repositories WHERE id = :id"),
-                    {"id": a},
-                )
-                a2 = uuid4()
-                connection.execute(
-                    text(
-                        "INSERT INTO repositories "
-                        "(id, provider_installation_id, external_id, full_name, default_branch, "
-                        "web_url) VALUES (:id, :installation, 102, 'octo/web', 'main', "
-                        "'https://github.com/octo/web')"
-                    ),
-                    {"id": a2, "installation": installation},
-                )
-                connection.commit()
-                neighbour = _sibling(connection, a, external_id=103, installation_external_id=19)
-                async_engine = create_async_engine(
-                    database_url,
-                    connect_args={"options": f"-csearch_path={schema}"},
-                    poolclass=NullPool,
-                )
-                try:
-                    factory = async_sessionmaker(async_engine, expire_on_commit=False)
-                    yield _Fleet(_Index(factory, a, b), installation, a2, neighbour)
-                finally:
-                    asyncio.run(async_engine.dispose())
-            finally:
-                connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
-    finally:
-        engine.dispose()
+def fleet(migrated_db: MigratedDatabase) -> Iterator[_Fleet]:
+    database_url = migrated_db.url
+    schema = migrated_db.schema
+    with migrated_db.connect() as connection:
+        a = UUID(_repository(connection, installation_external_id=17))
+        b = UUID(_repository(connection, installation_external_id=18))
+        installation = connection.scalar(
+            text("SELECT provider_installation_id FROM repositories WHERE id = :id"),
+            {"id": a},
+        )
+        a2 = uuid4()
+        connection.execute(
+            text(
+                "INSERT INTO repositories "
+                "(id, provider_installation_id, external_id, full_name, default_branch, "
+                "web_url) VALUES (:id, :installation, 102, 'octo/web', 'main', "
+                "'https://github.com/octo/web')"
+            ),
+            {"id": a2, "installation": installation},
+        )
+        connection.commit()
+        neighbour = _sibling(connection, a, external_id=103, installation_external_id=19)
+        async_engine = create_async_engine(
+            database_url,
+            connect_args={"options": f"-csearch_path={schema}"},
+            poolclass=NullPool,
+        )
+        try:
+            factory = async_sessionmaker(async_engine, expire_on_commit=False)
+            yield _Fleet(_Index(factory, a, b), installation, a2, neighbour)
+        finally:
+            asyncio.run(async_engine.dispose())
 
 
 def _sync(index: _Index) -> SyncInstallationRepositories:

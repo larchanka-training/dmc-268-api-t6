@@ -95,9 +95,14 @@ def test_a_port_error_propagates_and_nothing_is_committed() -> None:
     assert uow.rolled_back is True
 
 
-def test_only_review_system_v5_has_a_retrieved_section() -> None:
-    assert frozenset({("review.system", "v5")}) == RETRIEVED_PROMPT_VERSIONS
+def test_review_system_v5_and_v7_have_a_retrieved_section() -> None:
+    assert frozenset({("review.system", "v5"), ("review.system", "v7")}) == (
+        RETRIEVED_PROMPT_VERSIONS
+    )
+    assert has_retrieved_section("review.system", "v7") is True
     assert has_retrieved_section("review.system", "v5") is True
+    # The A/B drafts of #399 keep v6; no packaged prompt has it.
+    assert has_retrieved_section("review.system", "v6") is False
     assert has_retrieved_section("review.system", "v4") is False
     assert has_retrieved_section("review.system", "v3") is False
 
@@ -114,17 +119,18 @@ def test_the_capability_set_is_read_when_the_gate_asks(monkeypatch: pytest.Monke
     assert has_retrieved_section("review.verifier", "v6") is False
 
 
-def test_no_review_prompt_hides_retrieved_comments_until_v7() -> None:
-    # #498 Part 1: the blocks of a v5 run stay as they are.
-    assert frozenset() == COMMENT_FREE_PROMPT_VERSIONS
+def test_only_review_system_v7_hides_retrieved_comments() -> None:
+    # The blocks of a v5 run stay as they are.
+    assert frozenset({("review.system", "v7")}) == COMMENT_FREE_PROMPT_VERSIONS
+    assert hides_retrieved_comments("review.system", "v7") is True
     assert hides_retrieved_comments("review.system", "v5") is False
 
 
 def test_the_comment_set_is_read_when_the_gate_asks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        rag_index, "COMMENT_FREE_PROMPT_VERSIONS", frozenset({("review.system", "v7")})
+        rag_index, "COMMENT_FREE_PROMPT_VERSIONS", frozenset({("review.system", "v5")})
     )
 
-    assert hides_retrieved_comments("review.system", "v7") is True
-    assert hides_retrieved_comments("review.system", "v5") is False
-    assert hides_retrieved_comments("review.verifier", "v7") is False
+    assert hides_retrieved_comments("review.system", "v5") is True
+    assert hides_retrieved_comments("review.system", "v7") is False
+    assert hides_retrieved_comments("review.verifier", "v5") is False

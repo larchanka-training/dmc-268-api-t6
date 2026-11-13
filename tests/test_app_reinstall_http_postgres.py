@@ -7,8 +7,6 @@ import functools
 import hashlib
 import hmac
 import json
-import os
-from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -33,6 +31,11 @@ from app.modules.auth.application.refresh_session import RefreshLocalSession
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
 )
+from app.modules.repositories.infrastructure.models import ProviderInstallation
+from app.modules.workspaces.application.link_github_installations import GitHubInstallation
+from app.modules.workspaces.infrastructure.github_repository_rebinding import (
+    SqlAlchemyGitHubRepositoryRebinding,
+)
 from tests.portal_postgres import (
     HEAD,
     INSTALL_A,
@@ -43,17 +46,9 @@ from tests.portal_postgres import (
     RUN_DONE,
     WS_A,
     Env,
-    portal_schema,
 )
 
-
-@pytest.fixture
-def reinstall_env() -> Iterator[Env]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    with portal_schema(database_url, None) as env:
-        yield env
+pytest_plugins = ("tests.portal_postgres",)
 
 
 _SECRET = "issue113-signed-delivery"
@@ -64,6 +59,111 @@ _RULE = [{"name": "Custom", "include": ["**/*.py"], "exclude": [], "checks": ["P
 async def read(factory: async_sessionmaker[AsyncSession], sql: str, **values: Any) -> list[Any]:
     async with factory() as session:
         return list((await session.execute(text(sql), values)).all())
+
+
+@pytest.mark.integration
+def test_rebinding_requests_rules_reads_for_each_moved_repository(portal_env: Env) -> None:
+    engine = portal_env.engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    target_id = UUID(int=225)
+    skipped_id = UUID(int=226)
+    second_moved_id = UUID(int=227)
+
+    async def rebind() -> None:
+        async with factory.begin() as session:
+            await session.execute(
+                text(
+                    "UPDATE provider_installations SET account_external_id=700, "
+                    "deleted_at=clock_timestamp() WHERE id=:id"
+                ),
+                {"id": INSTALL_A},
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO repositories (id, provider_installation_id, external_id, "
+                    "full_name, default_branch, web_url) "
+                    "VALUES (:id, :installation, 103, 'octo/skipped', 'main', "
+                    "'https://github.test/octo/skipped')"
+                ),
+                {"id": skipped_id, "installation": INSTALL_A},
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO repositories (id, provider_installation_id, external_id, "
+                    "full_name, default_branch, web_url) "
+                    "VALUES (:id, :installation, 104, 'octo/second', 'main', "
+                    "'https://github.test/octo/second')"
+                ),
+                {"id": second_moved_id, "installation": INSTALL_A},
+            )
+            session.add(
+                ProviderInstallation(
+                    id=target_id,
+                    workspace_id=WS_A,
+                    provider="github",
+                    external_id=29,
+                    account_external_id=700,
+                    provider_metadata={},
+                )
+            )
+            await session.flush()
+            target = await session.get(ProviderInstallation, target_id)
+            assert target is not None
+            await SqlAlchemyGitHubRepositoryRebinding(session).rebind(
+                target, GitHubInstallation(29, "octo", (101, 104), 700)
+            )
+
+    try:
+        assert (
+            asyncio.run(
+                read(
+                    factory,
+                    "SELECT refresh_requested_at FROM repository_rules_status "
+                    "WHERE repository_id=:id",
+                    id=REPO_A,
+                )
+            )
+            == []
+        )
+        asyncio.run(rebind())
+        for moved_id in (REPO_A, second_moved_id):
+            assert asyncio.run(
+                read(
+                    factory,
+                    "SELECT provider_installation_id, installation_available "
+                    "FROM repositories WHERE id=:id",
+                    id=moved_id,
+                )
+            ) == [(target_id, True)]
+            ((requested_at,),) = asyncio.run(
+                read(
+                    factory,
+                    "SELECT refresh_requested_at FROM repository_rules_status "
+                    "WHERE repository_id=:id",
+                    id=moved_id,
+                )
+            )
+            assert requested_at is not None
+        assert asyncio.run(
+            read(
+                factory,
+                "SELECT provider_installation_id FROM repositories WHERE id=:id",
+                id=skipped_id,
+            )
+        ) == [(INSTALL_A,)]
+        assert (
+            asyncio.run(
+                read(
+                    factory,
+                    "SELECT refresh_requested_at FROM repository_rules_status "
+                    "WHERE repository_id=:id",
+                    id=skipped_id,
+                )
+            )
+            == []
+        )
+    finally:
+        asyncio.run(engine.dispose())
 
 
 async def seed_custom(factory: async_sessionmaker[AsyncSession]) -> None:
@@ -173,7 +273,7 @@ def assert_denied(client: TestClient, headers: dict[str, str]) -> None:
 @pytest.mark.integration
 @pytest.mark.parametrize("account_id", [700, 701])
 def test_signed_reinstall_requires_each_users_fresh_oauth_and_preserves_only_same_account(
-    reinstall_env: Env, monkeypatch: pytest.MonkeyPatch, account_id: int
+    portal_env: Env, monkeypatch: pytest.MonkeyPatch, account_id: int
 ) -> None:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     for name, value in {
@@ -237,7 +337,7 @@ def test_signed_reinstall_requires_each_users_fresh_oauth_and_preserves_only_sam
         assert request.url.path.endswith("/labels")
         return httpx.Response(201, json={})
 
-    engine = reinstall_env.engine()
+    engine = portal_env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     resources = ReviewsApiResources(engine, factory)
     oauth = httpx.AsyncClient(base_url="https://github.test", transport=httpx.MockTransport(github))

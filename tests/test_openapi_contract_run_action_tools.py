@@ -164,13 +164,20 @@ TOOL_PASS_THROUGH = frozenset(
         ("app/bootstrap/run_step_listener.py", "_event", _TOOL_FIELD, "str(data['tool'])"),
         ("app/main.py", "_run_step_frame", _TOOL_FIELD, "step.tool"),
         ("app/bootstrap/run_step_listener.py", "_event", _REFERENCE, "'tool'"),
-        # The table's own name and a constraint named after it, in the model that defines them.
+        # The table's own name and a constraint and an index named after it, in the model that
+        # defines them.
         (f"{_REVIEWS}/infrastructure/models.py", "RunAction", _REFERENCE, "'run_actions'"),
         (
             f"{_REVIEWS}/infrastructure/models.py",
             "RunAction",
             _REFERENCE,
             "'ck_run_actions_response_location'",
+        ),
+        (
+            f"{_REVIEWS}/infrastructure/models.py",
+            "RunAction",
+            _REFERENCE,
+            "'ix_run_actions_postprocess_run_index'",
         ),
     }
 )

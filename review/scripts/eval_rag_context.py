@@ -54,6 +54,7 @@ from app.modules.reviews.application.prompt_builder import (
 )
 from app.modules.reviews.application.rag_context import CachedBlobSource
 from app.modules.reviews.application.rag_index import (
+    RETRIEVED_PROMPT_VERSIONS,
     has_retrieved_section,
     hides_retrieved_comments,
 )
@@ -81,22 +82,31 @@ from review.scripts.rag_snapshot import INDEX_FILE, FrozenGraphRetriever, parse_
 
 Arm = Literal["A", "B"]
 
-# The file of that prompt: what ``build_arm_input`` renders (``eval_live`` checks ``--system``
-# against it).
-SYSTEM_PROMPT_V5 = Path(__file__).resolve().parents[1] / "prompts" / "review.system.v5.md"
-
-# The pinned review prompt both arms run (Р-6, #82): v5, the only one with a retrieved section.
-_PROMPT_KEY = "review.system:v5"
+# The packaged prompts: ``build_arm_input`` renders the review.system file of its version
+# (``eval_live`` checks ``--system`` against it).
+PROMPTS = Path(__file__).resolve().parents[1] / "prompts"
 
 # The manifest of a case is reproducible: no random call id.
 _CALL_ID = UUID(int=1460)
 
 
+def system_prompt(version: str) -> Path:
+    """The packaged review.system file both arms run at ``version`` (Р-6, #82). Only a version
+    with a retrieved section can run: on any other arm B would show nothing arm A does not."""
+    if not has_retrieved_section("review.system", version):
+        shown = ", ".join(sorted(v for k, v in RETRIEVED_PROMPT_VERSIONS if k == "review.system"))
+        raise ValueError(
+            f"review.system {version} has no retrieved section: the RAG arms run one that has "
+            f"({shown})"
+        )
+    return PROMPTS / f"review.system.{version}.md"
+
+
 @dataclass(frozen=True)
 class ArmInput:
     """What one arm sends: the payload of the production build, the prompt input mapped
-    from it as ``ExecuteReviewRun`` maps it, the rendered v5 prompt and its manifest, and
-    the ``ReviewCase`` that makes the gateway send that prompt."""
+    from it as ``ExecuteReviewRun`` maps it, the rendered prompt and its manifest, and the
+    ``ReviewCase`` that makes the gateway send that prompt."""
 
     payload: ReviewContextPayload
     context: ReviewContext
@@ -140,8 +150,9 @@ class MemoryBlobUnitOfWork:
         return None
 
 
-def _policy_snapshot(system: bytes, review_model: str) -> PolicySnapshot:
-    """The arm-``none`` snapshot: no repository rules, no AGENTS.md, the pinned v5 prompt.
+def _policy_snapshot(system: bytes, review_model: str, version: str) -> PolicySnapshot:
+    """The arm-``none`` snapshot: no repository rules, no AGENTS.md, the pinned review.system
+    prompt of ``version``.
 
     ``system`` is the file of the prompt, checked against its pin before it is bound
     (as ``eval_live._prompt_bindings`` does, by the SHA-256 of the bytes).
@@ -152,11 +163,12 @@ def _policy_snapshot(system: bytes, review_model: str) -> PolicySnapshot:
     ``eval_execution_profile`` (one construction for every capture, covered by the static
     digest of all of them). ``review_model`` is the model the run will call.
     """
+    key = f"review.system:{version}"
     checksum = hashlib.sha256(system).hexdigest()
-    if checksum != PINNED_PROMPT_CHECKSUMS[_PROMPT_KEY]:
+    if checksum != PINNED_PROMPT_CHECKSUMS[key]:
         raise PolicyError(
             PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
-            f"{_PROMPT_KEY} has checksum {checksum}, pinned {PINNED_PROMPT_CHECKSUMS[_PROMPT_KEY]}",
+            f"{key} has checksum {checksum}, pinned {PINNED_PROMPT_CHECKSUMS[key]}",
         )
     return build_policy_snapshot(
         RunPolicyPins(
@@ -165,7 +177,7 @@ def _policy_snapshot(system: bytes, review_model: str) -> PolicySnapshot:
             "0" * 40,
             UUID(int=4),
             "2" * 64,
-            eval_prompt_bindings(checksum, "v5"),
+            eval_prompt_bindings(checksum, version),
             eval_execution_profile("fast", review_model),
         ),
         rules=missing_document(RULES_DOCUMENT_PATH),
@@ -188,16 +200,18 @@ def _frozen_graph(case_dir: Path, base_id: str) -> FrozenGraphRetriever:
     return FrozenGraphRetriever(frozen)
 
 
-async def build_arm_input(case_dir: Path, arm: Arm, *, review_model: str) -> ArmInput:
-    """The input of ``arm`` for the case in ``case_dir``.
+async def build_arm_input(case_dir: Path, arm: Arm, *, review_model: str, version: str) -> ArmInput:
+    """The input of ``arm`` for the case in ``case_dir``, under review.system ``version``.
 
     Both arms run the same production build; arm A passes ``rag=None``, arm B a ``RagPlan``
     with the frozen retriever. Raises ``PolicyError`` if the gateway's provenance guard
-    would refuse the call, and ``ValueError`` for a change production would count as
-    withheld (a lock or generated file): ``ReviewCase`` cannot carry that count.
+    would refuse the call, and ``ValueError`` for a version without a retrieved section or a
+    change production would count as withheld (a lock or generated file): ``ReviewCase``
+    cannot carry that count.
     """
     if arm not in ("A", "B"):
         raise ValueError(f"unknown arm {arm!r}: expected 'A' or 'B'")
+    system_path = system_prompt(version)
     case = load_snapshot(case_dir)
     head_id = case.head_id
     retriever = _frozen_graph(case_dir, case.base_id)
@@ -223,8 +237,8 @@ async def build_arm_input(case_dir: Path, arm: Arm, *, review_model: str) -> Arm
     )
     diff_map = snapshot_diff_map(case, meta)
 
-    system_bytes = SYSTEM_PROMPT_V5.read_bytes()
-    snapshot = _policy_snapshot(system_bytes, review_model)
+    system_bytes = system_path.read_bytes()
+    snapshot = _policy_snapshot(system_bytes, review_model, version)
     source = SnapshotRevisionSource({case.base_id: case.base, head_id: case.head})
     blobs = CachedBlobSource(
         repository_id=REPOSITORY_ID,
@@ -297,6 +311,8 @@ async def build_arm_input(case_dir: Path, arm: Arm, *, review_model: str) -> Arm
     return ArmInput(payload, context, prompt_builder.build_prompt(context), manifest, review)
 
 
-async def build_case_input(case_dir: Path, arm: Arm, *, review_model: str) -> ReviewCase:
+async def build_case_input(
+    case_dir: Path, arm: Arm, *, review_model: str, version: str
+) -> ReviewCase:
     """The ``ReviewCase`` of ``arm``: what ``review_case`` sends through the real gateway."""
-    return (await build_arm_input(case_dir, arm, review_model=review_model)).case
+    return (await build_arm_input(case_dir, arm, review_model=review_model, version=version)).case

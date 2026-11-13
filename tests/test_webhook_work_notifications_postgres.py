@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
@@ -15,19 +14,10 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
-from alembic.config import Config
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from alembic import command
 from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
 from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
     SqlAlchemyGitHubWebhookReceiptUnitOfWork,
@@ -40,54 +30,10 @@ from app.modules.workspaces.application.link_github_installations import (
 from app.modules.workspaces.infrastructure.github_installation_links import (
     SqlAlchemyGitHubInstallationLinkUnitOfWork,
 )
+from tests.webhook_notifications_postgres import Database
 
+pytest_plugins = ("tests.webhook_notifications_postgres",)
 pytestmark = pytest.mark.integration
-
-
-@dataclass(frozen=True)
-class Database:
-    url: str
-    schema: str
-
-    def engine(self) -> AsyncEngine:
-        return create_async_engine(
-            self.url,
-            connect_args={"options": f"-csearch_path={self.schema}"},
-            poolclass=NullPool,
-        )
-
-
-@pytest.fixture
-def database() -> Iterator[Database]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    with migrated_database(database_url) as isolated_database:
-        yield isolated_database
-
-
-@contextmanager
-def migrated_database(database_url: str) -> Iterator[Database]:
-    """Provide an isolated migrated schema; callers decide whether a DB is configured."""
-    schema = f"test_webhook_notify_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
-            try:
-                yield Database(database_url, schema)
-            finally:
-                connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
-    finally:
-        engine.dispose()
 
 
 @contextmanager

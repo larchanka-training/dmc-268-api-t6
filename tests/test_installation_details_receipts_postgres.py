@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -20,13 +19,10 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from alembic.config import Config
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.bootstrap.reviews_api import ReviewsApiResources
 from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
@@ -44,42 +40,15 @@ from app.modules.workspaces.infrastructure.github_installation_links import (
 )
 from app.modules.workspaces.infrastructure.models import Workspace
 from tests.github_webhook_fixtures import load_github_webhook_fixture
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 START = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 INSTALLATION_EXTERNAL_ID = 1000001
 FULL_NAME = "example-owner/example-repo-two"
 REPOSITORY_PATH = f"/repos/{FULL_NAME}"
 _RECEIVER_LOGGER = "app.modules.integrations.webhooks.application.receive_github_delivery"
-
-
-@dataclass(frozen=True)
-class Database:
-    url: str
-    schema: str
-
-
-@pytest.fixture
-def database() -> Iterator[Database]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_details_receipts_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
-            yield Database(database_url, schema)
-            connection.rollback()
-            connection.execute(text("SET search_path TO public"))
-            connection.execute(DropSchema(schema, cascade=True))
-            connection.commit()
-    finally:
-        engine.dispose()
 
 
 @dataclass
@@ -184,7 +153,7 @@ class Worker:
 
 
 @asynccontextmanager
-async def _worker(database: Database, github: GitHub) -> AsyncIterator[Worker]:
+async def _worker(database: MigratedDatabase, github: GitHub) -> AsyncIterator[Worker]:
     engine = create_async_engine(
         database.url,
         connect_args={"options": f"-csearch_path={database.schema}"},
@@ -234,14 +203,14 @@ async def _worker(database: Database, github: GitHub) -> AsyncIterator[Worker]:
 
 @pytest.mark.integration
 def test_unreadable_details_are_deferred_after_three_attempts_and_a_login_revives_the_receipt(
-    database: Database, caplog: pytest.LogCaptureFixture
+    migrated_db: MigratedDatabase, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A 404 on ``GET /repos`` survives attempt exhaustion; the next login gives it a retry."""
     github = GitHub()
 
     async def scenario() -> dict[str, object]:
         seen: dict[str, object] = {}
-        async with _worker(database, github) as worker:
+        async with _worker(migrated_db, github) as worker:
             await worker.receive()
             for step in (1, 2, 3):
                 seen[f"handled_{step}"] = await worker.sweep()
@@ -303,14 +272,14 @@ def test_unreadable_details_are_deferred_after_three_attempts_and_a_login_revive
 
 @pytest.mark.integration
 def test_a_details_response_without_branch_or_url_fails_for_good_and_a_login_does_not_revive_it(
-    database: Database,
+    migrated_db: MigratedDatabase,
 ) -> None:
     """A permanent fault stays on the failed-dispatch path: bounded, terminal, never woken."""
     github = GitHub(details_status=200, details_body={"id": 1000005, "full_name": FULL_NAME})
 
     async def scenario() -> dict[str, object]:
         seen: dict[str, object] = {}
-        async with _worker(database, github) as worker:
+        async with _worker(migrated_db, github) as worker:
             await worker.receive()
             for step in (1, 2, 3):
                 seen[f"handled_{step}"] = await worker.sweep()
@@ -349,14 +318,14 @@ def test_a_details_response_without_branch_or_url_fails_for_good_and_a_login_doe
 
 @pytest.mark.integration
 def test_unreadable_details_are_revived_by_the_hourly_tick_without_a_login(
-    database: Database,
+    migrated_db: MigratedDatabase,
 ) -> None:
     """A GitHub outage that outlasts three attempts heals through the hourly revival alone."""
     github = GitHub()
 
     async def scenario() -> dict[str, object]:
         seen: dict[str, object] = {}
-        async with _worker(database, github) as worker:
+        async with _worker(migrated_db, github) as worker:
             await worker.receive()
             await worker.received_at(START)
             for _ in (1, 2, 3):
@@ -402,14 +371,14 @@ def test_unreadable_details_are_revived_by_the_hourly_tick_without_a_login(
 
 @pytest.mark.integration
 def test_a_receipt_that_keeps_failing_is_revived_again_at_the_next_hourly_tick(
-    database: Database,
+    migrated_db: MigratedDatabase,
 ) -> None:
     """A revived cycle is spent within the hour, so every hourly tick revives the receipt."""
     github = GitHub()
 
     async def scenario() -> dict[str, object]:
         seen: dict[str, object] = {}
-        async with _worker(database, github) as worker:
+        async with _worker(migrated_db, github) as worker:
             await worker.receive()
             await worker.received_at(START)
             for _ in (1, 2, 3):
@@ -444,14 +413,14 @@ def test_a_receipt_that_keeps_failing_is_revived_again_at_the_next_hourly_tick(
 
 @pytest.mark.integration
 def test_a_receipt_received_eight_days_before_the_revival_tick_stays_deferred(
-    database: Database,
+    migrated_db: MigratedDatabase,
 ) -> None:
     """Outside the seven-day window only a login or a new delivery revives the receipt."""
     github = GitHub()
 
     async def scenario() -> dict[str, object]:
         seen: dict[str, object] = {}
-        async with _worker(database, github) as worker:
+        async with _worker(migrated_db, github) as worker:
             await worker.receive()
             await worker.received_at(START)
             for _ in (1, 2, 3):

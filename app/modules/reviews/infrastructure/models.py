@@ -387,6 +387,16 @@ class RunPolicySnapshot(Base):
 
 class ContextPayload(Base):
     __tablename__ = "context_payloads"
+    __table_args__ = (
+        # The stage stop of summary_only_stop_conditions, as the run reads send it.
+        Index(
+            "ix_context_payloads_summary_only_stop",
+            "run_id",
+            postgresql_where=text(
+                "(summary ->> 'status') = 'summary_only' AND NOT (summary ? 'reviewable_lines')"
+            ),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id"), nullable=False, unique=True)
@@ -405,6 +415,12 @@ class Finding(Base):
         ),
         CheckConstraint("confidence >= 0 AND confidence <= 1", name="ck_findings_confidence_range"),
         Index("ix_findings_run_id", "run_id"),
+        Index(
+            "ix_findings_published_run_id",
+            "run_id",
+            postgresql_include=["severity", "category"],
+            postgresql_where=text("published IS TRUE AND drop_reason IS NULL"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -455,6 +471,12 @@ class RunAction(Base):
         CheckConstraint(
             "response IS NULL OR response_ref IS NULL",
             name="ck_run_actions_response_location",
+        ),
+        Index(
+            "ix_run_actions_postprocess_run_index",
+            "run_id",
+            text("index DESC"),
+            postgresql_where=text("tool = 'review.postprocess'"),
         ),
     )
 

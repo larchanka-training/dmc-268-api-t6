@@ -128,6 +128,30 @@ def _hashed(item: ProcessedFinding) -> HashedFinding:
     )
 
 
+def _change_summary_trace(
+    verified: VerifiedReviewOutput | None, processed: ProcessedReviewOutput
+) -> dict[str, object]:
+    """What became of the change summary agent's answer; nothing when it was not called.
+
+    A call the gateway refused before sending writes no ``llm.call``, so its reason is
+    seen here (#316 Part 3).
+    """
+    if verified is None:
+        return {}
+    if verified.change_summary_error is not None:
+        return {"change_summary": {"status": "failed", "error_code": verified.change_summary_error}}
+    if not verified.change_summary:
+        return {}
+    shown = processed.change_summary_shown
+    return {
+        "change_summary": {
+            "status": "shown" if shown else "no_room",
+            "received": len(verified.change_summary),
+            "shown": shown,
+        }
+    }
+
+
 def _github_rule_link(repository_full_name: str, lines: RuleLineRef) -> str:
     """The rules lines on GitHub at the revision they were read from.
 
@@ -264,6 +288,7 @@ class StoreReviewOutput:
                 raw_output.incomplete_paths if isinstance(raw_output, VerifiedReviewOutput) else ()
             ),
             summary_reason=context.summary_reason,
+            change_summary=verified.change_summary if verified is not None else (),
         )
         coverage = processed.coverage
         if processed.summary is None:
@@ -330,6 +355,7 @@ class StoreReviewOutput:
                     "findings_hash": hash_,
                     # Kept here as well: a huge llm.review_output may be truncated (D1).
                     "summary": parsed.summary.model_dump(),
+                    **_change_summary_trace(verified, processed),
                 },
                 started_at=started_at,
                 duration_ms=int((time.monotonic() - started) * 1000),

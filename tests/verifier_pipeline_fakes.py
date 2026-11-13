@@ -9,6 +9,8 @@ from uuid import UUID
 
 from app.modules.reviews.application.conventions import CachedConventions, GeneratedConventions
 from app.modules.reviews.application.execute_review import ReviewPromptInput
+from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
+from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.policy_snapshot import (
     POLICY_SNAPSHOT_SCHEMA_VERSION,
     PolicySnapshot,
@@ -21,6 +23,14 @@ from app.modules.reviews.application.prompt_builder import (
     ReviewContext,
     file_block_id,
 )
+from app.modules.reviews.application.review_output import (
+    FindingPostProcessingInput,
+    ReviewOutput,
+    ReviewPublication,
+)
+from app.modules.reviews.application.run_coverage import snapshot_vcs_file
+from app.modules.reviews.application.store_review_output import PublishingGuard
+from tests.findings_post_processor_fakes import _diff_map_from_vcs
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
     make_complete_prompt_bindings,
@@ -29,6 +39,7 @@ from tests.policy_snapshot_fakes import (
 )
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000013901")
+WORKER_ID = "test-worker"
 MAIN_BLOCK_ID = file_block_id("app/main.py")
 SUMMARY = {"problem": "A bug.", "done_well": "Small change.", "effort": "small"}
 
@@ -145,3 +156,45 @@ class FakeUnitOfWork:
 class FakeQueue:
     async def publish_review(self, pointer: Any) -> None:
         pass
+
+
+class FakePublishingRepository:
+    """``StoreReviewOutput``'s repository for the run of ``FakeRepository``: ``app/main.py``
+    with lines 10 and 11 added, held by ``WORKER_ID``. It keeps what the store wrote."""
+
+    def __init__(self) -> None:
+        self.stored: list[ProcessedReviewOutput] = []
+        self.entered: list[dict[str, Any]] = []
+
+    async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
+        patch = "@@ -9,0 +10,2 @@\n+x = 1\n+y = 2"
+        main = DiffSnapshot("app/main.py", patch, "d" * 40, review_patch=patch)
+        return FindingPostProcessingInput(
+            diff_map=_diff_map_from_vcs(snapshot_vcs_file(main)),
+            checked_paths=frozenset({"app/main.py"}),
+            rule_names=frozenset(),
+            allowed_v2_rules=frozenset(),
+        )
+
+    async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
+        return PublishingGuard(
+            state="running",
+            worker_id=WORKER_ID,
+            cancel_requested=False,
+            head_sha="c" * 40,
+            head_current=True,
+            repository_review_event="APPROVE",
+        )
+
+    async def store_review_output(
+        self,
+        run_id: UUID,
+        answer: dict[str, Any] | None,
+        parsed: ReviewOutput,
+        processed: ProcessedReviewOutput,
+    ) -> ReviewPublication:
+        self.stored.append(processed)
+        return ReviewPublication(head_sha="c" * 40, findings=(), review_body=processed.review_body)
+
+    async def enter_publishing(self, run_id: UUID, **kwargs: Any) -> None:
+        self.entered.append(kwargs)

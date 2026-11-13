@@ -44,10 +44,10 @@ def parse_retry_after(
         if len(digits) > len(str(_CEILING_SECONDS)):
             return RETRY_AFTER_CEILING
         return timedelta(seconds=min(int(digits), _CEILING_SECONDS))
-    retry_at = _aware_http_date(value)
+    retry_at = parse_http_date(value)
     if retry_at is None:
         return None
-    reference = _aware_http_date(date) if date else None
+    reference = parse_http_date(date) if date else None
     if reference is None:
         # CONTRACT: an injected now() returns an aware datetime, like the default.
         reference = (now or _utc_now)()
@@ -55,7 +55,7 @@ def parse_retry_after(
     return min(max(retry_at - reference, timedelta(0)), RETRY_AFTER_CEILING)
 
 
-def _aware_http_date(value: str) -> datetime | None:
+def parse_http_date(value: str) -> datetime | None:
     try:
         parsed = parsedate_to_datetime(value)
     except ValueError:

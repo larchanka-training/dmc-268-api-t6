@@ -16,15 +16,14 @@ resurrects an index a concurrent toggle turned off, and its purges leave GC no r
 A webhook trigger's index update request resolves the delivery's repository under the same
 effective-RAG condition and writes the target and a fresh marker of a live index only.
 
-Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
-Each test migrates its own schema to head and drops it afterwards.
+Opt-in: TEST_DATABASE_URL must target a test database whose user can create databases.
+Each test gets a clone of a database migrated to head, dropped afterwards.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -32,12 +31,10 @@ from functools import partial
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.modules.code_index.application.index_refresh import RequestIndexRefresh
 from app.modules.code_index.application.index_store import IndexedFile
 from app.modules.code_index.application.leader_tasks import (
@@ -71,7 +68,6 @@ from tests.code_index_postgres import (
     _Index,
     _mark_failed,
     _marker,
-    _migration_config,
     _module,
     _purge,
     _read,
@@ -82,6 +78,9 @@ from tests.code_index_postgres import (
     _wait_until_blocked,
     _write,
 )
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 
 @dataclass(frozen=True)
@@ -93,43 +92,27 @@ class _Fleet:
 
 
 @pytest.fixture
-def fleet() -> Iterator[_Fleet]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_code_index_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                command.upgrade(_migration_config(connection), "head")
-                ids = tuple(
-                    sorted(
-                        UUID(_repository(connection, installation_external_id=17 + number))
-                        for number in range(5)
-                    )
-                )
-                connection.commit()
-                async_engine = create_async_engine(
-                    database_url,
-                    connect_args={"options": f"-csearch_path={schema}"},
-                    poolclass=NullPool,
-                )
-                try:
-                    factory = async_sessionmaker(async_engine, expire_on_commit=False)
-                    yield _Fleet(_Index(factory, ids[0], ids[1]), ids)
-                finally:
-                    asyncio.run(async_engine.dispose())
-            finally:
-                connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
-    finally:
-        engine.dispose()
+def fleet(migrated_db: MigratedDatabase) -> Iterator[_Fleet]:
+    database_url = migrated_db.url
+    schema = migrated_db.schema
+    with migrated_db.connect() as connection:
+        ids = tuple(
+            sorted(
+                UUID(_repository(connection, installation_external_id=17 + number))
+                for number in range(5)
+            )
+        )
+        connection.commit()
+        async_engine = create_async_engine(
+            database_url,
+            connect_args={"options": f"-csearch_path={schema}"},
+            poolclass=NullPool,
+        )
+        try:
+            factory = async_sessionmaker(async_engine, expire_on_commit=False)
+            yield _Fleet(_Index(factory, ids[0], ids[1]), ids)
+        finally:
+            asyncio.run(async_engine.dispose())
 
 
 async def _with_garbage(index: _Index, after: UUID | None = None, limit: int = 10) -> list[UUID]:

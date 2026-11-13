@@ -1,6 +1,7 @@
 """Shared fake VCS, indexer harness and repository fixture for PostgreSQL index tests.
 
-The schema-migrating ``code_index_database`` fixture lives in ``tests.code_index_postgres``.
+The ``code_index_database`` fixture, a clone of the migrated template, lives in
+``tests.code_index_postgres``.
 """
 
 from __future__ import annotations
@@ -8,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
-import os
 import tarfile
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
@@ -125,7 +125,7 @@ def database(code_index_database: Connection) -> Iterator[_Database]:
     connection.commit()
     schema = connection.scalar(text("SELECT current_schema()"))
     engine = create_async_engine(
-        os.environ["TEST_DATABASE_URL"],
+        connection.engine.url,
         connect_args={"options": f"-csearch_path={schema}"},
         poolclass=NullPool,
     )

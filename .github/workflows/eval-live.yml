@@ -41,13 +41,14 @@ on:
           - malicious
         default: legacy
       review_prompt:
-        description: "Review prompt: v3, or v4 or v5 (snapshot path: needs policy_arm none, or valid or malicious with corpus rules; corpus rag needs v5)"
+        description: "Review prompt: v3, or v4, v5 or v7 (snapshot path: needs policy_arm none, or valid or malicious with corpus rules; corpus rag needs v5 or v7)"
         required: false
         type: choice
         options:
           - v3
           - v4
           - v5
+          - v7
         default: v3
       review_prompt_file:
         description: "Review prompt file for an A/B of prompt versions: directly in review/prompts/, with key review.system; overrides review_prompt (not with corpus rag)"
@@ -104,9 +105,9 @@ jobs:
           if [[ -z "$file" ]]; then
             exit 0
           fi
-          # The guard of the corpus step reads review_prompt only, and the RAG arms fix v5.
+          # The guard of the corpus step reads review_prompt only: a RAG run names its prompt there.
           if [[ "${EVAL_CORPUS:-}" == rag ]]; then
-            echo "::error::corpus rag fixes review_prompt v5; leave review_prompt_file empty." >&2
+            echo "::error::corpus rag takes its prompt from review_prompt; leave review_prompt_file empty." >&2
             exit 1
           fi
           if [[ ! "$file" =~ ^review/prompts/[A-Za-z0-9][A-Za-z0-9._-]*\.md$ ]]; then
@@ -148,8 +149,9 @@ jobs:
             fi
             profile=(--profile rules)
           elif [[ "$EVAL_CORPUS" == rag ]]; then
-            # The offline RAG build fixes v5 under policy arm none; eval_live.py refuses anything
-            # else too, but only after the corpus is provisioned.
+            # The offline RAG build needs a prompt with a retrieved section (v5, v7) under policy
+            # arm none; eval_live.py refuses anything else too, but only after the corpus is
+            # provisioned.
             if [[ ! "${EVAL_RAG_ARM:-}" =~ ^(none|graph)$ ]]; then
               echo "::error::corpus rag needs rag_arm none or graph." >&2
               exit 1
@@ -158,8 +160,8 @@ jobs:
               echo "::error::corpus rag needs policy_arm none." >&2
               exit 1
             fi
-            if [[ "${EVAL_REVIEW_PROMPT:-}" != v5 ]]; then
-              echo "::error::corpus rag needs review_prompt v5." >&2
+            if [[ ! "${EVAL_REVIEW_PROMPT:-}" =~ ^(v5|v7)$ ]]; then
+              echo "::error::corpus rag needs review_prompt v5 or v7." >&2
               exit 1
             fi
             profile=(--profile rag)

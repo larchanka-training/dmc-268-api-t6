@@ -36,7 +36,10 @@ from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
-from app.modules.reviews.infrastructure.llm.models import GatewayVerifierModel
+from app.modules.reviews.infrastructure.llm.models import (
+    GatewayChangeSummaryModel,
+    GatewayVerifierModel,
+)
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
 from app.modules.reviews.infrastructure.llm.transport import ChatRequest, ChatResponse
 from tests.llm_fakes import FakeClock, context_checkpoint
@@ -80,8 +83,8 @@ def _github(run_source: Callable[[UUID], GitHubRunSource] | None = None) -> work
 # ---------- the composition ----------
 
 
-def test_the_production_factory_gives_each_attempt_a_reflection_pass_bound_to_it() -> None:
-    # Building the pass never calls the gateway: the window is read when the verifier runs.
+def test_each_attempt_gets_a_reflection_pass_and_a_change_summary_model_bound_to_it() -> None:
+    # Building them never calls the gateway: the window is read when the verifier runs.
     gateway = cast(LlmGateway, object())
 
     provider = worker.attempt_provider_factory(gateway, _github())(CLAIMED)
@@ -96,6 +99,12 @@ def test_the_production_factory_gives_each_attempt_a_reflection_pass_bound_to_it
     assert verifier._run.attempt == 2
     assert verifier._run.deadline == DEADLINE
     assert verifier._run.engine == "fast"
+    model = provider.change_summary
+    assert isinstance(model, GatewayChangeSummaryModel)
+    assert model._gateway is gateway
+    assert model._run.run_id == CLAIMED.run_id
+    assert model._run.attempt == 2
+    assert model._run.deadline == DEADLINE
 
 
 class _NoPromptFiles:
@@ -121,11 +130,12 @@ def test_building_an_attempt_reads_no_verifier_prompt_file(
     assert isinstance(provider.reflection_pass, ReflectionPass)
 
 
-def test_a_worker_without_llm_settings_builds_no_reflection_pass() -> None:
+def test_a_worker_without_llm_settings_builds_no_reflection_pass_or_change_summary_model() -> None:
     provider = worker.attempt_provider_factory(None, _github())(CLAIMED)
 
     assert isinstance(provider, worker.AttemptReviewProvider)
     assert provider.reflection_pass is None
+    assert provider.change_summary is None
 
 
 def _settings() -> worker.WorkerSettings:
@@ -180,7 +190,7 @@ def _pipeline_kwargs(monkeypatch: pytest.MonkeyPatch, **compose: Any) -> dict[st
     return captured
 
 
-def test_the_queue_pipeline_hands_the_attempt_reflection_pass_to_the_review(
+def test_the_queue_pipeline_hands_the_attempt_reflection_pass_and_change_summary_model_to_review(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gateway = cast(LlmGateway, object())
@@ -192,9 +202,13 @@ def test_the_queue_pipeline_hands_the_attempt_reflection_pass_to_the_review(
     assert isinstance(reflection._model, GatewayVerifierModel)
     assert reflection._model._gateway is gateway
     assert reflection._model._run.attempt == CLAIMED.attempt
+    model = kwargs["change_summary"]
+    assert isinstance(model, GatewayChangeSummaryModel)
+    assert model._gateway is gateway
+    assert model._run.attempt == CLAIMED.attempt
 
 
-def test_an_injected_provider_runs_without_a_reflection_pass(
+def test_an_injected_provider_runs_without_a_reflection_pass_or_change_summary_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kwargs = _pipeline_kwargs(
@@ -204,10 +218,11 @@ def test_an_injected_provider_runs_without_a_reflection_pass(
     )
 
     assert kwargs["reflection_pass"] is None
+    assert kwargs["change_summary"] is None
 
 
 @pytest.mark.parametrize("with_stage", [False, True], ids=["no-stage", "stage"])
-def test_process_review_run_gives_the_reflection_pass_to_the_review(
+def test_process_review_run_gives_the_reflection_pass_and_the_change_summary_to_the_review(
     monkeypatch: pytest.MonkeyPatch, with_stage: bool
 ) -> None:
     captured: list[dict[str, Any]] = []
@@ -221,6 +236,7 @@ def test_process_review_run_gives_the_reflection_pass_to_the_review(
 
     monkeypatch.setattr(worker, "ExecuteReviewRun", RecordingRun)
     reflection = ReflectionPass(cast(Any, object()))
+    change_summary = cast(Any, object())
     stage = SimpleNamespace(excluded=lambda path: False) if with_stage else None
 
     assert asyncio.run(
@@ -231,28 +247,54 @@ def test_process_review_run_gives_the_reflection_pass_to_the_review(
             cast(Any, object()),
             context_stage=cast(Any, stage),
             reflection_pass=reflection,
+            change_summary=change_summary,
         )
     )
 
     assert len(captured) == 1
     assert captured[0]["reflection_pass"] is reflection
+    assert captured[0]["change_summary"] is change_summary
 
 
 # ---------- a v4-bound review through the gateway ----------
 
 
 class _Answers:
-    """The provider: the review answer first, then a verifier answer for the shown ids."""
+    """The provider: the review answer first, then a verifier answer for the shown ids.
+
+    The change summary agent's call (#316) is answered aside, in ``summaries``.
+    """
 
     def __init__(self, review: str) -> None:
         self.review = review
         self.requests: list[ChatRequest] = []
+        self.summaries: list[ChatRequest] = []
 
     async def complete(
         self, request: ChatRequest, *, checkpoint: RunProviderCheckpoint
     ) -> ChatResponse:
         await checkpoint()
-        self.requests.append(request)
+        if request.response_schema is not None and (
+            request.response_schema.name == "ChangeSummaryOutput"
+        ):
+            self.summaries.append(request)
+            content = json.dumps({"sentences": ["Adds a compute function."]})
+        else:
+            self.requests.append(request)
+            content = self._answer(request)
+        return ChatResponse(
+            raw={"choices": [{"message": {"content": content}}]},
+            content=content,
+            finish_reason="stop",
+            model=request.profile.model,
+            prompt_tokens=10,
+            completion_tokens=20,
+            cached_tokens=0,
+            cost=None,
+            cost_currency=None,
+        )
+
+    def _answer(self, request: ChatRequest) -> str:
         if len(self.requests) == 1:
             content = self.review
         elif len(self.requests) == 2:
@@ -275,17 +317,7 @@ class _Answers:
             )
         else:
             raise AssertionError("unexpected provider call")
-        return ChatResponse(
-            raw={"choices": [{"message": {"content": content}}]},
-            content=content,
-            finish_reason="stop",
-            model=request.profile.model,
-            prompt_tokens=10,
-            completion_tokens=20,
-            cached_tokens=0,
-            cost=None,
-            cost_currency=None,
-        )
+        return content
 
 
 class _Manifests:

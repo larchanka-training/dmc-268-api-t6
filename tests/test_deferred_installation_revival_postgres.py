@@ -7,22 +7,16 @@ schema; receipts are seeded directly. Opt-in with ``TEST_DATABASE_URL``.
 from __future__ import annotations
 
 import asyncio
-import os
-from collections.abc import Iterator
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
 import pytest
-from alembic.config import Config
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.modules.integrations.webhooks.application.revive_deferred_installation_deliveries import (
     ReviveDeferredInstallationDeliveries,
 )
@@ -32,6 +26,9 @@ from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts im
 from app.modules.integrations.webhooks.infrastructure.models import WebhookEvent
 from app.modules.repositories.infrastructure.models import ProviderInstallation
 from app.modules.workspaces.infrastructure.models import Workspace
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 NOW = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
 LINKED = 1000001
@@ -40,36 +37,6 @@ GITLAB_ONLY = 1000003
 # Deferred two hours before NOW and received a day before it: otherwise eligible.
 DEFERRED = datetime(2026, 10, 6, 10, 0, tzinfo=UTC)
 RECEIVED = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
-
-
-@dataclass(frozen=True)
-class Database:
-    url: str
-    schema: str
-
-
-@pytest.fixture
-def database() -> Iterator[Database]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_revival_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
-            yield Database(database_url, schema)
-            connection.rollback()
-            connection.execute(text("SET search_path TO public"))
-            connection.execute(DropSchema(schema, cascade=True))
-            connection.commit()
-    finally:
-        engine.dispose()
 
 
 def _receipt(
@@ -129,12 +96,12 @@ def _seed() -> list[WebhookEvent]:
 
 @pytest.mark.integration
 def test_revival_resets_only_old_enough_recent_installation_events_of_linked_installations(
-    database: Database,
+    migrated_db: MigratedDatabase,
 ) -> None:
     async def scenario() -> dict[str, Any]:
         engine = create_async_engine(
-            database.url,
-            connect_args={"options": f"-csearch_path={database.schema}"},
+            migrated_db.url,
+            connect_args={"options": f"-csearch_path={migrated_db.schema}"},
             poolclass=NullPool,
         )
         factory: async_sessionmaker[AsyncSession] = async_sessionmaker(

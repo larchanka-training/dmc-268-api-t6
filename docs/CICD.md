@@ -78,11 +78,13 @@ flowchart TD
 
 **Docs size budget** — отдельный workflow `docs-size-budget.yml` (#380), не job `ci-cd.yml`: срабатывает на PR, если изменились `docs/*.md` верхнего уровня или сам workflow, права `contents: read`. На merge-коммите PR (`fetch-depth: 2`) сравнивает размер каждого добавленного, изменённого или переименованного `docs/*.md` до (`HEAD^1`) и после (`HEAD`); переименованный файл сравнивается с размером под старым путём, подкаталоги `docs/` не проверяются, удалённые файлы и имена с управляющими символами пропускаются. Файл, который вырос и стал больше бюджета `DOCS_SIZE_BUDGET_BYTES` (81920 байт = 80 KiB), даёт annotation `warning` и строку job summary (файл, размер до и после, прирост, бюджет). Job не краснеет из-за размера и в required checks правил `main` не входит.
 
+**SYNC drift** — отдельный workflow `sync-drift.yml` (#270), не job `ci-cd.yml`: paths-фильтр нужен только ему. Срабатывает на PR, если изменились `.agents/**`, `.github/**` (весь каталог, который сканирует скрипт, сам workflow тоже) или `scripts/check_sync_drift.py`, и на каждый push в `main`; расписания нет; права `contents: read`. Ставит uv 0.12.11 и Python 3.13, как остальные джобы, и запускает скрипт через `uv run --no-project`: скрипт только на stdlib, окружение проекта не синхронизируется. Забирает `main` ui (`larchanka-training/dmc-268-ui-t6`, публичный, без токена) в `ui-main/` и сравнивает двумя шагами: `check_sync_drift.py markers` — побайтно все файлы под `.agents/` и `.github/` обоих репо со строкой `SYNC: mirrored in dmc-268-{ui,api}-t6/<путь>`, где `<путь>` — путь самого файла (цитата маркера в `.agents/README.md` и маркер внутри JSON не считаются); `check_sync_drift.py json-dirs` — `diff -r` JSON-путей без маркера из фразы «JSON files under … carry no marker» в sync map `.agents/README.md` обоих репо (каталоги целиком, включая `.jsonl` и `.diff`; `create-issue/examples/*/batch.json` — по файлам). Второй шаг идёт и после красного первого. Расхождение, файл только с одной стороны, каталог из sync map, которого нет ни в одном репо, — красный check `SYNC drift vs ui main` со списком файлов; sync map без этой фразы — тоже красный (exit 2). Источник — ui: между мержем PR в ui и копией в api check красный намеренно, это сигнал доделать копию, поэтому в required checks правил `main` он не входит. Порядок копирования — `.agents/README.md` § Sync map.
+
 **Deploy prod** — workflow `deploy-prod.yml` (#308): ручной запуск с `main`, обязательный однострочный `reason`, права `contents: read`, `packages: read`. Job `deploy-prod` идёт в Environment `production`: нужен approve его ревьюера (порядок approve и lock `staging-deploy` — §5, п. 6). Выкатывает digest, который был под `:staging` при запуске; если тег сдвинулся до того, как job получил lock `staging-deploy`, — отказ (`Refused: …`), запустить заново. Свой project (§8.1); откат и итог — §5, п. 6.
 
-**Prod webhook outcome** — ручной workflow `prod-webhook-outcome.yml` (#308), только чтение: `workflow_dispatch` с `main`, обязательный `delivery_id` (GUID `X-GitHub-Delivery` из Recent Deliveries prod App), права `contents: read`, без Environment и без lock `staging-deploy`. Нужен, пока у команды нет SSH на курсовой VPS: по SSH (цель — тот же шаг **Resolve prod target**) читает логи контейнеров `webhook-worker` проекта `dmc-268-api-prod` за 168 часов и показывает в job summary только строки `GitHub webhook delivery <id> event=… status=…` этой доставки ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md)); пустой результат — доставка ещё не обработана, отложена, id неизвестен, либо контейнер пересоздан более поздним выкатом (его лог пропал). Ничего на хосте не меняет.
+**Prod webhook outcome** — ручной workflow `prod-webhook-outcome.yml` (#308, staging — #574), только чтение: `workflow_dispatch` с `main`, обязательный `delivery_id` (GUID `X-GitHub-Delivery` из Recent Deliveries prod или staging App), `stack` — `prod` (по умолчанию) или `staging`, права `contents: read`, без Environment и без lock `staging-deploy`. Нужен, пока у команды нет SSH на курсовой VPS: по SSH (цель — тот же шаг **Resolve prod target**: staging работает на том же VPS, пока не задан `STAGING_HOST`) читает логи контейнеров `webhook-worker` проекта `dmc-268-api-prod` или `dmc-268-api-staging` за 168 часов и показывает в job summary только строки `GitHub webhook delivery <id> event=… status=…` этой доставки ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md)); пустой результат — доставка ещё не обработана, отложена, id неизвестен, либо контейнер пересоздан более поздним выкатом (его лог пропал). Ничего на хосте не меняет.
 
-**Live corpus evaluation** — ручной платный workflow `eval-live.yml` (`workflow_dispatch`, `contents: read`), не job `ci-cd.yml` и не required check: ключ — organization secret `AI_DMC268_T6` ([SECRETS.md](SECRETS.md)), группа concurrency `eval-live-eurouter` без отмены идущего прогона. Входы: `model`, `export_raw_responses`, `corpus` (`main`, `rules`, `rag`), `rag_arm` (`none` по умолчанию, `graph`), `policy_arm`, `review_prompt`. Для `corpus=rag` ([TEST_PLAN §3.5.1](TEST_PLAN.md#351-запись-replay-и-гейт-146)) шаг `Validate corpus` требует `policy_arm=none`, `review_prompt=v5` и `rag_arm` `none` или `graph` и до платных шагов запускает `validate_dataset.py --final --profile rag`; `rag_arm=graph` при `main` и `rules` отказывает. Артефакты: `eval-live-<corpus>-<arm>-<run id>-<attempt>` и при `export_raw_responses` `eval-live-raw-…`; `<arm>` — `policy_arm`, для `rag` — `<policy_arm>-<rag_arm>` (`none-none` — плечо A, `none-graph` — B).
+**Live corpus evaluation** — ручной платный workflow `eval-live.yml` (`workflow_dispatch`, `contents: read`), не job `ci-cd.yml` и не required check: ключ — organization secret `AI_DMC268_T6` ([SECRETS.md](SECRETS.md)), группа concurrency `eval-live-eurouter` без отмены идущего прогона. Входы: `model`, `export_raw_responses`, `corpus` (`main`, `rules`, `rag`), `rag_arm` (`none` по умолчанию, `graph`), `policy_arm`, `review_prompt`. Для `corpus=rag` ([TEST_PLAN §3.5.1](TEST_PLAN.md#351-запись-replay-и-гейт-146)) шаг `Validate corpus` требует `policy_arm=none`, `review_prompt` с секцией retrieved (`v5` или `v7`, #498) и `rag_arm` `none` или `graph` и до платных шагов запускает `validate_dataset.py --final --profile rag`; `rag_arm=graph` при `main` и `rules` отказывает. Артефакты: `eval-live-<corpus>-<arm>-<run id>-<attempt>` и при `export_raw_responses` `eval-live-raw-…`; `<arm>` — `policy_arm`, для `rag` — `<policy_arm>-<rag_arm>` (`none-none` — плечо A, `none-graph` — B).
 
 ---
 
@@ -587,6 +589,7 @@ workflow до него уже меняет Compose-файлы и edge-прокс
 
 | Ревизия | Что удаляет downgrade | Что даёт повторный upgrade |
 |---|---|---|
+| `20261109_0064` (#456) | индексы чтения дашборда `ix_findings_published_run_id`, `ix_usage_events_run_totals`, `ix_run_actions_postprocess_run_index`, `ix_context_payloads_summary_only_stop`; данные не теряются | те же индексы строятся заново обычным `CREATE INDEX` и на время построения блокируют запись в эти таблицы |
 | `20261106_0061` (#465) | колонку `findings.rule_link`; ссылки GitHub-комментариев на строки `.review/rules.md` теряются | колонка снова NULL, прежние ссылки не восстанавливаются; `review.publish/v1` прогона, ещё не опубликовавшего находки со ссылкой, игнорируется как устаревший: хеш находок теперь считается без ссылки |
 | `20261106_0060` (#457) | колонку `runs.data_purged_at` и частичные индексы `ix_runs_data_retention_candidates`, `ix_cached_file_blobs_retention_candidates`; отметка об очистке теряется, а очищенные задачей текст диффов, контексты и тексты блобов downgrade не возвращает | колонка снова NULL: следующий проход заново отмечает уже очищенные прогоны, их данные пусты, ответы API не меняются |
 | `20261106_0059` (#454) | колонки `repositories.private`, `private_observed_at`, `full_name_observed_at`, `private_read_failed_at` и индекс `ix_repositories_lower_full_name`; сохранённая видимость теряется | колонки снова NULL и заполняются событиями GitHub и фоновым перечитыванием; пока NULL, публичный бейдж нейтральный |
@@ -629,7 +632,7 @@ installation_available`: `enabled=true` при `installation_available=false` с
 `20261024_0039`, `20261025_0040`, `20261026_0041`, `20261026_0042` и
 `20261026_0043`, `20261028_0044`, `20261026_0045`, `20261026_0046`, `20261026_0047`,
 `20261026_0048`, `20261026_0049`, `20261026_0050`, `20261027_0051`,
-`20261027_0052`, `20261106_0059`, `20261106_0060` и `20261106_0061`;
+`20261027_0052`, `20261106_0059`, `20261106_0060`, `20261106_0061` и `20261109_0064`;
 полный актуальный состав — таблица.
 
 Более глубокий downgrade **до `20261007_0028`** дополнительно откатывает
@@ -744,10 +747,14 @@ Checker печатает ровно один контролируемый verdic
 вывод или код безопасно отклоняется без печати сырых сообщений.
 
 Нижняя граница F1. Seed промптов любого образа оставляет активной старшую версию из БД,
-поэтому откат после F2 не снимает активность `review.system:v4` (с #350 — v5). Образ
+поэтому откат после F2 не снимает активность `review.system:v4` (с #350 — v5, с #498 — v7). Образ
 старше F1 (#328) не знает snapshot-пути и провёл бы runs с закреплённым v4 или v5 по
 legacy-пути с валидатором v1. Допуск по ревизии отклоняет такой образ, пока БД на
 `20261025_0040` или выше: эту ревизию образ не знает.
+
+Нижняя граница #498 Ч.2. Образ старше неё не знает `review.system` v7 и так же провёл бы runs
+с закреплённым v7 по legacy-пути с валидатором v1. Допуск по ревизии такой откат не
+отклоняет: миграции у #498 Ч.2 нет.
 
 После успешного `up --wait` скрипт сразу сохраняет current/previous по manual/auto правилам,
 затем получает только имена env из работающих `api`, `worker` и

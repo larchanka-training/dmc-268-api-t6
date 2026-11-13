@@ -28,6 +28,9 @@ from app.modules.integrations.webhooks.application.receive_github_delivery impor
 from app.modules.integrations.webhooks.application.revive_deferred_installation_deliveries import (
     ReviveDeferredInstallationDeliveries,
 )
+from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
+    GitHubInstallationAccessTokenProvider,
+)
 from app.modules.repositories.application.repository_visibility import (
     RefreshRepositoryVisibility,
 )
@@ -38,13 +41,14 @@ from app.modules.repositories.application.rules_status import (
 from app.webhook_worker import sweep_forever
 
 
-def test_bitbucket_only_worker_composes_rules_refresher() -> None:
+@pytest.mark.parametrize("with_github", [False, True], ids=["bitbucket-only", "both"])
+def test_bitbucket_worker_composes_rules_refresher(with_github: bool) -> None:
     cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
     config = webhook_worker.WorkerConfig(
         database_url="postgresql://unused",
-        app_id=None,
-        private_key=None,
-        bot_login=None,
+        app_id=17 if with_github else None,
+        private_key="synthetic-key" if with_github else None,
+        bot_login="reviewer[bot]" if with_github else None,
         github_api_url="https://api.github.com",
         rabbitmq_url="amqp://unused",
         bitbucket=cipher,
@@ -57,21 +61,25 @@ def test_bitbucket_only_worker_composes_rules_refresher() -> None:
         return marker
 
     resources = SimpleNamespace(rules_status_refresher=record_rules)
+    tokens = cast("GitHubInstallationAccessTokenProvider", object()) if with_github else None
 
     async def scenario() -> None:
-        async with httpx.AsyncClient(trust_env=False) as bitbucket_client:
+        async with (
+            httpx.AsyncClient() as github_client,
+            httpx.AsyncClient(trust_env=False) as bitbucket_client,
+        ):
             rules = webhook_worker.compose_rules_refresher(
                 cast("ReviewsApiResources", resources),
-                None,
-                None,
+                github_client if with_github else None,
+                tokens,
                 config,
                 bitbucket_client=bitbucket_client,
             )
             assert rules is marker
             assert calls == [
                 {
-                    "client": None,
-                    "token_provider": None,
+                    "client": github_client if with_github else None,
+                    "token_provider": tokens,
                     "bitbucket_cipher": cipher,
                     "bitbucket_client": bitbucket_client,
                 }
@@ -309,13 +317,21 @@ def test_worker_starts_scan_and_heartbeat_before_listener_ready_and_awaits_clean
         expected_before_publisher = ["listener", "lock"] if provider == "gitlab" else ["listener"]
         clients: list[dict[str, object]] = []
         created_clients: list[httpx.AsyncClient] = []
-        rules_calls: list[dict[str, object]] = []
+        created_rules: list[RefreshRulesStatuses] = []
+        swept_rules: list[RefreshRulesStatuses] = []
+        rules_swept = asyncio.Event()
         real_client = httpx.AsyncClient
         real_rules = ReviewsApiResources.rules_status_refresher
 
         def rules_refresher(self: ReviewsApiResources, **kwargs: object) -> RefreshRulesStatuses:
-            rules_calls.append(kwargs)
-            return real_rules(self, **kwargs)  # type: ignore[arg-type]
+            refresher = real_rules(self, **kwargs)  # type: ignore[arg-type]
+            created_rules.append(refresher)
+            return refresher
+
+        async def refresh_rules(refresher: RefreshRulesStatuses) -> int:
+            swept_rules.append(refresher)
+            rules_swept.set()
+            return 0
 
         def http_client(**kwargs: object) -> httpx.AsyncClient:
             clients.append(kwargs)
@@ -325,6 +341,7 @@ def test_worker_starts_scan_and_heartbeat_before_listener_ready_and_awaits_clean
 
         monkeypatch.setattr(httpx, "AsyncClient", http_client)
         monkeypatch.setattr(ReviewsApiResources, "rules_status_refresher", rules_refresher)
+        monkeypatch.setattr(webhook_worker, "refresh_rules_once", refresh_rules)
         listener_connections: list[str] = []
         heartbeat = tmp_path / "webhook-worker.heartbeat"
         messages: asyncio.Queue[psycopg.Notify] = asyncio.Queue()
@@ -434,6 +451,8 @@ def test_worker_starts_scan_and_heartbeat_before_listener_ready_and_awaits_clean
         try:
             await asyncio.wait_for(listening.wait(), timeout=2)
             await asyncio.wait_for(database_attempted.wait(), timeout=2)
+            if provider != "gitlab":
+                await asyncio.wait_for(rules_swept.wait(), timeout=2)
             assert is_fresh(heartbeat, max_age=5, now=time.time()) is True
             assert task.done() is False
             register.set()
@@ -450,6 +469,11 @@ def test_worker_starts_scan_and_heartbeat_before_listener_ready_and_awaits_clean
             assert closed == [*expected_before_publisher, "publisher", "database"]
             assert len(clients) == {"github": 1, "gitlab": 1, "bitbucket": 2, "both": 3}[provider]
             if provider == "gitlab":
+                assert created_rules == swept_rules == []
+            else:
+                assert len(created_rules) == 1
+                assert swept_rules and all(item is created_rules[0] for item in swept_rules)
+            if provider == "gitlab":
                 assert "base_url" not in clients[0]  # no GitHub client/token/reviver composition
                 assert clients[0]["trust_env"] is False
             elif provider in {"github", "both"}:
@@ -460,13 +484,6 @@ def test_worker_starts_scan_and_heartbeat_before_listener_ready_and_awaits_clean
                 assert "base_url" not in clients[rules_client_index]
                 assert clients[rules_client_index]["trust_env"] is False
                 assert clients[rules_client_index]["follow_redirects"] is False
-                assert len(rules_calls) == 1
-                assert (rules_calls[0]["token_provider"] is None) == (provider == "bitbucket")
-                assert isinstance(rules_calls[0]["bitbucket_cipher"], BitbucketCredentialCipher)
-                assert rules_calls[0]["client"] is (
-                    None if provider == "bitbucket" else created_clients[0]
-                )
-                assert rules_calls[0]["bitbucket_client"] is created_clients[rules_client_index]
         finally:
             finish_close.set()
             if not task.done():

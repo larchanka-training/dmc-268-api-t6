@@ -30,6 +30,11 @@ class UsageEvent(Base):
     __table_args__ = (
         Index("ix_usage_events_workspace_created", "workspace_id", "created_at"),
         Index("ix_usage_events_run_created", "run_id", "created_at"),
+        Index(
+            "ix_usage_events_run_totals",
+            "run_id",
+            postgresql_include=["tokens_in", "tokens_out", "cost_usd"],
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)

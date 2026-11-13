@@ -64,6 +64,9 @@ KINDS = ("reverse_edge", "control", "depth2", "injection", "clean")
 
 # The checks never call a model: the pinned profile of the build only needs a name.
 _CHECK_MODEL = "integrity-check"
+# The prompt the integrity checks build under: v5 shows every comment, so the bait of an
+# injection case is checked as the case declares it (v7 would show its marker, #498).
+_CHECK_VERSION = "v5"
 
 
 @dataclass(frozen=True)
@@ -436,8 +439,8 @@ _CHECKS: tuple[Callable[[_Case], None], ...] = (
 
 async def _build_arms(case_dir: Path) -> tuple[ArmInput, ArmInput]:
     return (
-        await build_arm_input(case_dir, "A", review_model=_CHECK_MODEL),
-        await build_arm_input(case_dir, "B", review_model=_CHECK_MODEL),
+        await build_arm_input(case_dir, "A", review_model=_CHECK_MODEL, version=_CHECK_VERSION),
+        await build_arm_input(case_dir, "B", review_model=_CHECK_MODEL, version=_CHECK_VERSION),
     )
 
 

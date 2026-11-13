@@ -126,9 +126,10 @@ def _snapshot(store: Store) -> PolicySnapshot:
 
 
 def test_the_snapshot_contract_has_one_source() -> None:
-    assert frozenset({"v4", "v5"}) == SNAPSHOT_REVIEW_PROMPT_VERSIONS
+    assert frozenset({"v4", "v5", "v7"}) == SNAPSHOT_REVIEW_PROMPT_VERSIONS
     assert answers.review_answer_contract("v4").name == "ReviewOutputV2"
     assert answers.review_answer_contract("v5").name == "ReviewOutputV2"
+    assert answers.review_answer_contract("v7").name == "ReviewOutputV2"
     assert answers.review_answer_contract("v3").name == "ReviewOutput"
     assert not hasattr(answers, "_V2_REVIEW_PROMPT_VERSIONS")
 
@@ -141,6 +142,7 @@ def test_the_snapshot_contract_has_one_source() -> None:
         ("review.system", "v4", "github", True),
         ("review.system", "v4", "gitlab", True),
         ("review.system", "v5", "github", True),
+        ("review.system", "v7", "github", True),
         # A legacy version is never refused, whatever the provider.
         ("review.system", "v3", "gitlab", False),
         ("review.system", "v3", None, False),
@@ -154,6 +156,7 @@ def test_the_snapshot_contract_has_one_source() -> None:
         "v4-github",
         "v4-gitlab",
         "v5-github",
+        "v7-github",
         "v3-gitlab",
         "v3-no-origin",
         "conventions-key-v4",
@@ -270,8 +273,8 @@ def _stage(store: Store, trace: Trace, *, provider: str = "github") -> ReviewCon
 # Provider support is checked independently at the selector, processor and stage.
 @pytest.mark.parametrize(
     ("version", "gets_snapshot"),
-    [("v2", False), ("v3", False), ("v4", True), ("v5", True)],
-    ids=["v2", "v3", "v4", "v5"],
+    [("v2", False), ("v3", False), ("v4", True), ("v5", True), ("v7", True)],
+    ids=["v2", "v3", "v4", "v5", "v7"],
 )
 def test_stage_gives_the_snapshot_only_to_a_snapshot_path_run(
     version: str, gets_snapshot: bool

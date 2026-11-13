@@ -19,12 +19,10 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.modules.code_index.application.index_store import ImportRecord, IndexedFile
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
 )
 from app.modules.reviews.application import rag_index
-from app.modules.reviews.application.ast_resolution import ImportResolution
 from app.modules.reviews.application.get_run_diff import DiffSnapshot, StoreDiffSnapshot
 from app.modules.reviews.application.handle_review_run import AttemptCheckpoint
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
@@ -38,7 +36,7 @@ from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.worker import review_context_stage_factory
-from tests.code_index_postgres import C1, _build, _enable, _imports, _Index, _uses
+from tests.code_index_postgres import C1, _build, _enable, _Index
 from tests.portal_postgres import (
     HEAD,
     INSTALL_A,
@@ -48,6 +46,7 @@ from tests.portal_postgres import (
     Env,
     portal_schema,
 )
+from tests.rag_review_context_fakes import _USER_NOTED, _user_file
 from tests.test_github_vcs_provider import _pull_payload
 from tests.test_retired_installation_postgres import DiscardTokenCache
 from tests.test_review_context import _GREET_PATCH, _MODELS, _SERVICE
@@ -61,11 +60,6 @@ _AGENTS = "93aa575b2804e25ec8ff4398e131a66fea60eb53"
 _APP = "4" * 40
 _MODELS_SHA = "5" * 40
 _USER_SHA = "6" * 40
-# `pkg/app.py` calls the `greet` the PR changes; the default-branch graph knows it.
-_USER = "from .service import greet\n\n\ndef welcome(user_id):\n    return greet(user_id)\n"
-# The same caller with a trailing comment, for the comment gate (#498); `_USER` itself is
-# shared with test_snapshot_path_e2e_postgres.py.
-_USER_NOTED = _USER.replace("greet(user_id)\n", "greet(user_id)  # note\n")
 # The review prompt the portal seed pins: version 1.
 _PINNED = ("review.system", "v1")
 
@@ -77,20 +71,6 @@ def rag_env() -> Iterator[Env]:
         pytest.skip("set TEST_DATABASE_URL to test the composed RAG context")
     with portal_schema(url, None) as env:
         yield env
-
-
-def _user_file() -> IndexedFile:
-    return IndexedFile(
-        "pkg/app.py",
-        "a1" * 20,
-        edges=(
-            _imports("pkg/app.py", "pkg/service.py"),
-            _uses("pkg/app.py", "pkg/service.py", "greet"),
-        ),
-        imports=(
-            ImportRecord("pkg/app.py", ".service", ImportResolution.RESOLVED, "pkg/service.py"),
-        ),
-    )
 
 
 @pytest.mark.integration

@@ -29,7 +29,12 @@ from app.modules.reviews.application.llm import LlmCallFailed, LlmErrorCode, Run
 from app.modules.reviews.application.prompt_builder import ChangedFile, DiffLine
 from app.modules.reviews.infrastructure.llm.gateway import HeuristicTokenCounter
 from app.modules.reviews.infrastructure.llm.models import GatewayChangeSummaryModel
-from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelPrice, ModelProfile
+from app.modules.reviews.infrastructure.llm.settings import (
+    GatewayPolicy,
+    LlmSettings,
+    ModelPrice,
+    ModelProfile,
+)
 from tests.llm_fakes import FakeClock, ScriptedProvider, completion
 
 NOW = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
@@ -70,14 +75,23 @@ REQUEST = ChangeSummaryRequest(
 
 class _Provider(ScriptedProvider):
     def summarize(
-        self, request: ChangeSummaryRequest = REQUEST, *, settings: LlmSettings = SETTINGS
+        self,
+        request: ChangeSummaryRequest = REQUEST,
+        *,
+        settings: LlmSettings = SETTINGS,
+        run: RunCallContext = RUN,
+        calls: int = 1,
     ) -> ChangeSummary:
+        """``calls`` summaries in a row through one gateway, so that they share the attempt."""
+
         async def exercise() -> ChangeSummary:
             async with httpx.AsyncClient(transport=httpx.MockTransport(self.handle)) as client:
-                gateway = self.gateway(settings, client, FakeClock(NOW))
-                return await GatewayChangeSummaryModel(gateway, RUN).summarize_change(
-                    request=request
+                model = GatewayChangeSummaryModel(
+                    self.gateway(settings, client, FakeClock(NOW)), run
                 )
+                for _ in range(calls - 1):
+                    await model.summarize_change(request=request)
+                return await model.summarize_change(request=request)
 
         return asyncio.run(exercise())
 
@@ -168,3 +182,48 @@ def test_change_summary_input_over_its_budget_is_cut_and_the_call_succeeds(
     assert budget - 200 < sum(counter.count(message["content"]) for message in sent) <= budget
     assert "of 2000 total." in sent[1]["content"]
     assert sent[1]["content"].endswith('<files_not_shown count="2" />')
+
+
+@pytest.mark.parametrize(
+    ("seconds_left", "error_code"),
+    [(100, None), (99, LlmErrorCode.VERIFICATION_DEADLINE_EXCEEDED)],
+    ids=["call-and-completion", "short-of-the-completion"],
+)
+def test_change_summary_call_keeps_ten_seconds_of_the_attempt_for_its_completion(
+    seconds_left: int, error_code: LlmErrorCode | None
+) -> None:
+    # PIPELINE_SPEC §3: a fast call waits up to 90 s; the run still stores and hands over
+    # the review after it, so the call starts only with 90 + 10 s left.
+    provider = _Provider([completion(EXAMPLE_ANSWER)])
+    run = replace(RUN, deadline=NOW + timedelta(seconds=seconds_left))
+
+    if error_code is None:
+        provider.summarize(run=run)
+    else:
+        with pytest.raises(LlmCallFailed) as caught:
+            provider.summarize(run=run)
+        assert caught.value.error_code is error_code
+
+    assert len(provider.requests) == (1 if error_code is None else 0)
+
+
+def test_change_summary_call_counts_against_the_attempt_call_limit() -> None:
+    # PIPELINE_SPEC §4.5: 4 generation calls per attempt, the agent's among them.
+    provider = _Provider([completion(EXAMPLE_ANSWER)] * 4)
+
+    with pytest.raises(LlmCallFailed) as caught:
+        provider.summarize(calls=5)
+
+    assert caught.value.error_code is LlmErrorCode.UNAVAILABLE
+    assert len(provider.requests) == 4
+
+
+def test_change_summary_call_counts_against_the_run_cost_limit() -> None:
+    no_money = GatewayPolicy(run_cost_limit_usd={"fast": Decimal("0"), "deep": Decimal("0")})
+    provider = _Provider([completion(EXAMPLE_ANSWER)])
+
+    with pytest.raises(LlmCallFailed) as caught:
+        provider.summarize(settings=replace(SETTINGS, policy=no_money))
+
+    assert caught.value.error_code is LlmErrorCode.BUDGET_EXCEEDED
+    assert provider.requests == []

@@ -6,6 +6,7 @@ from dataclasses import replace
 from uuid import UUID
 
 import pytest
+from markdown_it import MarkdownIt
 
 from app.modules.reviews.application.findings_post_processor import (
     FindingsPostProcessor,
@@ -20,6 +21,8 @@ from app.modules.reviews.application.review_ignore import (
     parse_review_ignore,
 )
 from app.modules.reviews.application.run_coverage import (
+    CoverageStatus,
+    RunCoverage,
     project_run_coverage,
     restore_run_coverage,
     snapshot_vcs_file,
@@ -77,6 +80,7 @@ def _process_snapshots(
     *findings: dict[str, object],
     rules: str = "",
     summary_only: bool = False,
+    change_summary: tuple[str, ...] = (),
 ) -> ProcessedReviewOutput:
     """Process as a run does: coverage projected under the policy, saved and read back."""
     diff_map = _diff_map_from_vcs(*(snapshot_vcs_file(item) for item in snapshots))
@@ -93,6 +97,7 @@ def _process_snapshots(
         rule_names=frozenset(),
         coverage=coverage,
         summary_only=summary_only,
+        change_summary=change_summary,
     )
 
 
@@ -535,18 +540,27 @@ def test_executive_block_survives_the_store_time_repack_within_the_body_budget()
     assert _body_only_accounted_in_review_body(final.review_body) == 10
 
 
-def test_executive_block_changes_neither_the_findings_hash_nor_the_publish_message() -> None:
+@pytest.mark.parametrize(
+    ("snapshots", "change_summary"),
+    [
+        ([_text_change(), _truncated_change(), _text_change("pyproject.toml")], ()),
+        ([_text_change()], ("Adds a purge job for stale runs.",)),
+    ],
+    ids=["checklist", "change_summary"],
+)
+def test_executive_block_changes_neither_the_findings_hash_nor_the_publish_message(
+    snapshots: list[DiffSnapshot], change_summary: tuple[str, ...]
+) -> None:
     findings = (finding(severity="high"),)
     plain = _process_snapshots([_text_change()], *findings)
-    busy = [_text_change(), _truncated_change(), _text_change("pyproject.toml")]
-    with_checklist = _process_snapshots(busy, *findings)
-    assert plain.review_body != with_checklist.review_body
+    other = _process_snapshots(snapshots, *findings, change_summary=change_summary)
+    assert plain.review_body != other.review_body
 
     plain_hash = findings_hash(hashed_findings(plain))
-    assert findings_hash(hashed_findings(with_checklist)) == plain_hash
+    assert findings_hash(hashed_findings(other)) == plain_hash
     run_id = UUID(int=7)
     assert publish_message_id(run_id, "c" * 40, plain_hash) == publish_message_id(
-        run_id, "c" * 40, findings_hash(hashed_findings(with_checklist))
+        run_id, "c" * 40, findings_hash(hashed_findings(other))
     )
 
 
@@ -561,3 +575,191 @@ def test_executive_block_renders_the_same_bytes_for_the_same_files_in_any_order(
         _process_snapshots(list(reversed(busy)), *findings).executive_block
         == rendered.executive_block
     )
+
+
+_SIGNED = "**What changed** (автоописание, не замечание): "
+
+
+@pytest.mark.parametrize(
+    ("snapshots", "verdict", "checklist"),
+    [
+        ([_text_change()], "clean · **Risk Score:** Low", ""),
+        (
+            [_text_change(), _truncated_change()],
+            f"{_INCOMPLETE} · **Risk Score:** Medium",
+            "\n\n**What to check:**\n- Не проверено — patch неполон (1): `src/cut.py`",
+        ),
+    ],
+    ids=["no-checklist", "checklist"],
+)
+def test_executive_change_summary_is_signed_between_the_verdict_and_the_checklist(
+    snapshots: list[DiffSnapshot], verdict: str, checklist: str
+) -> None:
+    result = _process_snapshots(
+        snapshots, change_summary=("Adds a purge job.", " Schedules it once a day. ")
+    )
+
+    assert result.executive_block == (
+        f"## Executive summary\n\n**Verdict:** {verdict}\n\n"
+        f"{_SIGNED}Adds a purge job. Schedules it once a day.{checklist}"
+    )
+    assert result.review_body.startswith(f"{result.executive_block}\n\n## Review summary\n")
+    assert result.change_summary_shown == 2
+
+
+def test_executive_change_summary_does_not_repeat_an_unusable_name() -> None:
+    result = _process_snapshots(
+        [_text_change(), _unresolved_rename()],
+        change_summary=("Moves src/moved.py next to ./src/moved.py.",),
+    )
+
+    assert "moved.py" not in result.review_body
+    assert f"{_SIGNED}Moves имя файла скрыто next to имя файла скрыто." in result.executive_block
+
+
+def test_executive_change_summary_keeps_its_sentences_while_names_of_the_checklist_fold() -> None:
+    cut = [f"src/{'d' * 108}{n}.py" for n in range(6)]
+    huge = [f"big/{'d' * 108}{n}.py" for n in range(6)]
+    snapshots = [
+        _text_change(),
+        *(_truncated_change(name) for name in cut),
+        *(_too_large_change(name) for name in huge),
+    ]
+    sentences = tuple(f"{'S' * 198}{n}." for n in range(3))
+    # Without the text the checklist keeps five names a line (1 417 characters); with it,
+    # five names make 2 068 and three 1 588, so one name a line is left (1 108).
+    assert len(_what_to_check(_process_snapshots(snapshots))[0].split(", ")) == 5
+
+    result = _process_snapshots(snapshots, change_summary=sentences)
+
+    assert f"{_SIGNED}{' '.join(sentences)}\n\n" in result.executive_block
+    assert _what_to_check(result) == [
+        f"- Не проверено — patch неполон (6): `{cut[0]}` и ещё 5",
+        "- Не проверено — Превышен лимит размера, содержимое не проверено (6): "
+        f"`{huge[0]}` и ещё 5",
+    ]
+    assert result.change_summary_shown == 3
+
+
+def test_executive_change_summary_drops_its_last_sentences_once_no_name_is_left() -> None:
+    diff_map = _diff_map_from_vcs(
+        *(
+            snapshot_vcs_file(_text_change(path))
+            for path in (
+                "app/example.py",
+                "alembic/versions/0001_init.py",
+                ".github/workflows/ci.yml",
+                "pyproject.toml",
+            )
+        )
+    )
+    every_reason = (
+        "classification_unavailable",
+        "diff_inventory_incomplete",
+        "identity_unresolved",
+        "missing_patch",
+        "patch_malformed",
+        "patch_truncated",
+        "patch_unsupported",
+        "review_input_incomplete",
+        "summary_only",
+        "too_large",
+        "unknown_path",
+        "unsupported_change",
+        "unsupported_path",
+    )
+    coverage = RunCoverage(
+        CoverageStatus.PARTIAL, 1, stored_reason_counts=tuple((name, 1) for name in every_reason)
+    )
+    sentences = tuple(f"{'S' * 198}{n}." for n in range(3))
+
+    result = FindingsPostProcessor.from_default_patterns().process(
+        output(finding(severity="high")),
+        diff_map=diff_map,
+        checked_paths=frozenset({"app/example.py"}),
+        rule_names=frozenset(),
+        coverage=coverage,
+        change_summary=sentences,
+    )
+
+    # Every line at no name is 980 characters with the signature: two sentences fit, not three.
+    assert len(result.executive_block) <= 1500
+    assert f"{_SIGNED}{sentences[0]} {sentences[1]}\n\n" in result.executive_block
+    assert sentences[2] not in result.executive_block
+    assert len(_what_to_check(result)) == 17
+    assert result.change_summary_shown == 2
+
+
+def test_executive_change_summary_without_room_for_one_sentence_is_left_out() -> None:
+    snapshots = [_text_change(), _truncated_change()]
+    plain = _process_snapshots(snapshots)
+
+    result = _process_snapshots(snapshots, change_summary=("S" * 1500,))
+
+    assert result.executive_block == plain.executive_block
+    assert result.change_summary_shown == 0
+
+
+@pytest.mark.parametrize(
+    ("sentence", "shown"),
+    [
+        ("Pings @octo-org/admins about it.", "Pings @\u200bocto-org/admins about it."),
+        ("Mails ops@evil.test now.", "Mails ops@\u200bevil.test now."),
+        (
+            "Links [the docs](https://evil.test/x).",
+            "Links [the docs]\u200b(https:\u200b//evil.test/x).",
+        ),
+        (
+            "Adds ![x](http://t.test/p.png) to it.",
+            "Adds ![x]\u200b(http:\u200b//t.test/p.png) to it.",
+        ),
+        ("Adds <img src=x> here.", "Adds <\u200bimg src=x> here."),
+        ("See <https://evil.test> now.", "See <\u200bhttps:\u200b//evil.test> now."),
+        ("Adds &#64;octo here.", "Adds &\u200b#\u200b64;octo here."),
+        ("Moves it to WWW.evil.test now.", "Moves it to WWW\u200b.evil.test now."),
+        ("Moves it to _www.evil.test_ now.", "Moves it to _www\u200b.evil.test_ now."),
+        ("Moves it to (www.evil.test) now.", "Moves it to (www\u200b.evil.test) now."),
+        ("Moves it to *www.evil.test* now.", "Moves it to *www\u200b.evil.test* now."),
+        ("Fixes #12 and octo/other#3.", "Fixes #\u200b12 and octo/other#\u200b3."),
+        ("Closes GH-12 today.", "Closes GH-\u200b12 today."),
+        (
+            "Merges !7 with ~bug, %v1 and $9.",
+            "Merges !\u200b7 with ~\u200bbug, %\u200bv1 and $\u200b9.",
+        ),
+        (
+            'Labels it ~"Needs work" for %"1.0 beta".',
+            'Labels it ~\u200b"Needs work" for %\u200b"1.0 beta".',
+        ),
+        (
+            "Moves purge_stale_runs to app/jobs.py, done!",
+            "Moves purge_stale_runs to app/jobs.py, done!",
+        ),
+    ],
+    ids=[
+        "mention",
+        "email",
+        "link",
+        "image",
+        "html",
+        "autolink",
+        "entity",
+        "www",
+        "www-after-underscore",
+        "www-after-parenthesis",
+        "www-after-asterisk",
+        "issue-references",
+        "gh-reference",
+        "gitlab-references",
+        "gitlab-quoted-label-and-milestone",
+        "plain",
+    ],
+)
+def test_executive_change_summary_shows_no_mention_link_image_or_markup(
+    sentence: str, shown: str
+) -> None:
+    result = _process_snapshots([_text_change()], change_summary=(sentence,))
+
+    assert result.executive_block.endswith(f"{_SIGNED}{shown}")
+    rendered = MarkdownIt("commonmark").render(result.executive_block)
+    assert "<a " not in rendered
+    assert "<img" not in rendered

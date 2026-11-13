@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from uuid import UUID, uuid4
@@ -11,7 +10,6 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from sqlalchemy import Connection, text
-from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.modules.code_index.application.bitbucket_persistence import SourceListingPage
@@ -51,7 +49,7 @@ def test_checkpoint_charge_needs_uow_commit_and_invalidate_clears_rows(
     db.commit()
     target = BoundBitbucketTarget(uuid4(), uuid4(), repository_id, uuid4(), 1, 3)
     sha = "a" * 40
-    url = make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql+psycopg_async")
+    url = db.engine.url.set(drivername="postgresql+psycopg_async")
     engine = create_async_engine(url, connect_args={"options": f"-csearch_path={schema}"})
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     count = text("SELECT count(*) FROM bitbucket_tree_checkpoint_pages WHERE repository_id=:id")
@@ -95,7 +93,7 @@ def test_published_manifest_requires_matching_publication_binding_and_generation
     schema = str(db.scalar(text("SELECT current_schema()")))
     db.commit()
     target = BoundBitbucketTarget(uuid4(), uuid4(), repository_id, uuid4(), 1, 3)
-    url = make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql+psycopg_async")
+    url = db.engine.url.set(drivername="postgresql+psycopg_async")
     engine = create_async_engine(url, connect_args={"options": f"-csearch_path={schema}"})
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     entries = {"a.py": ArchiveEntry("a.py", 7)}
@@ -159,7 +157,7 @@ def test_checkpoint_survives_restart_and_invalidates_on_binding_sha_and_purge(
         {"size": 2, "values": [{"path": "a.py"}], "next": "page=2"},
         317,
     )
-    url = make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql+psycopg_async")
+    url = db.engine.url.set(drivername="postgresql+psycopg_async")
     engine = create_async_engine(url, connect_args={"options": f"-csearch_path={schema}"})
     sessions = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -227,7 +225,7 @@ def test_partial_stream_bytes_bound_a_restarted_snapshot(
     schema = str(db.scalar(text("SELECT current_schema()")))
     db.commit()
     target = BoundBitbucketTarget(uuid4(), uuid4(), repository_id, uuid4(), 1, 3)
-    url = make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql+psycopg_async")
+    url = db.engine.url.set(drivername="postgresql+psycopg_async")
     engine = create_async_engine(url, connect_args={"options": f"-csearch_path={schema}"})
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     partial = b" " * 25
@@ -305,7 +303,7 @@ def test_raw_checkpoint_survives_restart_and_clears_after_publish_or_purge(
     db.commit()
     target = BoundBitbucketTarget(uuid4(), uuid4(), repository_id, uuid4(), 1, 3)
     sha = "a" * 40
-    url = make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql+psycopg_async")
+    url = db.engine.url.set(drivername="postgresql+psycopg_async")
     engine = create_async_engine(url, connect_args={"options": f"-csearch_path={schema}"})
     sessions = async_sessionmaker(engine, expire_on_commit=False)
 

@@ -15,6 +15,8 @@ ready graph index the review shows and records the caller of the changed functio
 verifier shows it again with the same index commit, and a retry before the accepted answer
 retrieves from a newer index publication (D8). A v4 run in flight when the v5 seed makes v5
 live keeps its v4 prompt: no retrieved section, and a ready index is recorded as not used.
+A run bound to ``review.system.v7.md`` (#498) shows a comment of the retrieved caller as a
+marker; a v5 run in flight when the v7 seed makes v7 live keeps v5 and shows the comment.
 A verifier answer citing a range the diff block does not show, or a rule finding without a
 requirement of its rule, earns the attempt's one free slot: the fallback, or a bounded repair
 without a fallback model; the recovered answer publishes. A changed-file name the run cannot
@@ -65,13 +67,20 @@ from app.worker import (
 )
 from tests.code_index_postgres import C1, C2, _build, _enable, _Index
 from tests.portal_postgres import REPO_A, REPO_B, Env, portal_schema
+from tests.rag_review_context_fakes import _USER, _USER_NOTED, _user_file
+from tests.review_prompt_pins_postgres import (
+    _V4_CONTENT,
+    _V5_CONTENT,
+    _V7_CONTENT,
+    _bind_v4,
+    _bind_v5,
+    _bind_v7,
+)
 from tests.test_github_vcs_provider import _pull_payload
 from tests.test_llm_gateway import FALLBACK, PRIMARY, completion
 from tests.test_prompt_seeding import _up_to
-from tests.test_rag_review_context_postgres import _USER, _user_file
 from tests.test_retired_installation_postgres import DiscardTokenCache
 from tests.test_review_context import _GREET_PATCH, _MODELS, _SERVICE
-from tests.test_review_prompt_pins_postgres import _V4_CONTENT, _V5_CONTENT, _bind_v4, _bind_v5
 from tests.test_run_prompt_pins_postgres import _packaged, _seed
 from tests.test_run_publication_settings_postgres import _insert, _ready
 from tests.test_snapshot_path_live_pin import _live_assets
@@ -162,6 +171,8 @@ class GitHubHttp:
     rag: bool = False
     # The changed files as GitHub lists them; ``None``: the service and its test.
     files: tuple[dict[str, Any], ...] | None = None
+    # The caller of ``greet`` the head serves to a RAG read.
+    caller: str = _USER
     calls: list[str] = field(default_factory=list)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
@@ -199,7 +210,7 @@ class GitHubHttp:
                 _SERVICE_SHA: _SERVICE.encode(),
                 _MODELS_SHA: _MODELS.encode(),
                 _TEST_SHA: _TEST_FILE.encode(),
-                _APP_SHA: _USER.encode(),
+                _APP_SHA: self.caller.encode(),
             }[sha]
             if request.headers["Accept"] == "application/vnd.github.raw+json":
                 return httpx.Response(200, content=raw)
@@ -244,9 +255,16 @@ class ModelHttp:
 
     kinds: list[str]
     bodies: list[dict[str, Any]] = field(default_factory=list)
+    summaries: list[dict[str, Any]] = field(default_factory=list)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
+        if body.get("response_format", {}).get("json_schema", {}).get("name") == (
+            "ChangeSummaryOutput"
+        ):
+            # The change summary agent (#316): the attempt's last call, when a slot is left.
+            self.summaries.append(body)
+            return completion(json.dumps({"sentences": ["Adds an extra counter to a service."]}))
         self.bodies.append(body)
         kind = self.kinds.pop(0)
         if kind == "unavailable":
@@ -355,13 +373,18 @@ async def _make_due(session: AsyncSession, run_id: UUID) -> None:
     )
 
 
+# Binds a run to an inactive row of a packaged review.system version (the seed stops at v3).
+_BIND = {4: _bind_v4, 5: _bind_v5, 7: _bind_v7}
+
+
 async def _scenario(
     factory: async_sessionmaker[AsyncSession],
     *,
     version: int,
     retry: bool,
     rag: bool,
-    v5_seeded: bool = False,
+    seeded_after: int | None = None,
+    caller: str = _USER,
     llm: LlmSettings = _LLM,
     review_kind: str | None = None,
     verifier_kinds: tuple[str, ...] = ("verifier",),
@@ -369,13 +392,15 @@ async def _scenario(
     redeliveries: int = 0,
 ) -> Observed:
     """``version``: the review.system version the run is bound to; v3 is the seeded live row.
-    ``v5_seeded``: the run is created under the seeded live v4 row, then the v5 seed makes v5
-    live before the worker takes the run. ``llm``: the models of the composition;
-    ``review_kind`` and ``verifier_kinds``: how the review and the verifier calls answer;
-    ``files``: the changed files GitHub lists, the service and its test when ``None``;
-    ``redeliveries``: how many more times the worker takes the run once it is due again."""
+    ``seeded_after``: the run is created under the seeded live row of ``version``, then the
+    seed up to ``seeded_after`` makes that version live before the worker takes the run.
+    ``caller``: the caller of ``greet`` a RAG read gets at the head. ``llm``: the models of
+    the composition; ``review_kind`` and ``verifier_kinds``: how the review and the verifier
+    calls answer; ``files``: the changed files GitHub lists, the service and its test when
+    ``None``; ``redeliveries``: how many more times the worker takes the run once it is due
+    again."""
     await _ready(factory)
-    await _seed(factory, _up_to(_packaged(), 4) if v5_seeded else _live_assets())
+    await _seed(factory, _live_assets() if seeded_after is None else _up_to(_packaged(), version))
     async with factory.begin() as session:
         run_id = await _insert(session)
         await session.execute(
@@ -385,8 +410,8 @@ async def _scenario(
             ),
             {"id": REPO_A, "rag": rag},
         )
-    if v5_seeded:
-        await _seed(factory, _packaged())
+    if seeded_after is not None:
+        await _seed(factory, _up_to(_packaged(), seeded_after))
         [pinned_and_live] = await _rows(
             factory,
             "SELECT p.version, (SELECT version FROM prompt_versions "
@@ -394,19 +419,19 @@ async def _scenario(
             "FROM runs r JOIN prompt_versions p ON p.id = r.prompt_version_id WHERE r.id=:id",
             run_id,
         )
-        assert pinned_and_live == (4, 5)
+        assert pinned_and_live == (version, seeded_after)
     index = _Index(factory, REPO_A, REPO_B)
     if rag:
         # A ready graph index of the default branch at C1 knows the caller of ``greet``.
         await _enable(index, REPO_A)
         await _build(index, REPO_A, C1, _user_file())
-    if version == 4 and not v5_seeded:
-        await _bind_v4(factory, run_id)
-    elif version == 5:
-        await _bind_v5(factory, run_id)
+    if seeded_after is None and version in _BIND:
+        await _BIND[version](factory, run_id)
     snapshot_path = version >= 4
     queue = Queue()
-    github_http = GitHubHttp(files_unavailable=1 if retry and not rag else 0, rag=rag, files=files)
+    github_http = GitHubHttp(
+        files_unavailable=1 if retry and not rag else 0, rag=rag, files=files, caller=caller
+    )
     if review_kind is None:
         review_kind = "review-v2" if snapshot_path else "review-v1"
     if retry and rag:
@@ -593,7 +618,8 @@ def _observe(
     version: int,
     retry: bool = False,
     rag: bool = False,
-    v5_seeded: bool = False,
+    seeded_after: int | None = None,
+    caller: str = _USER,
     llm: LlmSettings = _LLM,
     review_kind: str | None = None,
     verifier_kinds: tuple[str, ...] = ("verifier",),
@@ -608,7 +634,8 @@ def _observe(
                 version=version,
                 retry=retry,
                 rag=rag,
-                v5_seeded=v5_seeded,
+                seeded_after=seeded_after,
+                caller=caller,
                 llm=llm,
                 review_kind=review_kind,
                 verifier_kinds=verifier_kinds,
@@ -622,8 +649,9 @@ def _observe(
 
 
 # The trace of a v4 attempt, as built (G aligns the canon, PIPELINE_SPEC §7, with it). The
-# stage's ``context.build`` is the attempt's only one (#168 part 6); ``llm.verify`` sits in
-# the publishing transaction right before ``review.postprocess``.
+# stage's ``context.build`` is the attempt's only one (#168 part 6); the change summary
+# agent's ``llm.call`` (#316) follows the verifier's without a manifest; ``llm.verify`` sits
+# in the publishing transaction right before ``review.postprocess``.
 _SNAPSHOT_PATH_STEPS = [
     "policy.load",
     "vcs.fetch_diff",
@@ -634,6 +662,7 @@ _SNAPSHOT_PATH_STEPS = [
     "context.manifest",
     "llm.call",
     "context.manifest",
+    "llm.call",
     "llm.call",
     "llm.review_output",
     "llm.verify",
@@ -659,10 +688,14 @@ def _assert_snapshot_path(
     review_fallback: bool = False,
     version: int = 4,
     rag: bool = False,
+    summarized: bool = True,
 ) -> None:
     run_id, (review_pin, _, verifier_pin) = observed.run_id, observed.pins
     assert observed.state == ("publishing", None, attempt)
     steps = list(_SNAPSHOT_PATH_STEPS)
+    if not summarized:
+        # The attempt's four calls leave the change summary agent no slot: no call is sent.
+        del steps[steps.index("llm.review_output") - 1]
     if rag:
         # RAG is on: the stage records the index after the context build.
         steps.insert(steps.index("context.build") + 1, "context.rag")
@@ -697,6 +730,9 @@ def _assert_snapshot_path(
     # The run's one context_payloads row is that build's response (schema 2).
     assert observed.payloads == [(2, stage_build)]
     calls = [request for request, _ in observed.actions["llm.call"]]
+    if summarized:
+        *calls, summary = calls
+        assert (summary["operation"], summary["prompt_version_id"]) == ("change_summary", None)
     manifests = observed.actions["context.manifest"]
     assert [call["stage"] for call in calls] == stages
     for call, (manifest_request, manifest) in zip(calls, manifests, strict=True):
@@ -776,6 +812,11 @@ def _assert_snapshot_path(
     ]
     [(_, postprocess)] = observed.actions["review.postprocess"]
     assert postprocess["inline"] == 1
+    assert postprocess["change_summary"] == (
+        {"status": "shown", "received": 1, "shown": 1}
+        if summarized
+        else {"status": "failed", "error_code": "llm_unavailable"}
+    )
     assert [(pointer.run_id, pointer.findings_hash) for pointer in observed.queue.published] == [
         (run_id, postprocess["findings_hash"])
     ]
@@ -807,7 +848,11 @@ def test_a_retried_v4_attempt_keeps_the_snapshot_and_the_pins(env: Env) -> None:
     assert observed.outcomes == ["ack", "ack"]
     assert len(observed.queue.retries) == 1
     _assert_snapshot_path(
-        observed, attempt=2, earlier=("policy.load", "vcs.fetch_diff"), review_fallback=True
+        observed,
+        attempt=2,
+        earlier=("policy.load", "vcs.fetch_diff"),
+        review_fallback=True,
+        summarized=False,
     )
     rotated = (_ROTATED, _ROTATED_REVIEW, _ROTATED_VERIFIER)
     assert all(
@@ -860,7 +905,7 @@ def test_a_v4_run_in_flight_when_v5_is_seeded_keeps_the_v4_prompt(env: Env) -> N
     # The run is created under the live v4 row; the v5 seed makes v5 live before the worker
     # takes it. RAG is on with a ready index: the run keeps its v4 pin and body, shows no
     # retrieved section, and ``context.rag`` records the usable index as not used.
-    observed = _observe(env, version=4, rag=True, v5_seeded=True)
+    observed = _observe(env, version=4, rag=True, seeded_after=5)
 
     assert observed.outcomes == ["ack"]
     assert observed.queue.retries == []
@@ -1003,6 +1048,35 @@ def test_a_v5_run_shows_the_retrieved_section_through_the_worker_composition(env
         review_body=review_body,
         verifier_body=verifier_body,
     )
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("version", "seeded_after", "prompt", "shown"),
+    [
+        (7, None, _V7_CONTENT, "    return greet(user_id)  # [comment removed]"),
+        (5, 7, _V5_CONTENT, "    return greet(user_id)  # note"),
+    ],
+    ids=["v7-hides-the-comment", "v5-in-flight-when-v7-is-seeded-shows-it"],
+)
+def test_the_pinned_prompt_decides_whether_a_retrieved_comment_is_shown(
+    env: Env, version: int, seeded_after: int | None, prompt: str, shown: str
+) -> None:
+    # #498: the caller of ``greet`` has a comment. A v7-bound run shows it as a marker on the
+    # same line; a run pinned to v5 before the v7 seed keeps v5 and shows the comment.
+    observed = _observe(
+        env, version=version, rag=True, seeded_after=seeded_after, caller=_USER_NOTED
+    )
+
+    assert observed.outcomes == ["ack"]
+    [(_, rag_response)] = observed.actions["context.rag"]
+    assert rag_response["outcome"] == "used"
+    _, review_body, verifier_body = observed.bodies
+    assert review_body["messages"][0]["content"] == prompt
+    section = _retrieved_section(review_body["messages"][-1]["content"])
+    assert f'<line n="{_CALL_LINE}">{shown}</line>' in section
+    # The verifier shows the block the review showed.
+    assert _retrieved_section(verifier_body["messages"][-1]["content"]) == section
 
 
 @pytest.mark.integration

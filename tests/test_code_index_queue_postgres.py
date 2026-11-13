@@ -28,16 +28,13 @@ import httpx
 import pytest
 from aio_pika.abc import AbstractIncomingMessage, AbstractQueue, AbstractRobustConnection
 from aiormq.exceptions import ChannelPreconditionFailed
-from alembic.config import Config
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
 import app.modules.reviews.infrastructure.amqp as review_amqp
-from alembic import command
 from app.bootstrap.code_index_worker import CodeIndexSettings, index_consumer
 from app.common.infrastructure.heartbeat import is_fresh
 from app.modules.code_index.application.build_index import BuildOutcome, BuildStatus
@@ -60,6 +57,9 @@ from app.modules.integrations.bitbucket.infrastructure.credential_cipher import 
 )
 from app.modules.reviews.application.run_failures import RetryDelays
 from app.worker import WorkerSettings, run_worker
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 SHORT_DELAYS = RetryDelays(
     short=timedelta(milliseconds=200),
@@ -175,32 +175,14 @@ def _insert_repository(connection: Any, installation_external_id: int, full_name
 
 
 @pytest.fixture
-def database() -> Iterator[Database]:
-    url = os.environ.get("TEST_DATABASE_URL")
-    if url is None:
-        pytest.skip("set TEST_DATABASE_URL to run the index queue integration tests")
-    schema = f"test_code_index_queue_{uuid4().hex}"
-    engine = create_engine(url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                config = Config("alembic.ini")
-                config.attributes["connection"] = connection
-                command.upgrade(config, "head")
-                a = _insert_repository(connection, 18, "octo/indexed-a")
-                b = _insert_repository(connection, 17, "octo/indexed-b")
-                connection.commit()
-                yield Database(url, schema, a, b)
-            finally:
-                connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
-    finally:
-        engine.dispose()
+def database(migrated_db: MigratedDatabase) -> Iterator[Database]:
+    url = migrated_db.url
+    schema = migrated_db.schema
+    with migrated_db.connect() as connection:
+        a = _insert_repository(connection, 18, "octo/indexed-a")
+        b = _insert_repository(connection, 17, "octo/indexed-b")
+        connection.commit()
+        yield Database(url, schema, a, b)
 
 
 async def _next(queue: AbstractQueue, timeout: float = 10.0) -> AbstractIncomingMessage:

@@ -52,7 +52,7 @@ offline from its frozen ``index.json`` and the recorded prompt budget
 recorded prompt, retrieved or fit fields differ; it needs no network and no key. A RAG
 corpus replays only from such a capture, and such a capture only over RAG cases.
 Invalid recorded output contributes to scoring as invalid rather than being
-corrected or dropped. The answers of a snapshot-path ``prompt_version`` (v4/v5) are
+corrected or dropped. The answers of a snapshot-path ``prompt_version`` (v4, v5, v7) are
 validated as ReviewOutput v2 (``validate_findings.py --schema v2``). Schema-v1
 manifests require all three digest fields and publishability metadata consistent
 with per-case statuses, so replay cannot silently skip drift or terminal provider
@@ -695,7 +695,7 @@ def _rag_warnings(
     # Imported here: the offline build loads the parser and the indexer, which replaying a
     # main or rules capture never needs (``eval_live`` and ``eval_ab`` import this module).
     from review.scripts.eval_live import rag_prompt_evidence
-    from review.scripts.eval_rag_context import build_arm_input
+    from review.scripts.eval_rag_context import build_arm_input, system_prompt
     from review.scripts.eval_rag_source import commit_id
     from review.scripts.rag_snapshot import INDEX_FILE
 
@@ -726,9 +726,17 @@ def _rag_warnings(
         raise ReplayError("RAG evidence is missing for publishable cases: " + ", ".join(unrecorded))
 
     arm: Literal["A", "B"] = "B" if metadata["rag_arm"] == "graph" else "A"
+    # The evidence is rebuilt under the prompt the capture recorded, not the newest one (#498).
+    version = manifest["prompt_version"]
+    try:
+        system_prompt(version)
+    except ValueError as exc:
+        raise ReplayError(f"a RAG capture of {manifest['prompt_path']}: {exc}") from exc
 
     async def derive(case_dir: Path) -> dict[str, Any]:
-        built = await build_arm_input(case_dir, arm, review_model=manifest["model_id"])
+        built = await build_arm_input(
+            case_dir, arm, review_model=manifest["model_id"], version=version
+        )
         return rag_prompt_evidence(built.case, model_max_prompt_tokens=budget)[1]
 
     problems = []
@@ -802,7 +810,7 @@ def replay(
     # A legacy capture saw no policy snapshot: score it on every truth, as before #163.
     recorded_arm = manifest["run_metadata"].get("policy_arm", "legacy")
     scoring_arm = None if recorded_arm == "legacy" else recorded_arm
-    # A snapshot-path prompt (v4/v5) answers in ReviewOutput v2, as the gateway required.
+    # A snapshot-path prompt (v4, v5, v7) answers in ReviewOutput v2, as the gateway required.
     v2 = manifest["prompt_version"] in SNAPSHOT_REVIEW_PROMPT_VERSIONS
     cases = []
     normalized_cases = []

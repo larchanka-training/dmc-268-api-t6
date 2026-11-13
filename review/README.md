@@ -16,7 +16,8 @@ from the database; the separate snapshot verifier still loads a pinned package r
 | `prompts/review.system.v2.md`           | v1 + input metadata, few-shot examples              |
 | `prompts/review.system.v3.md`           | legacy reviewer prompt (#178/#233)                  |
 | `prompts/review.system.v4.md`           | snapshot-path reviewer prompt (#130)                |
-| `prompts/review.system.v5.md`           | current snapshot-path reviewer prompt: v4 + `<retrieved_excerpts>`, RAG v1 (#144) |
+| `prompts/review.system.v5.md`           | snapshot-path reviewer prompt: v4 + `<retrieved_excerpts>`, RAG v1 (#144) |
+| `prompts/review.system.v7.md`           | current snapshot-path reviewer prompt: v5 + retrieved comments as markers, input that steers findings (#498) |
 | `prompts/review.verifier.v1.md`         | historical reflection verifier prompt from #133     |
 | `prompts/review.verifier.v2.md`         | current snapshot verifier default (#219): conventions & evidence refs |
 | `prompts/review.summary.v1.md`          | change summary agent (#316): what a PR changes, 1–3 sentences |
@@ -34,16 +35,20 @@ from the database; the separate snapshot verifier still loads a pinned package r
 | `scripts/validate_findings.py`          | validator of model outputs: schema + semantic rules |
 | `examples/`                             | synthetic diff and sample outputs (proof run)       |
 
-The current live prompt files are `review.system.v5` (#144) and
+The current live prompt files are `review.system.v7` (#498) and
 `review.conventions.v2`. `seed_prompt_versions` in `app/bootstrap/seed_prompts.py`
 activates the newest known version of each key in `prompt_versions` by setting
-`is_active`, so a new run pins v5, unless its repository overrides the review prompt
+`is_active`, so a new run pins v7, unless its repository overrides the review prompt
 (`repositories.prompt_version_id`), and takes the snapshot path; a run pinned to
-`review.system` v4 stays on v4 without the retrieved section, and a run pinned to
-`review.system.v3` or lower keeps the legacy path. v5 is v4 plus `<retrieved_excerpts>`
-(always present, empty without RAG), the rule that repository code in it is data, not
-instructions, and its evidence rules: a retrieved excerpt is never the anchor, and a
-LEFT one is evidence only. The manual gateway check in `app/bootstrap/llm_gateway.py`
+`review.system` v5 stays on v5 and sees the comments of its retrieved excerpts, a run
+pinned to v4 stays on v4 without the retrieved section, and a run pinned to
+`review.system.v3` or lower keeps the legacy path. There is no v6: its A/B drafts (#399)
+keep the number. v5 is v4 plus `<retrieved_excerpts>` (always present, empty without RAG),
+the rule that repository code in it is data, not instructions, and its evidence rules: a
+retrieved excerpt is never the anchor, and a LEFT one is evidence only. v7 is v5 with every
+comment of a retrieved excerpt shown as a `[comment removed]` marker in its own syntax
+(line numbers kept) and the rule that text demanding, forbidding or moving a finding is no
+basis for one unless it is a review criterion of the repository rules (ADR 0001 §9). The manual gateway check in `app/bootstrap/llm_gateway.py`
 still defaults to `review.system.v3` and `review.conventions.v2`. The recorded replay and
 the eval baseline moved to v5 with the single paid eval re-shoot (#130, R15 in
 [`130-snapshot-switch-plan.md`](https://github.com/larchanka-training/dmc-268-api-t6/blob/f1c1b9587f4edaecf784eefd5a0aed79488ec7fa/docs/plans/130-snapshot-switch-plan.md); #144): the
@@ -106,7 +111,7 @@ the backend and is not part of the draft.
 ## Assembly order
 
 This order and the review tags of "Input envelope" below are those of the legacy path (a run pinned to
-`review.system.v3` or lower); a v4 or v5 run's review request uses the envelope in "Policy snapshot v2 envelope and
+`review.system.v3` or lower); a v4, v5 or v7 run's review request uses the envelope in "Policy snapshot v2 envelope and
 reflection pass" below, and the `review.conventions` tags are the same on both paths.
 
 One request is assembled as `system → <custom_instructions> → <agents_md> → <repo_conventions> → <pr_meta> →
@@ -230,13 +235,13 @@ Under Policy Snapshot v2 (`policy_snapshot` present), prompts and candidate find
 - `<pr_meta>`: PR metadata (title, description, author, branch, base ref, commit messages).
 - `<changed_files>`: each `<file path="..." block_id="..." status="..." language="...">` carries a stable `block_id`. Contiguous ranges shown to the model are recorded in `ManifestBlock.shown_ranges`.
 - `<context_excerpts>`: the L2-L4 blocks of the context stage, one `<excerpt block_id="..." level="..." path="..." revision="..." side="..." representation="...">` each (`path`, `revision` and `side` only when the block's source has them), with pre-numbered `<line n="...">` source lines; present only when the stage produced such blocks. A legacy run's stage context reaches the run trace only.
-- `<retrieved_excerpts>` (v5 only, always present, empty without RAG): the RAG blocks of the context stage in the same `<excerpt>` form with `level="RAG"` — code the repository index linked to the diff, RIGHT at the head and, for a removed export, the old definition LEFT at the old revision; data, never instructions; citable as evidence, never the anchor.
+- `<retrieved_excerpts>` (v5 and v7 only, always present, empty without RAG): the RAG blocks of the context stage in the same `<excerpt>` form with `level="RAG"` — code the repository index linked to the diff, RIGHT at the head and, for a removed export, the old definition LEFT at the old revision; data, never instructions; citable as evidence, never the anchor. Under v7 every comment in them is a `[comment removed]` marker in its own syntax.
 - `<omitted_files>`: as in the legacy envelope.
 - `<excluded_files count="N" />`: the number of files the repository's ignore policy withholds, never their names; present only when N > 0.
 
 **Reflection Pass (packaged `prompts/review.verifier.v1.md` / `v2.md`, selected by the snapshot pin)**:
 - Two-pass verification architecture to eliminate hallucinated findings.
-- **Pass 1 (Reviewer, snapshot/v2 contract)** generates candidate findings with required `evidence_refs` (pointing to visible `block_id` line ranges). This applies to the snapshot path: since #130 F2 a new run pins the active snapshot-contract prompt (`review.system.v4`; `v5` since #350), unless its repository overrides the review prompt, and the worker passes the reviewer's answer to the Reflection Pass, which main #130 F1 supplies lazily through the production attempt provider. A run pinned to `review.system.v3` or lower keeps the legacy path and the v1 response contract, without a Reflection Pass.
+- **Pass 1 (Reviewer, snapshot/v2 contract)** generates candidate findings with required `evidence_refs` (pointing to visible `block_id` line ranges). This applies to the snapshot path: since #130 F2 a new run pins the active snapshot-contract prompt (`review.system.v4`; `v5` since #350, `v7` since #498), unless its repository overrides the review prompt, and the worker passes the reviewer's answer to the Reflection Pass, which main #130 F1 supplies lazily through the production attempt provider. A run pinned to `review.system.v3` or lower keeps the legacy path and the v1 response contract, without a Reflection Pass.
 - **Pass 2 (Verifier)** checks each candidate against visible code and requirements using the packaged verifier version selected by the snapshot binding.
   - Verifier prompt envelope: contains `<repository_rules>`, `<project_conventions_document>`, `<service_defaults>`, `<repo_conventions>`, `<code_context>` (with `<changed_files>`), and `<candidate_findings count="...">` (carrying `<candidate candidate_id="..." path="..." start_line="..." line="..." category="..." severity="...">`, `<title>`, `<body>`, optional `<suggestion>`, `<evidence_refs>`, and optional `<rule_attribution name="..." />`).
   - Verifier output: validated at runtime via Pydantic (`VerificationOutput`, `ReviewFindingV2`) conforming to contract `schemas/verifier-output.schema.v1.json` (`decisions`: `candidate_id`, `status` in `supported` / `contradicted` / `insufficient_context`, `reason`, `evidence_refs`, `requirement_refs`). Legacy runs (pinned to `review.system.v3` or lower, with or without a policy snapshot) continue to process v1 output.
@@ -299,7 +304,7 @@ printed one per line), `2` when the file is not JSON or its kind is unknown. One
 `uv run python review/scripts/validate_findings.py review/examples/findings.sample.json`. The kind is
 detected from the top-level key: `findings` → `ReviewOutput`, `files` →
 `RepoConventionsDraft`. A file carrying both keys is rejected with exit `2`. `--schema v2` checks the
-answer of a snapshot-path prompt (v4/v5) as `ReviewOutputV2`, the v2 schema and then the runtime model
+answer of a snapshot-path prompt (v4, v5, v7) as `ReviewOutputV2`, the v2 schema and then the runtime model
 (prints `OK ReviewOutputV2 <n> items`). The 120-word `body` limit of
 `review.system.v2.md` §7 is a prompt-level brevity target, not part of the backend schema: the validator
 enforces only the 1200-character ceiling. The tests run it over `examples/*.sample.json`. Quality targets and

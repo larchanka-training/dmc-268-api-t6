@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -18,7 +17,6 @@ from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 from openapi_spec_validator import OpenAPIV31SpecValidator, validate
-from pydantic import ValidationError as PydanticValidationError
 
 from app.bootstrap.reviews_api import (
     get_cancel_run,
@@ -43,7 +41,6 @@ from app.main import (
     get_file_blob_cache,
     get_run_event_hub,
     get_run_repository,
-    to_rules_status_dto,
 )
 from app.modules.code_index.domain.enums import PurgeReason, RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
@@ -59,11 +56,7 @@ from app.modules.repositories.application.repository_settings import (
 )
 from app.modules.repositories.application.rules_status import (
     GetRulesStatus,
-    RulesDiagnostic,
     RulesDocumentPath,
-    RulesStatus,
-    RulesStatusKind,
-    StoredRulesStatus,
 )
 from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
 from app.modules.reviews.application.diff_map import DiffSide
@@ -90,10 +83,16 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
 )
 from app.modules.reviews.application.verdict import SeverityThresholdValue, Verdict
 from tests.openapi_contract import (
+    CHECKED_AT,
+    HTTP_METHODS,
+    REPOSITORY_ID,
     SPEC_PATH,
+    UI_ZOD_COMPONENTS,
+    ContractRulesStatus,
     _components,
     _escape,
     _load_spec,
+    _operations,
     _spec,
     _validator_at,
     _validator_for,
@@ -109,7 +108,6 @@ from tests.test_ui_zod_contracts import (
     run_origin_responses,
 )
 
-HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
 # api#20 D9: the webhook receiver and the liveness probe are not part of the browser API.
 EXCLUDED_APP_PATHS = frozenset(
     {
@@ -119,34 +117,6 @@ EXCLUDED_APP_PATHS = frozenset(
         "/webhooks/bitbucket/{installation_id}/{repository_id}",
     }
 )
-# DTOs shared with the UI: Zod snapshot name -> contracts/openapi.yaml component.
-UI_ZOD_COMPONENTS = {
-    "runSession": "RunSession",
-    "runAction": "RunAction",
-    "reviewComment": "ReviewComment",
-    "runDetail": "RunDetail",
-    "findingView": "FindingView",
-    "runListPage": "RunListPage",
-    "runUpdatedEvent": "RunUpdatedEvent",
-    "runStepEvent": "RunStepEvent",
-    "repository": "Repository",
-    "repositoryUpdate": "RepositoryUpdate",
-    "rawFileDiff": "RawFileDiff",
-    "fileSlice": "FileSlice",
-    "authSession": "AuthSession",
-    "me": "Me",
-    "metricsSummary": "MetricsSummary",
-    "bitbucketDiscoveryRequest": "BitbucketDiscoveryRequest",
-    "bitbucketDiscoveredRepository": "BitbucketDiscoveredRepository",
-    "bitbucketDiscoveryResponse": "BitbucketDiscoveryResponse",
-    "bitbucketConnectRequest": "BitbucketConnectRequest",
-    "bitbucketWebhookSetup": "BitbucketWebhookSetup",
-    "bitbucketConnectResponse": "BitbucketConnectResponse",
-    "bitbucketConnectionItem": "BitbucketConnectionItem",
-    "bitbucketConnectionList": "BitbucketConnectionList",
-    "bitbucketCredentialRotateRequest": "BitbucketCredentialRotateRequest",
-    "bitbucketCredentialRotateResponse": "BitbucketCredentialRotateResponse",
-}
 # z.int() exports the safe-integer range as its bounds; the spec leaves such integers unbounded.
 ZOD_SAFE_INTEGER = 2**53 - 1
 # Keywords that make a schema typed; a schema with none of them accepts any JSON value, null too.
@@ -154,7 +124,6 @@ TYPED_KEYWORDS = frozenset({"type", "properties", "items", "enum", "const", "any
 UNKNOWN_RUN_ID = UUID("99999999-9999-4999-8999-999999999999")
 EXPIRED_PATH = "expired.py"
 RUN_URL = f"/api/runs/{RUN_ID}"
-REPOSITORY_ID = UUID("22222222-2222-4222-8222-222222222222")
 ORIGIN_CHANGED_RUN_ID = UUID(int=169)
 CONFLICT_RUN_ID = UUID("88888888-8888-4888-8888-888888888888")
 NOT_CONFIGURED_RUN_ID = UUID("77777777-7777-4777-8777-777777777777")
@@ -184,16 +153,6 @@ INVALID_REVIEW_SETTINGS: dict[str, dict[str, object]] = {
         }
     },
 }
-
-
-def _operations(paths: Mapping[str, Any]) -> dict[tuple[str, str], Mapping[str, Any]]:
-    """Key operations by method and template path with parameter names erased."""
-    return {
-        (method, re.sub(r"\{[^}]+\}", "{}", path)): operation
-        for path, item in paths.items()
-        for method, operation in item.items()
-        if method in HTTP_METHODS
-    }
 
 
 class OpenApiContractRepository(ContractRepository):
@@ -366,98 +325,6 @@ class ContractRepositories:
             status = RagIndexStatus.EMPTY if change.rag_enabled else RagIndexStatus.DISABLED
             self.item = replace(self.item, rag_index=RagIndex(status, None, None, 0, 0, None))
         return self.item
-
-
-CHECKED_AT = datetime(2026, 10, 18, 9, 0, tzinfo=UTC)
-_TOO_LARGE = RulesDiagnostic(
-    "policy_document_too_large", "The rules document is over 64 KiB.", None, None, False, 65536
-)
-_TRANSIENT = RulesDiagnostic(
-    "policy_fetch_transient", "Could not read the rules documents from GitHub.", None, None, True
-)
-# One stored result of every variant; None is a repository that was never read.
-RULES_STATUSES: dict[str, RulesStatus | None] = {
-    "present": RulesStatus(
-        RulesStatusKind.PRESENT,
-        "main",
-        "a" * 40,
-        CHECKED_AT,
-        text="# Rules\n",
-        checksum="b" * 64,
-        ignore_masks=("docs/**",),
-    ),
-    "present-empty": RulesStatus(
-        RulesStatusKind.PRESENT,
-        "main",
-        "a" * 40,
-        CHECKED_AT,
-        text="",
-        checksum="c" * 64,
-        ignore_masks=(),
-    ),
-    "missing": RulesStatus(
-        RulesStatusKind.MISSING, "main", "a" * 40, CHECKED_AT, defaults_version="v1"
-    ),
-    "invalid": RulesStatus(
-        RulesStatusKind.INVALID,
-        "main",
-        "a" * 40,
-        CHECKED_AT,
-        diagnostics=(
-            RulesDiagnostic("policy_ignore_pattern_invalid", "Mask.", 5, 6, False, pattern_index=0),
-        ),
-        text="```review-ignore\nsrc/a?.py\n```\n",
-    ),
-    "invalid-too-large": RulesStatus(
-        RulesStatusKind.INVALID, "main", "a" * 40, CHECKED_AT, diagnostics=(_TOO_LARGE,)
-    ),
-    # A read that stopped past the cap knows only a lower bound of the size.
-    "invalid-too-large-lower-bound": RulesStatus(
-        RulesStatusKind.INVALID,
-        "main",
-        "a" * 40,
-        CHECKED_AT,
-        diagnostics=(replace(_TOO_LARGE, actual=69_632, actual_is_lower_bound=True),),
-    ),
-    "unavailable": RulesStatus(
-        RulesStatusKind.UNAVAILABLE, "main", None, CHECKED_AT, diagnostics=(_TRANSIENT,)
-    ),
-    "pending": None,
-}
-
-
-class ContractRulesStatus:
-    """Rules status store and its unit of work; requests are counted, not stored."""
-
-    def __init__(self, status: RulesStatus | None = RULES_STATUSES["present"]) -> None:
-        self.status = status
-        self.requests = 0
-
-    @property
-    def rules_status(self) -> ContractRulesStatus:
-        return self
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, *args: object) -> None:
-        return None
-
-    async def commit(self) -> None:
-        return None
-
-    async def rollback(self) -> None:
-        return None
-
-    async def get(self, repository_id: UUID) -> StoredRulesStatus | None:
-        if repository_id != REPOSITORY_ID:
-            return None
-        return StoredRulesStatus(
-            "main", self.status, refresh_requested=False, installation_available=True
-        )
-
-    async def request_refresh(self, repository_id: UUID) -> None:
-        self.requests += 1
 
 
 class ContractPulls:
@@ -690,118 +557,6 @@ def test_rerun_invalid_uuid_response_validates_against_declared_schema(client: T
     assert detail[0]["msg"].startswith("Input should be a valid UUID")
     assert "ctx" in detail[0]
     _validator_for("post", "/api/runs/{run_id}/rerun", "422").validate(response.json())
-
-
-@pytest.mark.parametrize("name", RULES_STATUSES)
-def test_every_rules_status_variant_validates_against_the_declared_schema(name: str) -> None:
-    store = ContractRulesStatus(RULES_STATUSES[name])
-    app.dependency_overrides[get_rules_status] = lambda: GetRulesStatus(
-        lambda: store, now=lambda: CHECKED_AT
-    )
-    try:
-        response = authenticated_test_client(app).get(f"/api/repos/{REPOSITORY_ID}/rules-status")
-    finally:
-        app.dependency_overrides.clear()
-    body = response.json()
-
-    assert response.status_code == 200
-    assert body["status"] == name.split("-")[0]
-    assert body["path"] == ".review/rules.md"
-    _validator_for("get", "/api/repos/{repo_id}/rules-status", "200").validate(body)
-
-
-@pytest.mark.parametrize(
-    ("variant", "change"),
-    [
-        ("present", {"status": "missing"}),
-        ("missing", {"defaultsVersion": None}),
-        ("invalid", {"diagnostics": []}),
-        ("unavailable", {"diagnostics": [{**_TRANSIENT.__dict__}]}),
-        ("unavailable", {"sha": "A" * 40}),
-        ("present", {"sha": "a" * 64}),
-        ("missing", {"sha": "a" * 39}),
-        ("pending", {"checkedAt": "2026-10-18T09:00:00Z"}),
-    ],
-)
-def test_rules_status_validation_rejects_drift(variant: str, change: dict[str, Any]) -> None:
-    store = ContractRulesStatus(RULES_STATUSES[variant])
-    app.dependency_overrides[get_rules_status] = lambda: GetRulesStatus(
-        lambda: store, now=lambda: CHECKED_AT
-    )
-    try:
-        body = authenticated_test_client(app).get(f"/api/repos/{REPOSITORY_ID}/rules-status")
-    finally:
-        app.dependency_overrides.clear()
-
-    with pytest.raises(ValidationError):
-        _validator_for("get", "/api/repos/{repo_id}/rules-status", "200").validate(
-            {**body.json(), **change}
-        )
-
-
-@pytest.mark.parametrize("sha", ["a" * 64, "A" * 40, "a" * 39], ids=["sha-256", "upper", "short"])
-@pytest.mark.parametrize("variant", ["present", "missing", "invalid"])
-def test_the_rules_status_dto_takes_a_40_hex_sha_only(variant: str, sha: str) -> None:
-    stored = RULES_STATUSES[variant]
-    assert stored is not None
-
-    with pytest.raises(PydanticValidationError, match="sha"):
-        to_rules_status_dto(replace(stored, sha=sha))
-
-
-def test_diagnostic_omits_the_limits_it_does_not_know() -> None:
-    store = ContractRulesStatus(RULES_STATUSES["invalid"])
-    app.dependency_overrides[get_rules_status] = lambda: GetRulesStatus(
-        lambda: store, now=lambda: CHECKED_AT
-    )
-    try:
-        body = authenticated_test_client(app).get(f"/api/repos/{REPOSITORY_ID}/rules-status")
-    finally:
-        app.dependency_overrides.clear()
-
-    assert body.json()["diagnostics"] == [
-        {
-            "code": "policy_ignore_pattern_invalid",
-            "message": "Mask.",
-            "line": 5,
-            "column": 6,
-            "retryable": False,
-            "patternIndex": 0,
-        }
-    ]
-
-
-def test_diagnostic_serves_the_offending_mask_when_it_has_one() -> None:
-    stored = RULES_STATUSES["invalid"]
-    assert stored is not None
-    (diagnostic,) = stored.diagnostics
-    store = ContractRulesStatus(
-        replace(stored, diagnostics=(replace(diagnostic, excerpt="src/a?.py"),))
-    )
-    app.dependency_overrides[get_rules_status] = lambda: GetRulesStatus(
-        lambda: store, now=lambda: CHECKED_AT
-    )
-    try:
-        body = authenticated_test_client(app).get(f"/api/repos/{REPOSITORY_ID}/rules-status")
-    finally:
-        app.dependency_overrides.clear()
-
-    assert body.json()["diagnostics"][0]["excerpt"] == "src/a?.py"
-    _validator_for("get", "/api/repos/{repo_id}/rules-status", "200").validate(body.json())
-
-
-def test_rules_operations_are_replaced_and_the_status_is_not_shared_with_zod() -> None:
-    operations = _operations(_spec()["paths"])
-    for key in (
-        ("get", "/api/repos/{}/rules"),
-        ("post", "/api/repos/{}/rules"),
-        ("post", "/api/rules/{}/preview"),
-    ):
-        assert operations[key]["x-status"] == "planned"
-        assert "Replaced" in operations[key]["x-note"]
-        assert "§10" in operations[key]["x-note"]
-    assert "x-status" not in operations[("get", "/api/repos/{}/rules-status")]
-    assert "RulesStatus" not in UI_ZOD_COMPONENTS.values()
 
 
 def test_stream_events_validate_against_the_declared_event_schema() -> None:

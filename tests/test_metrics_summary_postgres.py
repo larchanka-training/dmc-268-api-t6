@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import event, text
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.get_metrics_summary import GetMetricsSummary
@@ -29,6 +29,7 @@ from tests.portal_postgres import (
     WS_B,
     Env,
     clean_review_result,
+    copy_seeded_run,
 )
 
 pytest_plugins = ("tests.portal_postgres",)
@@ -64,7 +65,7 @@ def test_metrics_summary_counts_visible_runs_and_todays_spend(portal_env: Env) -
                         "finished_at = '2020-01-01T00:00:00Z'"
                     )
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     _RUN_OK,
                     PR_OPEN,
@@ -73,7 +74,7 @@ def test_metrics_summary_counts_visible_runs_and_todays_spend(portal_env: Env) -
                     datetime(2026, 10, 26, 11, tzinfo=UTC),
                     "a" * 64,
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     _RUN_BAD,
                     PR_NEW,
@@ -82,7 +83,7 @@ def test_metrics_summary_counts_visible_runs_and_todays_spend(portal_env: Env) -
                     datetime(2026, 10, 28, 8, 30, tzinfo=UTC),
                     "b" * 64,
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     _RUN_HIDDEN,
                     PR_B,
@@ -146,7 +147,7 @@ def test_metrics_summary_counts_visible_runs_and_todays_spend(portal_env: Env) -
                 ).execute(scope, range="7d", repo=None)
                 first_selects = len(statements)
                 async with factory.begin() as session:
-                    await _insert_run(
+                    await copy_seeded_run(
                         session,
                         UUID("00000000-0000-4000-8000-000000003220"),
                         PR_CLOSED,
@@ -164,6 +165,9 @@ def test_metrics_summary_counts_visible_runs_and_todays_spend(portal_env: Env) -
         finally:
             await engine.dispose()
 
+        # Runs by day and state, terminal heads, their saved results, the diff fallback of a
+        # head without one, findings by day, severity and category, workspaces.
+        assert first_selects == 6
         assert len(statements) == first_selects
         assert summary.totals.runs_by_status.succeeded == 1
         assert summary.totals.runs_by_status.failed == 1
@@ -200,6 +204,299 @@ def test_metrics_summary_counts_visible_runs_and_todays_spend(portal_env: Env) -
     )
 
 
+def test_a_day_sums_runs_of_every_state_with_and_without_usage(portal_env: Env) -> None:
+    async def exercise() -> None:
+        engine = portal_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        scope = AuthScope(42, (WS_A,))
+        succeeded_with_usage = uuid4()
+        cancelled_with_usage = uuid4()
+        try:
+            async with factory.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE runs SET created_at = '2020-01-01T00:00:00Z', "
+                        "finished_at = '2020-01-01T00:00:00Z'"
+                    )
+                )
+                for run_id, pr, state, created, finished, key in (
+                    (succeeded_with_usage, PR_OPEN, "succeeded", (27, 9, 0), (27, 9, 30), "f"),
+                    (uuid4(), PR_NEW, "succeeded", (27, 10, 0), (27, 11, 0), "g"),
+                    (cancelled_with_usage, PR_CLOSED, "cancelled", (27, 11, 0), (27, 11, 5), "h"),
+                    (uuid4(), PR_OPEN, "failed", (28, 8, 0), (28, 8, 10), "i"),
+                ):
+                    await copy_seeded_run(
+                        session,
+                        run_id,
+                        pr,
+                        state,
+                        datetime(2026, 10, created[0], created[1], created[2], tzinfo=UTC),
+                        datetime(2026, 10, finished[0], finished[1], finished[2], tzinfo=UTC),
+                        key * 64,
+                    )
+                await session.execute(
+                    text(
+                        "INSERT INTO usage_events (id, run_id, workspace_id, provider, model, "
+                        "operation, tokens_in, tokens_out, cost_usd, created_at) VALUES "
+                        "(gen_random_uuid(), :ok, :ws, 'openai', 'gpt', 'review', 3, 1, 0.100, "
+                        "'2026-10-27T09:10:00Z'), "
+                        "(gen_random_uuid(), :ok, :ws, 'openai', 'gpt', 'review', 2, 2, 0.025, "
+                        "'2026-10-27T09:20:00Z'), "
+                        "(gen_random_uuid(), :cancelled, :ws, 'openai', 'gpt', 'review', 7, 0, "
+                        "0.500, '2026-10-27T11:01:00Z')"
+                    ),
+                    {"ok": succeeded_with_usage, "cancelled": cancelled_with_usage, "ws": WS_A},
+                )
+            summary = await GetMetricsSummary(
+                SqlAlchemyMetricsSummary(factory, scope), now=lambda: _NOW
+            ).execute(scope, range="7d", repo=None)
+        finally:
+            await engine.dispose()
+
+        statuses = summary.totals.runs_by_status
+        assert (statuses.succeeded, statuses.cancelled, statuses.failed) == (2, 1, 1)
+        assert (statuses.queued, statuses.running, statuses.skipped) == (0, 0, 0)
+        assert (summary.totals.tokens_in, summary.totals.tokens_out) == (12, 3)
+        assert summary.totals.cost_usd == Decimal("0.625")
+        # 30 and 60 minutes; cancelled and failed runs do not count.
+        assert summary.totals.succeeded_average_duration_seconds == 2700.0
+        by_day = {item.day.isoformat(): item for item in summary.series}
+        assert by_day["2026-10-26"].run_count == 0
+        assert (by_day["2026-10-27"].run_count, by_day["2026-10-27"].cost_usd) == (
+            3,
+            Decimal("0.625"),
+        )
+        assert by_day["2026-10-27"].average_duration_seconds == 2700.0
+        assert (by_day["2026-10-28"].run_count, by_day["2026-10-28"].cost_usd) == (1, Decimal(0))
+        assert by_day["2026-10-28"].average_duration_seconds == 0.0
+
+    asyncio.run(
+        exercise(),
+        loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
+    )
+
+
+def test_a_day_counts_each_category_across_severities(portal_env: Env) -> None:
+    async def exercise() -> None:
+        engine = portal_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        scope = AuthScope(42, (WS_A,))
+        first, second = uuid4(), uuid4()
+        try:
+            async with factory.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE runs SET created_at = '2020-01-01T00:00:00Z', "
+                        "finished_at = '2020-01-01T00:00:00Z'"
+                    )
+                )
+                await copy_seeded_run(
+                    session,
+                    first,
+                    PR_OPEN,
+                    "succeeded",
+                    datetime(2026, 10, 26, 10, tzinfo=UTC),
+                    datetime(2026, 10, 26, 11, tzinfo=UTC),
+                    "j" * 64,
+                )
+                await copy_seeded_run(
+                    session,
+                    second,
+                    PR_NEW,
+                    "succeeded",
+                    datetime(2026, 10, 27, 10, tzinfo=UTC),
+                    datetime(2026, 10, 27, 11, tzinfo=UTC),
+                    "k" * 64,
+                )
+                await _finding(session, first, "critical", "security", published=True)
+                await _finding(session, first, "high", "security", published=True)
+                await _finding(session, first, "low", "readability", published=True)
+                await _finding(session, second, "high", "security", published=True)
+                await _finding(session, second, "medium", "performance", published=True)
+                await _finding(session, second, "info", "correctness", published=False)
+            summary = await GetMetricsSummary(
+                SqlAlchemyMetricsSummary(factory, scope), now=lambda: _NOW
+            ).execute(scope, range="7d", repo=None)
+        finally:
+            await engine.dispose()
+
+        severity = summary.totals.findings_by_severity
+        assert (severity.critical, severity.high, severity.medium, severity.low, severity.info) == (
+            1,
+            2,
+            1,
+            1,
+            0,
+        )
+        category = summary.totals.findings_by_category
+        assert (
+            category.security,
+            category.correctness,
+            category.performance,
+            category.readability,
+        ) == (3, 0, 1, 1)
+        by_day = {item.day.isoformat(): item.findings_by_category for item in summary.series}
+        assert (by_day["2026-10-26"].security, by_day["2026-10-26"].readability) == (2, 1)
+        assert by_day["2026-10-26"].performance == 0
+        assert (by_day["2026-10-27"].security, by_day["2026-10-27"].performance) == (1, 1)
+        assert by_day["2026-10-27"].correctness == 0
+
+    asyncio.run(
+        exercise(),
+        loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
+    )
+
+
+def test_a_summary_only_head_has_no_verdict_and_its_result_is_not_read(portal_env: Env) -> None:
+    async def exercise() -> None:
+        engine = portal_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        scope = AuthScope(42, (WS_A,))
+        clean, stopped = uuid4(), uuid4()
+        try:
+            async with factory.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE runs SET created_at = '2020-01-01T00:00:00Z', "
+                        "finished_at = '2020-01-01T00:00:00Z'"
+                    )
+                )
+                for run_id, pr, key in ((clean, PR_OPEN, "l"), (stopped, PR_NEW, "m")):
+                    await copy_seeded_run(
+                        session,
+                        run_id,
+                        pr,
+                        "succeeded",
+                        datetime(2026, 10, 26, 10, tzinfo=UTC),
+                        datetime(2026, 10, 26, 11, tzinfo=UTC),
+                        key * 64,
+                    )
+                await session.execute(
+                    text(
+                        "INSERT INTO run_actions (id, run_id, index, tool, request, response, "
+                        "started_at, duration_ms) VALUES (:id, :run, 0, 'review.postprocess', "
+                        "'{}'::jsonb, CAST(:body AS jsonb), :at, 1)"
+                    ),
+                    {
+                        "id": uuid4(),
+                        "run": clean,
+                        "body": clean_review_result(HEAD),
+                        "at": datetime(2026, 10, 26, 11, tzinfo=UTC),
+                    },
+                )
+                # The stage stopped before the model: no saved result, no diff rows.
+                await session.execute(
+                    text(
+                        "INSERT INTO context_payloads (id, run_id, schema_version, summary) "
+                        'VALUES (:id, :run, 1, \'{"status": "summary_only"}\')'
+                    ),
+                    {"id": uuid4(), "run": stopped},
+                )
+            statements: list[str] = []
+
+            def record(
+                conn: object,
+                cursor: object,
+                statement: str,
+                parameters: object,
+                context: object,
+                executemany: bool,
+            ) -> None:
+                del conn, cursor, parameters, context, executemany
+                if statement.lstrip().lower().startswith("select"):
+                    statements.append(statement)
+
+            event.listen(engine.sync_engine, "before_cursor_execute", record)
+            try:
+                summary = await GetMetricsSummary(
+                    SqlAlchemyMetricsSummary(factory, scope), now=lambda: _NOW
+                ).execute(scope, range="7d", repo=None)
+            finally:
+                event.remove(engine.sync_engine, "before_cursor_execute", record)
+            page = await ListRepositoryPulls(SqlAlchemyPullRequestQueries(factory, scope)).execute(
+                REPO_A, state="all", limit=20
+            )
+        finally:
+            await engine.dispose()
+
+        buckets = summary.totals.pulls_by_verdict
+        assert (buckets.clean, buckets.no_verdict, buckets.attention, buckets.blocking) == (
+            1,
+            1,
+            0,
+            0,
+        )
+        # The pull list derives the same verdicts on its own path.
+        assert page is not None
+        verdicts = {
+            item.number: None if item.latest_run is None else item.latest_run.verdict
+            for item in page.items
+        }
+        # PR_OPEN is #1, PR_NEW is #3 (tests.portal_postgres).
+        assert (verdicts[1], verdicts[3]) == ("clean", None)
+        # Runs, heads, the one saved result, findings, workspaces: the summary-only head
+        # needs no saved result, so the diff fallback for a missing one is never read.
+        assert len(statements) == 5
+
+    asyncio.run(
+        exercise(),
+        loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
+    )
+
+
+def test_the_summary_reads_without_jit_and_leaves_the_pooled_connection_as_it_was(
+    portal_env: Env,
+) -> None:
+    async def exercise() -> tuple[list[str], object, object]:
+        # One pooled connection, as in the API, so a leaked setting would show on it.
+        engine = create_async_engine(
+            portal_env.database_url,
+            connect_args={"options": f"-csearch_path={portal_env.schema}"},
+            pool_size=1,
+            max_overflow=0,
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        scope = AuthScope(42, (WS_A,))
+        statements: list[str] = []
+
+        def record(
+            conn: object,
+            cursor: object,
+            statement: str,
+            parameters: object,
+            context: object,
+            executemany: bool,
+        ) -> None:
+            del conn, cursor, parameters, context, executemany
+            statements.append(" ".join(statement.split()))
+
+        try:
+            async with engine.connect() as connection:
+                before = await connection.scalar(text("SHOW jit"))
+            event.listen(engine.sync_engine, "before_cursor_execute", record)
+            try:
+                await GetMetricsSummary(
+                    SqlAlchemyMetricsSummary(factory, scope), now=lambda: _NOW
+                ).execute(scope, range="30d", repo=None)
+            finally:
+                event.remove(engine.sync_engine, "before_cursor_execute", record)
+            async with engine.connect() as connection:
+                after = await connection.scalar(text("SHOW jit"))
+        finally:
+            await engine.dispose()
+        return statements, before, after
+
+    statements, before, after = asyncio.run(
+        exercise(),
+        loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
+    )
+
+    # JIT compilation of the window aggregates cost more than it saved (docs/test-plan).
+    assert statements[0] == "SET LOCAL jit = off"
+    assert all(statement.upper().startswith("SELECT") for statement in statements[1:])
+    assert after == before
+
+
 def test_metrics_summary_matches_pull_verdicts_and_published_findings(
     portal_env: Env,
 ) -> None:
@@ -219,7 +516,7 @@ def test_metrics_summary_matches_pull_verdicts_and_published_findings(
                         "finished_at = '2020-01-01T00:00:00Z'"
                     )
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     old,
                     PR_OPEN,
@@ -228,7 +525,7 @@ def test_metrics_summary_matches_pull_verdicts_and_published_findings(
                     datetime(2026, 10, 26, 10, tzinfo=UTC),
                     "f" * 64,
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     latest,
                     PR_OPEN,
@@ -237,7 +534,7 @@ def test_metrics_summary_matches_pull_verdicts_and_published_findings(
                     datetime(2026, 10, 26, 12, tzinfo=UTC),
                     "g" * 64,
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     failed,
                     PR_CLOSED,
@@ -246,7 +543,7 @@ def test_metrics_summary_matches_pull_verdicts_and_published_findings(
                     datetime(2026, 10, 26, 12, tzinfo=UTC),
                     "h" * 64,
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     clean,
                     PR_NEW,
@@ -363,7 +660,7 @@ def test_metrics_summary_filters_repo_and_pauses_on_the_worker_rule(portal_env: 
                         "updated": datetime(2026, 10, 26, tzinfo=UTC),
                     },
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     own,
                     PR_OPEN,
@@ -372,7 +669,7 @@ def test_metrics_summary_filters_repo_and_pauses_on_the_worker_rule(portal_env: 
                     datetime(2026, 10, 26, 11, tzinfo=UTC),
                     "j" * 64,
                 )
-                await _insert_run(
+                await copy_seeded_run(
                     session,
                     extra_run,
                     extra_pr,
@@ -446,35 +743,6 @@ def test_metrics_summary_filters_repo_and_pauses_on_the_worker_rule(portal_env: 
     asyncio.run(
         exercise(),
         loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
-    )
-
-
-async def _insert_run(
-    session: object,
-    run_id: UUID,
-    code_change_id: UUID,
-    state: str,
-    created_at: datetime,
-    finished_at: datetime,
-    idempotency_key: str,
-) -> None:
-    await session.execute(  # type: ignore[attr-defined]
-        text(
-            "INSERT INTO runs (id, code_change_id, base_sha, base_ref, head_sha, state, trigger, "
-            "idempotency_key, engine, rule_version_id, prompt_version_id, available_at, attempt, "
-            "created_at, finished_at, origin_provider_installation_id) "
-            "SELECT :id, :pr, base_sha, base_ref, head_sha, :state, 'manual', :key, engine, "
-            "rule_version_id, prompt_version_id, :created, 1, :created, :finished, "
-            "origin_provider_installation_id FROM runs LIMIT 1"
-        ),
-        {
-            "id": run_id,
-            "pr": code_change_id,
-            "state": state,
-            "key": idempotency_key,
-            "created": created_at,
-            "finished": finished_at,
-        },
     )
 
 

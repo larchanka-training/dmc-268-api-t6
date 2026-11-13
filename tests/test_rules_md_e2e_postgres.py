@@ -4,7 +4,7 @@ A policy that cannot be loaded fails the run once in ``policy.load``, without an
 chain, its fakes and seeds live in ``tests/rules_md_e2e.py``. Every case here runs on the v4
 seed.
 
-The module migrates one schema; each case starts from emptied tables with the same seed and
+The module gets one migrated database; each case starts from emptied tables with the same seed and
 from a deleted review topology, so the cases stay isolated.
 
 Opt-in: ``TEST_DATABASE_URL`` (disposable PostgreSQL) and ``TEST_RABBITMQ_URL`` (disposable

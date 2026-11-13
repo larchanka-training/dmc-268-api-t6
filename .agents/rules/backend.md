@@ -52,8 +52,19 @@ infrastructure}`, `app/modules/<m>/{domain,application,infrastructure}`,
 3. `UnitOfWork`: repositories call `flush`, never `commit` — the use case commits.
    Narrow exception: `SqlAlchemyUsageLedger.record` writes `usage_events` in its own
    short transaction after the provider call completes, so cost survives rollback of
-   the main run. This exception does not apply to ordinary repositories and does not
-   permit network calls inside a DB transaction.
+   the main run. Second narrow exception (planned with #371, ADR 0002 §3.3):
+   the single billing write point writes only a run's charge rows, their reversals and
+   the refunds at the run's final result (`credit_ledger`) and the release of its hold,
+   in its own short transaction right after `usage_events`, after the run's final state
+   is committed, or later from the leader catch-up job, idempotently; the rows, keys and
+   hold mechanics are defined in #371. The hold written at claim (gate 1), raised or
+   released at gate 2 and released when `billing_enforcement` is turned off is written
+   by an ordinary use case
+   (claim, gate 2, flag turn-off) in that use case's own transaction through a
+   `billing` port; grant expiry is also written by an ordinary use case. Neither is
+   part of this exception. These exceptions do not apply to ordinary repositories
+   and do not permit network calls inside a DB transaction.
+   <!-- SYNC: the same exception in AGENTS.md, .agents/rules/backend.md §3 item 3 (authoritative), docs/BACKEND_ARCHITECTURE.md (UnitOfWork) and ADR 0002 §3.3; change all four together -->
 4. No DB transaction spans an LLM or GitHub call; network calls happen outside the
    transaction boundary.
 5. Alembic revisions are frozen: a merged revision is never edited, not even by a
@@ -130,7 +141,8 @@ from a missing scope.
   and no DB setup. One exception: the `pytest.register_assert_rewrite` call, which keeps
   the asserts of a shared module rewritten. It takes a module that its test files import
   before pytest loads it as a plugin, or a plain module whose helpers assert (today
-  `tests.worker_queue_postgres`, `tests.rules_md_e2e`, `tests.deploy_host_fakes`,
+  `tests.worker_queue_postgres`, `tests.webhook_notifications_postgres`,
+  `tests.rules_md_e2e`, `tests.deploy_host_fakes`,
   `tests.deploy_prod_workflow_fakes`, `tests.monitoring_deploy_host`,
   `tests.code_index_postgres`, `tests.portal_postgres` and
   `tests.code_index_indexer_support`).

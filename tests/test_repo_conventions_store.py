@@ -3,20 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import os
-from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
-from alembic.config import Config
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.common.infrastructure.db.enums import CodeChangeState, Engine, RunState
 from app.modules.repositories.infrastructure.models import (
     ProviderInstallation,
@@ -37,6 +32,9 @@ from app.modules.reviews.infrastructure.conventions_unit_of_work import (
 from app.modules.reviews.infrastructure.models import CodeChange, PromptVersion, Run, RunAction
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.modules.workspaces.infrastructure.models import Workspace
+from tests.template_database import MigratedDatabase
+
+pytest_plugins = ("tests.migrated_postgres",)
 
 REPOSITORY_ID = UUID("00000000-0000-0000-0000-000000000501")
 PROMPT_VERSION_ID = UUID("00000000-0000-0000-0000-000000000502")
@@ -44,31 +42,6 @@ RUN_ID = UUID("00000000-0000-0000-0000-000000000503")
 SECOND_RUN_ID = UUID("00000000-0000-0000-0000-000000000504")
 CONVENTIONS_V2_ID = UUID("00000000-0000-0000-0000-000000000506")
 AGENTS_SHA = "a" * 40
-
-
-@pytest.fixture
-def migrated_conventions_database() -> Iterator[tuple[str, str]]:
-    """Provide a disposable migrated PostgreSQL schema when explicitly configured."""
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_repo_conventions_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            config = Config("alembic.ini")
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
-            yield database_url, schema
-            connection.rollback()
-            connection.execute(text("SET search_path TO public"))
-            connection.execute(DropSchema(schema, cascade=True))
-            connection.commit()
-    finally:
-        engine.dispose()
 
 
 async def _seed_repository_with_two_runs(
@@ -197,9 +170,9 @@ async def _seed_repository_with_two_runs(
 
 @pytest.mark.integration
 def test_sqlalchemy_store_returns_cached_conventions_for_repeated_same_key(
-    migrated_conventions_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
-    database_url, schema = migrated_conventions_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     expected = CachedConventions(
         repository_id=REPOSITORY_ID,
         agents_md_sha=AGENTS_SHA,
@@ -286,9 +259,9 @@ async def _wait_until_blocked_by(
 
 @pytest.mark.integration
 def test_a_save_that_loses_the_race_reuses_the_row_of_the_winner(
-    migrated_conventions_database: tuple[str, str],
+    migrated_db: MigratedDatabase,
 ) -> None:
-    database_url, schema = migrated_conventions_database
+    database_url, schema = migrated_db.url, migrated_db.schema
     winner = CachedConventions(
         repository_id=REPOSITORY_ID,
         agents_md_sha=None,
