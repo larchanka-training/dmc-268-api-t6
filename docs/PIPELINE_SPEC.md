@@ -44,7 +44,7 @@ GitLab использует общий lifecycle без создания/обн�
 | T2 | `[*]` → `queued` | sweep «2 мин без CI» → тот же `try_enqueue` | worker, leader-цикл (#34) | `wait_for_ci = auto` ∧ ни чужих check suites (кроме `queued` без check run), ни статусов коммита ≥ 2 мин (§8.3) ∧ guard T1 | как T1 |
 | T3 | `[*]` → `queued` | `POST /api/runs/{id}/rerun` | portal-api (#34) | PR открыт [дефолт] ∧ нет активного Run по PR ∧ есть кандидат запуска ∧ Repository не приостановлен ∧ App доступна; отказы `409`/`422` — [§6.1](#61-http-отказы-rerun); лейбл `ai-review`, готовность CI и фильтр веток не проверяются (фильтр применяет RunGuard при claim, T5) | новый Run на текущий `head_sha`, `trigger = rerun` (выполняет полное ревью с `incremental_fallback_reason = 'manual_rerun'`, [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md` §6.2.1](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#621-новые-поля-таблицы-runs)), AMQP priority 9 · check-run не создаётся |
 | T4 | `queued` → `running` | доставка `review.run/v1` | worker | RunGuard: `state = queued` ∧ `available_at ≤ now` ∧ ¬`cancel_requested` ∧ PR открыт (для GitHub сдвиг головы в очереди отменяет прогон по T6 `superseded`, а для выполняющегося `running`/`publishing` сдвиг головы не препятствует доведению до публикации; для GitLab/Bitbucket актуальность головы обязательна, §8.4) | одним UPDATE: `attempt += 1`, `lease_until = now + 5 мин`, `worker_id`; `started_at` при первой попытке · check-run `in_progress` (создаётся при `attempt = 1`) |
-| T5 | `queued` → `skipped` | RunGuard при claim | worker | `repo_disabled` / `rule_not_matched` / `budget_paused` (§6); `rule_not_matched` — целевая ветка `run.base_ref or pr.target_branch` не подходит ни под один шаблон непустого `repositories.branch_filter` (SD §6.1); проверяется при каждом claim, у rerun тоже [техлид, #149] | `error_code` = причина, ack · check-run сразу `completed/skipped`, при `repo_disabled` не создаётся |
+| T5 | `queued` → `skipped` | RunGuard при claim | worker | `repo_disabled` / `rule_not_matched` / `budget_paused` / `rate_limited` (`цель #306 Ч.3`, [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md` §7.3](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#73-политика-лимитов-частоты-запуска-run-rate-limiting--push-bursts); §6); `rule_not_matched` — целевая ветка `run.base_ref or pr.target_branch` не подходит ни под один шаблон непустого `repositories.branch_filter` (SD §6.1); проверяется при каждом claim, у rerun тоже (исключение: скользящие окна `rate_limited` Ч.3 не применяются к `trigger = 'rerun'`, который ограничен на уровне HTTP API, §6.1) [техлид, #149] | `error_code` = причина, ack · check-run сразу `completed/skipped`, при `repo_disabled` не создаётся |
 | T6 | `queued` → `cancelled` | `synchronize` (новый `head_sha` при нахождении прогона в очереди, независимо от `attempt`), `pull_request.closed`, `POST /api/runs/{id}/cancel`, rebind/снятие origin; то же, найденное RunGuard при claim или реконсилером. Если прогон уже в `running`/`publishing`, при `synchronize` на GitHub он доводится до публикации после сохранения diff (исключение для `running` до сохранения diff — T11/`superseded`) (дефолт лектора, §8.2, SD §6.3, [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6.4). Проверка RunGuard при claim — страховка на случай гонки со сдвигом головы | webhook-worker, portal-api, worker | — | `error_code` = `superseded` / `pr_closed` / `cancelled_by_user` / `installation_replaced` / `installation_unavailable`; снятый origin не публикует retry/check-run; исходное сообщение остаётся в брокере; при действующем origin и `attempt ≥ 1` webhook-worker (#52) и portal-api после commit публикуют сигнал закрытия — `review.run/v1` в `review.run.{engine}` с AMQP priority 9 [дефолт] · check-run (если `attempt ≥ 1`) закрывает RunGuard при доставке сигнала; T6 с действующим origin, найденный RunGuard при claim, закрывает его в той же доставке, без сигнала; при `attempt = 0` нет ни check-run, ни сигнала |
 | T7 | `running` → `running` | heartbeat раз в 60 с; смена движка (§5.3) | worker | heartbeat шлётся, пока `now` < дедлайна текущей попытки (§3) [дефолт]; UPDATE по своему `worker_id` ∧ `state = running`; 0 строк → воркер бросает работу без записей | `lease_until = now + 5 мин`; при fallback — действие `engine.fallback`, `engine = fast` |
 | T8 | `running` → `publishing` | сохранены `FinalReviewResult` и publication plan (§2, §11); для инкрементального прогона (T8-INC) план формируется по дельте коммитов с Pass 2 Координаты (`out_of_incremental_diff_scope`) и агрегацией Pass 6b ([`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6.7–§6.8) | worker | ¬`cancel_requested` ∧ сохранённый diff соответствует закреплённым `head_sha` и базе (смена базы до сохранения diff — `failed/pr_base_changed`, после сохранения diff Run доводится на своей базе) ∧ все final findings получили `supported`; для GitHub текущий head после сохранения diff не проверяется, для GitLab/Bitbucket проверка сохраняется | Итоговые findings/coverage/summary/verdict, выбранный `review_event` и immutable payloads фиксируются до outbox публикации; `lease_until = now + 5 мин`; после commit — `review.publish/v1`, после confirm — ack `review.run` |
@@ -649,8 +649,8 @@ Legacy marker `<!-- ai-review findings_hash=… -->` не используетс
 `runs.error_code` (`String(100)`, Zod `errorCode: string | null`): для `failed` — причина сбоя, для `cancelled` и `skipped` — причина завершения, в остальных состояниях — `null`. Новые коды миграции не требуют. Технические детали пишутся в `error_message` и `run_actions`, в check-run они не попадают. Для `llm_payment_required` публичный check-run показывает только нейтральный текст: код остаётся в `runs.error_code` и UI, но не выводится в summary check-run. Для `failed` к тексту добавляется ссылка на прогон в UI. Тексты причин снятого origin предназначены для UI: check-run через снятую установку не отправляется. HTTP-отказы rerun описаны в [§6.1](#61-http-отказы-rerun).
 
 Строки таблицы ниже без пометки описывают коды, которые `main` уже пишет в `runs.error_code`.
-Пометка **цель #107, код пока не пишет** — контракт PIPELINE_SPEC / CONTEXT, но publisher на
-`main` этот код пока не присваивает (типично — восстановление и лимиты payload GitHub §5.2).
+Пометки **цель #107, код пока не пишет**, **цель #306 Ч.2 …, код пока не пишет** и **цель #306 Ч.3, код пока не пишет** — контракты PIPELINE_SPEC / CONTEXT / INCREMENTAL_REVIEW_AND_LIMITS_SPEC, но runtime на
+`main` этот код пока не присваивает (типично — восстановление и лимиты payload GitHub §5.2, инкрементальная публикация и DoS-квоты Ч.3).
 
 Коды в `review.postprocess.change_summary.error_code` (§2, §4.5) — не `runs.error_code`: это
 исход необязательного вызова агента «что изменилось». Там встречаются и коды, которые в
@@ -674,7 +674,7 @@ Legacy marker `<!-- ai-review findings_hash=… -->` не используетс
 | `bitbucket_response_budget_exceeded` | `failed` | Bitbucket Cloud, 32 MiB суммарных байт HTTP-ответов на попытку; необязательный контекст имеет отдельный байтовый потолок, чтобы оставить резерв для обязательных чтений после него | нет для обязательного чтения; при достижении потолка в необязательном контексте ревью продолжается по diff | Исчерпан бюджет ответов Bitbucket для одного прогона. |
 | `bitbucket_invalid_response` | `failed` | Bitbucket Cloud, некорректный ответ при обязательном чтении | нет | Bitbucket вернул некорректные данные для ревью. |
 | `bitbucket_source_unavailable` | `failed` | Bitbucket Cloud, исходный fork недоступен через разрешённый источник | нет | Нет доступа к исходному fork-репозиторию Bitbucket. |
-| `bitbucket_review_limit_exceeded` | `failed` | Bitbucket Cloud, PR превышает предел файлов для ревью | нет | PR Bitbucket превышает лимит файлов для ревью. |
+| `bitbucket_review_limit_exceeded` | `failed` | Bitbucket Cloud (legacy): исторический код до #306 Ч.3 при превышении предела файлов; для новых прогонов Ч.3 заменяется общим кодом `too_many_files` (`bitbucket_vcs.py`, `review_context_stage.py`), оставаясь алиасом для чтения/рендера исторических строк `runs.error_code` | нет | PR Bitbucket превышает лимит файлов для ревью. |
 | `bitbucket_engine_unsupported` | `failed` | Bitbucket Cloud, выбранный движок ревью не поддерживается | нет | Выбранный движок ревью не поддерживается Bitbucket. |
 | `commit_messages_fetch_failed` | `failed` | GitHub | да: прогон | Не удалось получить сообщения коммитов PR из GitHub. |
 | `bitbucket_commit_messages_fetch_failed` | `failed` | Bitbucket Cloud | да: прогон, не более 3 попыток | Не удалось получить сообщения коммитов PR из Bitbucket. |
@@ -705,6 +705,9 @@ Legacy marker `<!-- ai-review findings_hash=… -->` не используетс
 | `repo_disabled` | `skipped` | отбор | — | GitHub check-run не создаётся; Bitbucket публикует `STOPPED` (см. §7.1) |
 | `rule_not_matched` | `skipped` | отбор | — | Целевая ветка PR не подходит под фильтр веток репозитория. |
 | `budget_paused` | `skipped` | бюджет | — | Дневной бюджет исчерпан, ревью на паузе. |
+| `rate_limited` — **цель #306 Ч.3, код пока не пишет** | `skipped` | лимит частоты (RunGuard T5) | — | Превышен лимит частоты запусков ревью. Требуется новый пуш в PR или ручной перезапуск из UI. |
+| `too_many_files` — **цель #306 Ч.3, код пока не пишет** | `failed` | VCS / лимит размера PR (заменяет для новых Run `ValueError` в GitHub `github_vcs.py`, `bitbucket_review_limit_exceeded` в Bitbucket `bitbucket_vcs.py` и отказ счётчика `> 200` / `"1000+"` в GitLab `gitlab_vcs.py`) | нет | В PR слишком много изменённых файлов (лимит 3 000 для GitHub, 200 для Bitbucket и GitLab). Разбейте PR на меньшие части. |
+| `pr_diff_too_large` — **цель #306 Ч.3, код пока не пишет** | `failed` | VCS / лимит размера PR | нет | Суммарный размер диффа PR превышает допустимый предел (порог >100 000 строк или >20 MiB патча). Разбейте PR на меньшие части. |
 | `all_changes_ignored` | `skipped` | политика после claim | — | Все изменения исключены из AI-ревью. |
 | `no_changes` | `skipped` | достоверно пустой diff после claim | — | В PR нет изменённых файлов. Ревью не выполнялось. |
 
@@ -741,7 +744,9 @@ Cancellation/deadline распространяются по общему кон�
 
 ### 6.1 HTTP-отказы rerun
 
-`POST /api/runs/{id}/rerun` возвращает 409 по четырём причинам: у PR есть активный
+`POST /api/runs/{id}/rerun` возвращает:
+- **HTTP 429 Too Many Requests (`цель #306 Ч.3, код пока не пишет`):** при превышении лимита частоты перезапусков (более 3 перезапусков на PR за 15 минут по `code_change_id` или более 10 на пользователя за 1 час по `runs.triggered_by`, [INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md §7.4.1](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#741-ручной-перезапуск-прогона-post-apirunsrun_idrerun)). Возвращает заголовок `Retry-After: <секунды>` (до освобождения ближайшего слота по `min(created_at)` в сработавшем окне) и тело `{"detail": "rerun_rate_limited"}` строго по схеме `ErrorResponse`; в рамках реализации Ч.3 в операцию `rerunRun` [`contracts/openapi.yaml`](../contracts/openapi.yaml) добавляется ответ `"429"` с заголовком `Retry-After` и схемой `ErrorResponse` по образцу `BitbucketRateLimited`.
+- **HTTP 409 Conflict:** по четырём причинам: у PR есть активный
 Run (`queued`, `running` или `publishing`), PR закрыт, ревью репозитория на паузе
 или GitHub App недоступна. Во всех случаях тело одинаковое:
 
@@ -749,18 +754,19 @@ Run (`queued`, `running` или `publishing`), PR закрыт, ревью ре�
 {"detail": "the pull request has an active run or is closed, or repository reviews are paused or unavailable"}
 ```
 
-`detail` — общая строка; машиночитаемого кода причины нет. Это HTTP-отказ до
+`detail` возвращает строку ошибки по контракту `ErrorResponse`. Это HTTP-отказ до
 создания нового Run, а не `runs.error_code`.
 
 После проверки авторизации и видимости исходного Run порядок решений в
 `SqlAlchemyRerunStore.create_rerun` такой:
 
-1. Закрытый PR или активный Run → 409.
-2. Нет кандидата запуска (в частности, активной версии правил или промпта) → 422.
+1. Превышение лимита частоты перезапусков (`цель #306 Ч.3, код пока не пишет`: более 3 на PR за 15 мин по `code_change_id` или более 10 на пользователя за 1 час по `runs.triggered_by`) → 429 (`detail: "rerun_rate_limited"`, заголовок `Retry-After`).
+2. Закрытый PR или активный Run → 409.
+3. Нет кандидата запуска (в частности, активной версии правил или промпта) → 422.
    Отсутствующая связанная GitHub installation тоже не даёт кандидата; это
    отличается от недоступности существующей установки на следующем шаге.
-3. При наличии кандидата пауза репозитория или недоступность App → 409.
-4. Иначе создаётся новый Run.
+4. При наличии кандидата пауза репозитория или недоступность App → 409.
+5. Иначе создаётся новый Run (`202 Accepted`).
 
 Поэтому приостановленный репозиторий без активной конфигурации получает 422,
 если PR открыт и активного Run нет. Проверка доступности учитывает предпочтение
