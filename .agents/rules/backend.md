@@ -144,8 +144,8 @@ from a missing scope.
   `tests.worker_queue_postgres`, `tests.webhook_notifications_postgres`,
   `tests.rules_md_e2e`, `tests.deploy_host_fakes`,
   `tests.deploy_prod_workflow_fakes`, `tests.monitoring_deploy_host`,
-  `tests.code_index_postgres`, `tests.portal_postgres` and
-  `tests.code_index_indexer_support`).
+  `tests.code_index_postgres`, `tests.portal_postgres`,
+  `tests.code_index_indexer_support` and `tests.ci_workflow`).
 - Assert literal values taken from the spec — never derive an expected value from
   the implementation under test.
 - One test per behavior. Before adding a test, grep the feature's file prefix for the
