@@ -357,21 +357,11 @@ def test_the_labels_of_the_two_rag_arms_are_the_arms_the_recorder_knows() -> Non
     assert set(eval_replay_module.RAG_ARM_LABELS) == set(eval_live_module.RAG_ARMS)
 
 
-@pytest.mark.parametrize("manifest_shape", ["historical", "recaptured"])
-def test_replaying_the_main_baseline_asks_for_no_rag_code_and_adds_no_rag_field(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manifest_shape: str
+def test_replaying_the_historical_main_baseline_has_only_the_known_pin_drift(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A capture without ``rag_arm`` replays as it did before #146: the main static path set,
     the main corpus label, and none of the RAG keys in its report."""
-    if manifest_shape == "recaptured":
-        root = fixture_root(tmp_path)
-        repo = tmp_path / "repo"
-        _record_with_digests(root, repo)
-        response = root / "responses/SEC-01.json"
-        recorded_response = response.read_bytes()
-    else:
-        root = DATASET_ROOT
-        repo = REPO_ROOT
     asked: list[Any] = []
     original = static_input_paths
 
@@ -381,19 +371,30 @@ def test_replaying_the_main_baseline_asks_for_no_rag_code_and_adds_no_rag_field(
 
     monkeypatch.setattr(eval_replay_module, "static_input_paths", spy)
 
-    report = replay(root, prompt_root=repo)
+    report = replay(DATASET_ROOT, prompt_root=REPO_ROOT)
 
     assert asked == [False]
     assert report["corpus"] == "main"
     assert set(report["provenance"]["run_metadata"]) & set(eval_replay_module._RAG_KEYS) == set()
-    allowed_drift = {
+    assert report["warnings"] == [
         "Static input path set changed; refresh the complete baseline",
         "Static input digest mismatch; refresh the complete baseline",
-    }
-    assert set(report["warnings"]) <= allowed_drift
-    if manifest_shape == "recaptured":
-        assert report["warnings"] == []
-        assert response.read_bytes() == recorded_response
+    ]
+
+
+def test_a_recaptured_main_baseline_replays_without_drift_or_response_changes(
+    tmp_path: Path,
+) -> None:
+    root = fixture_root(tmp_path)
+    repo = tmp_path / "repo"
+    _record_with_digests(root, repo)
+    response = root / "responses/SEC-01.json"
+    recorded_response = response.read_bytes()
+
+    report = replay(root, prompt_root=repo)
+
+    assert report["warnings"] == []
+    assert response.read_bytes() == recorded_response
 
 
 @pytest.mark.parametrize("budget", [0, -5, 1.5, "100", True, None])
