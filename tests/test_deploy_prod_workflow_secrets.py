@@ -230,10 +230,12 @@ def test_the_permissions_and_organization_tables_name_the_prod_workflows() -> No
     rows = {line.split("|")[1].strip(): line for line in permissions.splitlines() if "|" in line}
 
     assert "`contents: read`, `packages: read`" in rows["Deploy prod: `resolve`, `deploy-prod`"]
-    assert rows["`prod-webhook-outcome.yml`: `lookup`"].split("|")[2].strip() == "`contents: read`"
+    for lookup in ("prod-webhook-outcome.yml", "staging-run-logs.yml"):
+        assert rows[f"`{lookup}`: `lookup`"].split("|")[2].strip() == "`contents: read`"
     for name in ("VPS_DMC268_U", "VPS_DMC268_P"):
         (row,) = [line for line in text.splitlines() if line.startswith(f"| `{name}` |")]
         assert "prod-webhook-outcome.yml" in row, name
+        assert "staging-run-logs.yml" in row, name
 
 
 def test_the_lock_while_waiting_caveat_is_stated_once_and_pointed_to() -> None:

@@ -600,3 +600,22 @@ def test_a_lookup_output_without_the_three_services_fails_the_summary(tmp_path: 
     assert code == 1
     assert "no lookup output" in stderr
     assert summary == ""
+
+
+def test_the_docs_describe_the_lookup_its_secrets_and_its_window() -> None:
+    cicd = (REPO_ROOT / "docs" / "CICD.md").read_text(encoding="utf-8")
+    (paragraph,) = [p for p in cicd.split("\n\n") if p.startswith("**Staging run logs**")]
+    secrets = (REPO_ROOT / "docs" / "SECRETS.md").read_text(encoding="utf-8")
+    monitoring = (REPO_ROOT / "docs" / "MONITORING.md").read_text(encoding="utf-8")
+    logs = monitoring.split("\n### JSON-логи\n", 1)[1].split("\n### ", 1)[0]
+
+    assert cicd.index("**Prod webhook outcome**") < cicd.index("**Staging run logs**")
+    assert "`staging-run-logs.yml`" in paragraph
+    assert "`run_id`" in paragraph and "`dmc-268-api-staging`" in paragraph
+    assert "`api`, `worker` и `webhook-worker`" in paragraph
+    assert "168" in paragraph and "пересоздан более поздним выкатом" in paragraph
+    assert "Ничего на хосте не меняет" in paragraph
+    for name in ("VPS_DMC268_U", "VPS_DMC268_P"):
+        (row,) = [line for line in secrets.splitlines() if line.startswith(f"| `{name}` |")]
+        assert "staging-run-logs.yml" in row, name
+    assert "`staging-run-logs.yml`" in logs and "Без SSH" in logs
