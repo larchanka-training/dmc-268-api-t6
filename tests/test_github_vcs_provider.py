@@ -6,11 +6,12 @@ import asyncio
 import base64
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import timedelta
 
 import httpx
 import pytest
 
-from app.modules.reviews.application.run_failures import RunCancelled
+from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
 from app.modules.reviews.application.vcs_diff import (
     BlobTooLargeError,
     FetchVcsReviewInput,
@@ -19,6 +20,7 @@ from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
 )
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
+from app.modules.reviews.infrastructure.vcs_failures import ClassifiedVcsProvider
 from tests.installation_onboarding_fakes import provider_checkpoint
 
 _HEAD = "a" * 40
@@ -315,6 +317,65 @@ def test_http_rate_limit_and_invalid_blob_fail_closed() -> None:
                 await provider.get_blob(
                     PullRequestLocator(17, "octo/repo", 7), _BLOB, checkpoint=provider_checkpoint
                 )
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "message"),
+    [
+        (403, {}, "You have exceeded a secondary rate limit. Please retry."),
+        (403, {"Retry-After": "60"}, "Please retry."),
+        (404, {"Retry-After": "60"}, "Please retry."),
+        (429, {}, "You have exceeded a secondary rate limit. Please retry."),
+        (503, {"Retry-After": "60"}, "Please retry."),
+    ],
+)
+def test_blob_rate_limit_is_retryable(status: int, headers: dict[str, str], message: str) -> None:
+    encodings: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith(f"/git/blobs/{_BLOB}")
+        encodings.append(request.headers["Accept-Encoding"])
+        return httpx.Response(status, headers=headers, json={"message": message})
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), base_url="https://api.github.test"
+        ) as client:
+            provider = ClassifiedVcsProvider(
+                HttpGitHubVcsProvider(client=client, token_provider=Tokens())
+            )
+            with pytest.raises(RunFailure) as caught:
+                await provider.get_blob(
+                    PullRequestLocator(17, "octo/repo", 7), _BLOB, checkpoint=provider_checkpoint
+                )
+        assert caught.value.error_code == "diff_fetch_failed"
+        assert caught.value.rate_limited is True
+        assert caught.value.retry_after == timedelta(seconds=60)
+
+    asyncio.run(exercise())
+    assert encodings == ["identity"]
+
+
+@pytest.mark.parametrize("status", [403, 429])
+def test_blob_non_rate_limit_error_keeps_http_status_error(status: int) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Accept-Encoding"] == "identity"
+        return httpx.Response(status, json={"message": "Request refused"})
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), base_url="https://api.github.test"
+        ) as client:
+            provider = ClassifiedVcsProvider(
+                HttpGitHubVcsProvider(client=client, token_provider=Tokens())
+            )
+            with pytest.raises(httpx.HTTPStatusError) as caught:
+                await provider.get_blob(
+                    PullRequestLocator(17, "octo/repo", 7), _BLOB, checkpoint=provider_checkpoint
+                )
+        assert caught.value.response.status_code == status
 
     asyncio.run(exercise())
 
