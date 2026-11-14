@@ -44,7 +44,10 @@ from app.bootstrap.gitlab_reviews import (
     build_gitlab_review_worker_resources,
 )
 from app.bootstrap.llm_gateway import build_gateway
-from app.bootstrap.run_data_retention import RunDataRetentionSettings, run_data_retention_task
+from app.bootstrap.run_data_retention import (
+    RunDataRetentionSettings,
+    run_data_retention_scheduled_task,
+)
 from app.bootstrap.worker_shutdown import (
     finish_cleanup,
     run_background,
@@ -52,6 +55,7 @@ from app.bootstrap.worker_shutdown import (
     stop_during_startup,
     supervise_shutdown,
 )
+from app.common.application.leader_tasks import LeaderTasks
 from app.common.infrastructure.db.leader import WORKER_LEADER_LOCK, run_as_leader
 from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
 from app.common.infrastructure.telemetry import (
@@ -59,7 +63,6 @@ from app.common.infrastructure.telemetry import (
     configure_tracing,
     shutdown_tracing,
 )
-from app.modules.code_index.application.leader_tasks import CodeIndexLeaderTasks
 from app.modules.code_index.infrastructure.graph_retriever import SqlAlchemyGraphRetriever
 from app.modules.code_index.infrastructure.review_index import SqlAlchemyReviewIndexUnitOfWork
 from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
@@ -143,7 +146,6 @@ from app.modules.reviews.application.review_output import (
     ReviewOutputHandler,
     ReviewProvider,
 )
-from app.modules.reviews.application.run_data_retention import PurgeExpiredRunData
 from app.modules.reviews.application.run_delivery import HandleRunDelivery
 from app.modules.reviews.application.run_failures import (
     FAST_ATTEMPT_DEADLINE,
@@ -852,9 +854,8 @@ class WorkerProcess:
     publish_review: PublishRunReview
     enqueue: TryEnqueueWebhookRun
     sweep: SweepNoCi | None
-    index_tasks: CodeIndexLeaderTasks | None = None
+    leader_tasks: LeaderTasks | None = None
     bitbucket_status_reconciler: BitbucketStatusReconciler | None = None
-    run_data_retention: PurgeExpiredRunData | None = None
 
     async def leader_tick(self) -> None:
         failure: Exception | None = None
@@ -864,16 +865,13 @@ class WorkerProcess:
             await self.enqueue.replay_pending_publications()
         except Exception as error:
             failure = error
-        # After the replay, even a failed one; the index tasks never raise and share one
-        # deadline, so they do not hold up the next tick for long (#143). A
-        # cancellation is not an `Exception`: it ends the tick before the index tasks.
-        if self.index_tasks is not None:
-            await self.index_tasks.tick()
+        # After the replay, even a failed one; the scheduled leader tasks never raise and share
+        # one deadline, so they do not hold up the next tick for long (#143, #556). A
+        # cancellation is not an `Exception`: it ends the tick before the scheduled tasks.
+        if self.leader_tasks is not None:
+            await self.leader_tasks.tick()
         if self.bitbucket_status_reconciler is not None:
             await self.bitbucket_status_reconciler.tick()
-        # Never raises an `Exception` and has its own deadline, like the index tasks.
-        if self.run_data_retention is not None:
-            await self.run_data_retention.tick()
         if failure is not None:
             raise failure
 
@@ -893,8 +891,7 @@ def compose_worker_process(
     attempt_deadline: timedelta = FAST_ATTEMPT_DEADLINE,
     heartbeat_interval: timedelta = HEARTBEAT_INTERVAL,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
-    index_tasks: CodeIndexLeaderTasks | None = None,
-    run_data_retention: PurgeExpiredRunData | None = None,
+    leader_tasks: LeaderTasks | None = None,
 ) -> WorkerProcess:
     if gitlab is not None and gitlab_reviews is not None:
         raise ValueError("ambiguous GitLab publication resources")
@@ -1024,11 +1021,10 @@ def compose_worker_process(
             if github is not None
             else None
         ),
-        index_tasks=index_tasks,
+        leader_tasks=leader_tasks,
         bitbucket_status_reconciler=(
             bitbucket.status_reconciler if bitbucket is not None else None
         ),
-        run_data_retention=run_data_retention,
     )
 
 
@@ -1173,11 +1169,18 @@ async def _run_worker(
                 gateway=gateway,
                 provider_factory=provider_factory,
                 delays=delays,
-                # Converge, GC and TTL purge touch only the database. Reconcile and
-                # wake-up dispatch use the configured provider consumer.
-                index_tasks=index_leader_tasks(settings.code_index, session_factory, index),
-                run_data_retention=run_data_retention_task(
-                    settings.run_data_retention, session_factory
+                # Order inside the shared 10s tick budget (#556): index tasks run first
+                # (`reconcile` consumes remaining index headroom), followed by hourly
+                # `run_data_retention`. If `reconcile` drains the tick budget,
+                # `run_data_retention` keeps its gate open and will run on subsequent
+                # ticks after index tasks; `BitbucketStatusReconciler` runs right after.
+                leader_tasks=LeaderTasks(
+                    [
+                        *index_leader_tasks(settings.code_index, session_factory, index),
+                        run_data_retention_scheduled_task(
+                            settings.run_data_retention, session_factory
+                        ),
+                    ]
                 ),
             )
             run_queue = await channels.consumer_queue(run_queue_name("fast"))

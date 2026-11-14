@@ -295,7 +295,7 @@ def test_the_bounds_admit_their_edges() -> None:
 
 def test_the_leader_purges_unused_indexes_hourly_and_collects_garbage_every_five_minutes() -> None:
     # Without the consumer (no GitHub App): converge, GC and TTL touch only the database.
-    tasks = index_leader_tasks(CodeIndexSettings(), _SESSIONS, None).tasks
+    tasks = index_leader_tasks(CodeIndexSettings(), _SESSIONS, None)
     configured = index_leader_tasks(
         CodeIndexSettings.from_environment(
             {
@@ -307,7 +307,7 @@ def test_the_leader_purges_unused_indexes_hourly_and_collects_garbage_every_five
         ),
         _SESSIONS,
         None,
-    ).tasks
+    )
 
     assert [(task.name, task.interval_seconds) for task in tasks] == [
         ("converge", 60),
@@ -342,14 +342,14 @@ def _leader_consumer() -> code_index_worker.IndexConsumer:
 
 def test_with_the_consumer_the_leader_reconciles_heads_and_dispatches_wake_ups() -> None:
     consumer = _leader_consumer()
-    tasks = index_leader_tasks(CodeIndexSettings(), _SESSIONS, consumer).tasks
+    tasks = index_leader_tasks(CodeIndexSettings(), _SESSIONS, consumer)
     configured = index_leader_tasks(
         CodeIndexSettings.from_environment(
             {"CODE_INDEX_RECONCILE_INTERVAL_SECONDS": "120", "CODE_INDEX_RECONCILE_BATCH": "7"}
         ),
         _SESSIONS,
         consumer,
-    ).tasks
+    )
 
     # Converge runs before the dispatch, so the markers it sets go out in the same tick;
     # GC runs before the TTL purge, whose 30-day threshold tolerates delay (ADR 0001 §4);
