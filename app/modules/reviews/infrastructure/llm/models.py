@@ -27,7 +27,7 @@ from app.modules.reviews.application.conventions_prompt import (
     fit_conventions_request,
 )
 from app.modules.reviews.application.execute_review import PullRequestMetaSource, ReviewReply
-from app.modules.reviews.application.llm import RunCallContext
+from app.modules.reviews.application.llm import LlmErrorCode, RunCallContext
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import CallManifest
 from app.modules.reviews.application.prompt_budget import (
@@ -342,6 +342,11 @@ async def _fitted_review(
     )
     if fitted.policy_snapshot is not None:
         _guard_snapshot_budget(fitted, counter, max_tokens)
+        if context.changed_files and not fitted.changed_files:
+            raise RunFailure(
+                LlmErrorCode.CONTEXT_OVERFLOW.value,
+                "no changed files fit within the input token budget",
+            )
     prompt = PromptBuilder().build_prompt(fitted)
     base_manifest = PromptBuilder().build_manifest(
         fitted,
@@ -373,6 +378,26 @@ async def _fitted_review(
     return result, fitted
 
 
+def _mandatory_policy_tokens(context: ReviewContext, counter: TokenCounter) -> int:
+    """Measure mandatory policy and service-defaults blocks that are never truncated."""
+    snapshot = context.policy_snapshot
+    if snapshot is None:
+        return 0
+    builder = PromptBuilder()
+    parts = [
+        builder.render_policy_rules(snapshot),
+        builder.render_policy_agents(snapshot),
+    ]
+    if context.rules:
+        parts.append(
+            builder.render_service_defaults(
+                context.rules,
+                defaults_checksum=snapshot.defaults_checksum,
+            )
+        )
+    return counter.count("\n".join(parts))
+
+
 def _guard_snapshot_budget(context: ReviewContext, counter: TokenCounter, max_tokens: int) -> None:
     """The pre-send guard of the fitted snapshot prompt: policy budget, then total size."""
     try:
@@ -382,7 +407,16 @@ def _guard_snapshot_budget(context: ReviewContext, counter: TokenCounter, max_to
             PolicyErrorCode.PROMPT_BUDGET_EXCEEDED, str(exc), limit=exc.limit, actual=exc.actual
         ) from exc
     except PreSendGuardError as exc:
-        raise RunFailure("llm_context_overflow", str(exc)) from exc
+        mandatory_tokens = _mandatory_policy_tokens(context, counter)
+        if mandatory_tokens > max_tokens:
+            raise PolicyError(
+                PolicyErrorCode.PROMPT_BUDGET_EXCEEDED,
+                f"Review mandatory policy and defaults are {mandatory_tokens} tokens, "
+                f"limit is {max_tokens}",
+                limit=max_tokens,
+                actual=mandatory_tokens,
+            ) from exc
+        raise RunFailure(LlmErrorCode.CONTEXT_OVERFLOW.value, str(exc)) from exc
 
 
 def _messages(prompt: ReviewPrompt) -> tuple[ChatMessage, ...]:

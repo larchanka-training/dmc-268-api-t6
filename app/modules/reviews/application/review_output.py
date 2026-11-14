@@ -655,7 +655,7 @@ class ReviewOutputRepository(Protocol):
     async def store_review_output(
         self,
         run_id: UUID,
-        model_output: dict[str, object],
+        model_output: Any,
         parsed: ReviewOutput,
         processed: ProcessedReviewOutput,
     ) -> ReviewPublication | None: ...
@@ -752,8 +752,11 @@ class PublishReviewOutput:
             raw_output.allowed_v2_rules if isinstance(raw_output, VerifiedReviewOutput) else None
         )
         pre_dropped = coerce_dropped_findings(run_id, effective_dropped_input)
-        parsed = parse_review_output(raw_output)
-        answer = _as_json_object(raw_output)
+        from app.modules.reviews.application.store_review_output import NoModelAnswer
+
+        model_answer = not isinstance(raw_output, NoModelAnswer)
+        parsed = parse_review_output(raw_output) if model_answer else None
+        answer = _as_json_object(raw_output) if model_answer else None
 
         # Anchoring and custom-rule attribution are an immutable run boundary:
         # accepting caller data here would let a model response choose its own
@@ -768,6 +771,24 @@ class PublishReviewOutput:
         v2_rules_to_use = (
             effective_v2_rules if effective_v2_rules is not None else context.allowed_v2_rules
         )
+        coverage = context.coverage or RunCoverage(
+            CoverageStatus.PARTIAL,
+            0,
+            reasons=(CoverageItem(None, "classification_unavailable"),),
+        )
+        if parsed is None:
+            from app.modules.reviews.application.findings_post_processor import summary_from_result
+
+            parsed = ReviewOutput(
+                findings=[],
+                summary=summary_from_result(
+                    (),
+                    (),
+                    coverage,
+                    summary_reason=context.summary_reason if context.summary_only else None,
+                    name_summary_only=context.summary_only,
+                ),
+            )
         processed = FindingsPostProcessor.from_default_patterns().process(
             parsed,
             diff_map=context.diff_map,
@@ -778,15 +799,12 @@ class PublishReviewOutput:
             allowed_v2_rules=v2_rules_to_use,
             pre_dropped=pre_dropped,
             apply_severity_threshold=effective_threshold is None,
-            coverage=context.coverage
-            or RunCoverage(
-                CoverageStatus.PARTIAL,
-                0,
-                reasons=(CoverageItem(None, "classification_unavailable"),),
-            ),
+            coverage=coverage,
             summary_only=context.summary_only,
             incomplete_paths=(
-                raw_output.incomplete_paths if isinstance(raw_output, VerifiedReviewOutput) else ()
+                raw_output.incomplete_paths
+                if isinstance(raw_output, (VerifiedReviewOutput, NoModelAnswer))
+                else ()
             ),
         )
         parsed = parsed.model_copy(update={"summary": processed.summary})

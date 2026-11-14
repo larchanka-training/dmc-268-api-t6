@@ -10,32 +10,23 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import dataclass, field
-from datetime import datetime
-from types import TracebackType
 from typing import Any, cast
 from uuid import UUID
 
 import pytest
 
-from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
-from app.modules.reviews.application.post_processing_diff_map import diff_map_from_snapshots
-from app.modules.reviews.application.queue_messages import ReviewPublishPointer
 from app.modules.reviews.application.review_output import (
-    FindingPostProcessingInput,
     InvalidReviewOutput,
     PublishReviewOutput,
-    ReviewOutput,
-    ReviewPublication,
     VerifiedReviewOutput,
 )
-from app.modules.reviews.application.run_coverage import RunCoverage
 from app.modules.reviews.application.run_failures import classify_failure
-from app.modules.reviews.application.store_review_output import (
-    NoModelAnswer,
-    PublishingGuard,
-    StoreReviewOutput,
+from app.modules.reviews.application.store_review_output import NoModelAnswer, StoreReviewOutput
+from tests.review_publication_fakes import (
+    PublicationQueueFake,
+    PublicationRepositoryFake,
+    PublicationUowFake,
 )
 from tests.test_clean_without_text_result import answer
 from tests.test_coverage_none_classification import project, unsupported_path
@@ -44,106 +35,22 @@ _RUN = UUID(int=213)
 _TOO_LARGE = DiffSnapshot("large.txt", None, "d" * 40, omission_reason="too_large")
 
 
-@dataclass
-class Repository:
-    """The publishing boundary: every answer it was asked to store, and the last result."""
-
-    snapshots: list[DiffSnapshot]
-    coverage: RunCoverage
-    review_event: str = "REQUEST_CHANGES"
-    state: str = "running"
-    answers: list[dict[str, object] | None] = field(default_factory=list)
-    response: dict[str, Any] = field(default_factory=dict)
-    body: str = ""
-
-    async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
-        return FindingPostProcessingInput(
-            diff_map_from_snapshots(
-                repository_id=UUID(int=1),
-                code_change_number=7,
-                head_sha="a" * 40,
-                base_sha="b" * 40,
-                diff_old_sha="c" * 40,
-                snapshots=self.snapshots,
-            ),
-            frozenset(),
-            frozenset(),
-            coverage=self.coverage,
-        )
-
-    async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
-        return PublishingGuard(self.state, "worker", False, "a" * 40, True, self.review_event)
-
-    async def store_review_output(
-        self,
-        run_id: UUID,
-        model_output: dict[str, object] | None,
-        parsed: ReviewOutput,
-        processed: ProcessedReviewOutput,
-    ) -> ReviewPublication:
-        self.answers.append(model_output)
-        self.body = processed.review_body
-        self.state = "publishing"
-        return ReviewPublication("a" * 40, (), self.body)
-
-    async def enter_publishing(
-        self,
-        run_id: UUID,
-        *,
-        lease_until: datetime,
-        postprocess_request: dict[str, Any],
-        postprocess_response: dict[str, Any],
-        started_at: datetime,
-        duration_ms: int,
-        verify_request: dict[str, Any] | None = None,
-        verify_response: dict[str, Any] | None = None,
-    ) -> None:
-        self.response = postprocess_response
-
-    async def mark_review_published(self, run_id: UUID) -> None:
-        raise AssertionError("finalization only queues publication")
-
-
-@dataclass
-class Uow:
-    reviews: Repository
-    committed: list[str]
-
-    async def __aenter__(self) -> Uow:
-        return self
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        return None
-
-    async def commit(self) -> None:
-        self.committed.append("commit")
-
-    async def rollback(self) -> None:
-        return None
-
-
-@dataclass
-class Queue:
-    pointers: list[ReviewPublishPointer] = field(default_factory=list)
-
-    async def publish_review(self, pointer: ReviewPublishPointer) -> None:
-        self.pointers.append(pointer)
-
-
-def _store(repository: Repository, queue: Queue, committed: list[str]) -> StoreReviewOutput:
+def _store(
+    repository: PublicationRepositoryFake,
+    queue: PublicationQueueFake,
+    committed: list[str],
+) -> StoreReviewOutput:
     return StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: PublicationUowFake(repository, committed),
+        queue,
+        worker_id="worker",
+        run_url=lambda _: None,
     )
 
 
-def _technical(kind: str) -> Repository:
+def _technical(kind: str) -> PublicationRepositoryFake:
     files = [_TOO_LARGE] if kind == "too_large" else [unsupported_path()]
-    return Repository(files, project(files, snapshot_path=True))
+    return PublicationRepositoryFake(files, project(files, snapshot_path=True))
 
 
 @pytest.mark.parametrize(
@@ -165,7 +72,7 @@ def _technical(kind: str) -> Repository:
 def test_a_backend_result_is_stored_with_the_backend_summary_and_no_model_answer(
     kind: str, problem: str
 ) -> None:
-    repository, queue = _technical(kind), Queue()
+    repository, queue = _technical(kind), PublicationQueueFake()
     committed: list[str] = []
 
     assert asyncio.run(_store(repository, queue, committed).execute(_RUN, NoModelAnswer())) is True
@@ -188,7 +95,7 @@ def test_a_backend_result_is_stored_with_the_backend_summary_and_no_model_answer
 
 
 def test_a_backend_result_is_a_comment_even_where_the_repository_requests_changes() -> None:
-    repository, queue = _technical("unsupported_path"), Queue()
+    repository, queue = _technical("unsupported_path"), PublicationQueueFake()
     assert repository.review_event == "REQUEST_CHANGES"
 
     assert asyncio.run(_store(repository, queue, []).execute(_RUN, NoModelAnswer())) is True
@@ -199,7 +106,7 @@ def test_a_backend_result_is_a_comment_even_where_the_repository_requests_change
 
 
 def test_a_second_backend_result_is_refused_by_the_publishing_guard() -> None:
-    repository, queue = _technical("too_large"), Queue()
+    repository, queue = _technical("too_large"), PublicationQueueFake()
     store = _store(repository, queue, [])
     assert asyncio.run(store.execute(_RUN, NoModelAnswer())) is True
     response, body = repository.response.copy(), repository.body
@@ -214,7 +121,8 @@ def test_a_second_backend_result_is_refused_by_the_publishing_guard() -> None:
 def test_a_model_answer_is_still_given_to_the_repository_as_it_was() -> None:
     repository = _technical("too_large")
 
-    assert asyncio.run(_store(repository, Queue(), []).execute(_RUN, answer())) is True
+    queue = PublicationQueueFake()
+    assert asyncio.run(_store(repository, queue, []).execute(_RUN, answer())) is True
 
     assert repository.answers == [answer()]
     assert repository.response["coverage"]["status"] == "none"
@@ -228,7 +136,7 @@ def test_an_empty_model_answer_is_invalid_and_never_a_backend_result(
 ) -> None:
     # Only the marker type means "no model call". An empty answer of the model is an invalid
     # answer (llm_invalid_output), not published as a review with coverage none.
-    repository, queue = _technical("too_large"), Queue()
+    repository, queue = _technical("too_large"), PublicationQueueFake()
 
     with pytest.raises(InvalidReviewOutput, match="invalid review output") as raised:
         asyncio.run(_store(repository, queue, []).execute(_RUN, empty))
@@ -239,13 +147,46 @@ def test_an_empty_model_answer_is_invalid_and_never_a_backend_result(
     assert queue.pointers == []
 
 
-def test_the_inline_publisher_refuses_the_marker_as_an_invalid_answer() -> None:
-    # Not composed with the context stage in production: it never gets the marker, and a
-    # marker that reached it would not be published as an empty review.
-    publisher = PublishReviewOutput(cast(Any, None), cast(Any, None))
+def test_the_inline_publisher_accepts_and_publishes_the_marker() -> None:
+    class _FakeProvider:
+        def __init__(self) -> None:
+            self.published: list[tuple[str, str, Any, str]] = []
 
-    with pytest.raises(InvalidReviewOutput, match="invalid review output"):
-        asyncio.run(publisher.execute(_RUN, NoModelAnswer()))
+        async def publish_review(
+            self,
+            *,
+            commit_sha: str,
+            body: str,
+            findings: tuple[Any, ...],
+            idempotency_key: str,
+        ) -> None:
+            self.published.append((commit_sha, body, findings, idempotency_key))
+
+    files = [
+        DiffSnapshot(
+            "src/file.py",
+            "@@ -0,0 +1,2 @@\n+a = 1",
+            "a" * 40,
+            status="added",
+            additions=1,
+            changes=1,
+        )
+    ]
+    repository = PublicationRepositoryFake(
+        files, project(files, snapshot_path=True), review_event="REQUEST_CHANGES"
+    )
+    provider = _FakeProvider()
+    publisher = PublishReviewOutput(
+        lambda: PublicationUowFake(repository), cast(Any, provider)
+    )
+
+    result = asyncio.run(publisher.execute(_RUN, NoModelAnswer(incomplete_paths=("src/file.py",))))
+
+    assert result is True
+    assert repository.answers == [None]
+    assert len(provider.published) == 1
+    assert "src/file.py" in provider.published[0][1]
+    assert provider.published[0][2] == ()
 
 
 def test_the_marker_is_an_empty_mapping() -> None:
@@ -254,3 +195,42 @@ def test_the_marker_is_an_empty_mapping() -> None:
     assert dict(marker) == {}
     assert len(marker) == 0
     assert "summary" not in marker
+
+
+def test_no_model_answer_with_incomplete_paths_publishes_partial_bounded_list() -> None:
+    files = [
+        DiffSnapshot(
+            f"src/file_{idx}.py",
+            "@@ -0,0 +1,2 @@\n+a = 1\n+b = 2",
+            "a" * 40,
+            status="added",
+            additions=2,
+            changes=2,
+            review_patch="@@ -0,0 +1,2 @@\n+a = 1\n+b = 2",
+        )
+        for idx in range(1, 8)
+    ]
+    repository = PublicationRepositoryFake(
+        files, project(files, snapshot_path=True), review_event="REQUEST_CHANGES"
+    )
+    queue = PublicationQueueFake()
+    committed: list[str] = []
+    omitted = tuple(item.filename for item in files)
+
+    marker = NoModelAnswer(incomplete_paths=omitted)
+    assert dict(marker) == {}
+    assert len(marker) == 0
+
+    assert asyncio.run(_store(repository, queue, committed).execute(_RUN, marker)) is True
+
+    assert repository.answers == [None]
+    assert committed == ["commit"]
+    assert repository.response["verdict"] is None
+    assert repository.response["coverage"]["status"] == "partial"
+    assert repository.response["coverage"]["reviewed_files"] == 0
+    assert repository.response["coverage"]["reason_counts"] == {"review_input_incomplete": 7}
+    assert [pointer.review_event for pointer in queue.pointers] == ["COMMENT"]
+    assert "модель получила не весь patch" in repository.body
+    assert "`src/file_1.py`" in repository.body
+    assert "- Ещё причин: 2" in repository.body
+    assert "и ещё 2" in repository.body

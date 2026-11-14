@@ -93,11 +93,15 @@ class NoModelAnswer(Mapping[str, object]):
     """The backend result of a run that made no model call: a marker, never an answer.
 
     A snapshot-path change without analysable text (coverage none, #130 F5, or no-text
-    partial, CVS §2.2) and a summary-only stop are finished without the review model. It is
-    stored as any result, but nothing is parsed, no ``llm.review_output`` is written, and
-    the post-processor's backend summary is the only one. Empty, so the inline
-    ``PublishReviewOutput`` refuses it as an invalid answer.
+    partial, CVS §2.2), a summary-only stop (#365), or a review context overflow (Refs #461)
+    is finished without the review model. It is stored as any result, but nothing is parsed,
+    no ``llm.review_output`` is written, and the post-processor's backend summary is the only
+    one. Optional ``incomplete_paths`` mark unreviewed files in finalized coverage. Empty
+    as a mapping so downstream parsers treat it as an explicit marker rather than an answer.
     """
+
+    def __init__(self, *, incomplete_paths: tuple[str, ...] = ()) -> None:
+        self.incomplete_paths = incomplete_paths
 
     def __getitem__(self, key: str) -> object:
         raise KeyError(key)
@@ -286,7 +290,9 @@ class StoreReviewOutput:
             coverage=coverage,
             summary_only=context.summary_only,
             incomplete_paths=(
-                raw_output.incomplete_paths if isinstance(raw_output, VerifiedReviewOutput) else ()
+                raw_output.incomplete_paths
+                if isinstance(raw_output, (VerifiedReviewOutput, NoModelAnswer))
+                else ()
             ),
             summary_reason=context.summary_reason,
             change_summary=verified.change_summary if verified is not None else (),
