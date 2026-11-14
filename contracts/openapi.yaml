@@ -26,7 +26,9 @@ info:
     Path=/api/auth`). The SSE stream is read with `fetch` so it carries the same header.
     Agent device authorization (#249) instead issues an opaque 30-day token for one
     GitHub repository. It is accepted only on repository settings, rules status, pull
-    request and run read operations; live user grants still apply. It cannot access
+    request and run read operations; the stored user-grant projection still applies
+    (GitHub-side user revocation without App removal is reflected at the next OAuth,
+    as for browser access; see #101). It cannot access
     `/api/auth/me`, metrics, Bitbucket administration, run cancellation or SSE.
 
     **Errors.** `HTTPException` errors are `{"detail": "<message>"}` (`ErrorResponse`);

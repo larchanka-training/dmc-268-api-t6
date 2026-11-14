@@ -18,12 +18,12 @@ from app.modules.repositories.infrastructure.repository_settings import (
 )
 from tests.portal_postgres import INSTALL_A, REPO_A, REPO_B, RUN_B, RUN_DONE, WS_A, Env, api
 
-pytest_plugins = ("tests.agent_postgres",)
+pytest_plugins = ("tests.portal_postgres",)
 
 
 @pytest.mark.integration
-def test_agent_token_persists_only_hash_and_limits_repository_queries(agent_schema: Env) -> None:
-    engine = agent_schema.engine()
+def test_agent_token_persists_only_hash_and_limits_repository_queries(portal_env: Env) -> None:
+    engine = portal_env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def exercise() -> None:
@@ -66,9 +66,9 @@ def test_agent_token_persists_only_hash_and_limits_repository_queries(agent_sche
 
 @pytest.mark.integration
 def test_agent_token_cannot_access_another_repository_in_the_same_installation(
-    agent_schema: Env,
+    portal_env: Env,
 ) -> None:
-    engine = agent_schema.engine()
+    engine = portal_env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def seed_and_issue() -> AuthScope:
@@ -102,7 +102,7 @@ def test_agent_token_cannot_access_another_repository_in_the_same_installation(
     try:
         scope = asyncio.run(seed_and_issue())
         assert scope.workspace_ids == (WS_A,)
-        with api(agent_schema, AuthScope(42, (WS_A,))) as (client, _):
+        with api(portal_env, AuthScope(42, (WS_A,))) as (client, _):
             assert {item["id"] for item in client.get("/api/repos").json()} == {
                 str(REPO_A),
                 str(REPO_B),
@@ -110,7 +110,7 @@ def test_agent_token_cannot_access_another_repository_in_the_same_installation(
             assert client.get(f"/api/repos/{REPO_B}/pulls").status_code == 200
             assert client.get(f"/api/runs/{RUN_B}").status_code == 200
 
-        with api(agent_schema, scope) as (client, _):
+        with api(portal_env, scope) as (client, _):
             assert [item["id"] for item in client.get("/api/repos").json()] == [str(REPO_A)]
             assert client.get(f"/api/repos/{REPO_A}/pulls").status_code == 200
             assert client.get(f"/api/runs/{RUN_DONE}").status_code == 200
@@ -121,5 +121,43 @@ def test_agent_token_cannot_access_another_repository_in_the_same_installation(
             assert str(RUN_B) not in {
                 item["id"] for item in client.get("/api/runs").json()["items"]
             }
+    finally:
+        asyncio.run(engine.dispose())
+
+
+@pytest.mark.integration
+def test_agent_token_issues_for_repository_name_with_different_case(portal_env: Env) -> None:
+    engine = portal_env.engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def exercise() -> None:
+        tokens = AgentTokens(lambda: SqlAlchemyAgentTokenUnitOfWork(factory))
+        issued = await tokens.issue(42, "OcTo/A")
+        scope = await tokens.resolve(issued.secret)
+        assert scope is not None
+        assert scope.agent_repository_id == REPO_A
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        asyncio.run(engine.dispose())
+
+
+@pytest.mark.integration
+def test_agent_token_refuses_ambiguous_casefolded_repository_name(portal_env: Env) -> None:
+    engine = portal_env.engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def exercise() -> None:
+        async with factory.begin() as session:
+            await session.execute(
+                update(Repository).where(Repository.id == REPO_B).values(full_name="OCTO/A")
+            )
+        tokens = AgentTokens(lambda: SqlAlchemyAgentTokenUnitOfWork(factory))
+        with pytest.raises(RepositoryNotAvailable):
+            await tokens.issue(42, "octo/a")
+
+    try:
+        asyncio.run(exercise())
     finally:
         asyncio.run(engine.dispose())

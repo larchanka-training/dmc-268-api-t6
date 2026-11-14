@@ -62,6 +62,9 @@ def test_public_agent_instructions_describe_complete_sequence() -> None:
     assert "`status=present` and `sha` equals the commit" in response.text
     assert "If the user requested no rules change" in response.text
     assert "`missing` means the service defaults apply" in response.text
+    assert "poll again every 5 seconds for up to 2 minutes" in response.text
+    assert "`present` means the existing rules apply" in response.text
+    assert "report that rules status is still pending" in response.text
     assert "opens **Agent tokens** from the AI Code Reviewer user menu" in response.text
     assert "remove and reapply the label" in response.text
     assert "If no run appears" in response.text

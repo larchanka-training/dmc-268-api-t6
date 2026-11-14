@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -27,7 +27,7 @@ class SqlAlchemyAgentTokenStore:
         self._session = session
 
     async def authorized_repo(self, user_id: int, full_name: str) -> AuthorizedRepo | None:
-        row = (
+        rows = (
             await self._session.execute(
                 select(Repository.id, ProviderInstallation.workspace_id)
                 .join(
@@ -51,14 +51,15 @@ class SqlAlchemyAgentTokenStore:
                     ),
                 )
                 .where(
-                    Repository.full_name == full_name,
+                    func.lower(Repository.full_name) == full_name.lower(),
                     Repository.installation_available.is_(True),
                     ProviderInstallation.provider == "github",
                     ProviderInstallation.deleted_at.is_(None),
                 )
+                .limit(2)
             )
-        ).first()
-        return AuthorizedRepo(row[0], row[1]) if row is not None else None
+        ).all()
+        return AuthorizedRepo(rows[0][0], rows[0][1]) if len(rows) == 1 else None
 
     async def create(self, record: AgentTokenRecord) -> None:
         self._session.add(

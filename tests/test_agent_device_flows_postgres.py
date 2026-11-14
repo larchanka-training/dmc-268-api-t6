@@ -15,12 +15,12 @@ from app.modules.auth.infrastructure.agent_device_flows import SqlAlchemyDeviceF
 from app.modules.auth.infrastructure.models import AuthAgentDeviceFlow
 from tests.portal_postgres import Env
 
-pytest_plugins = ("tests.agent_postgres",)
+pytest_plugins = ("tests.portal_postgres",)
 
 
 @pytest.mark.integration
-def test_device_flow_reservation_and_completion_are_durable(agent_schema: Env) -> None:
-    engine = agent_schema.engine()
+def test_device_flow_reservation_and_completion_are_durable(portal_env: Env) -> None:
+    engine = portal_env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
     code_hash = hashlib.sha256(b"device-code").hexdigest()

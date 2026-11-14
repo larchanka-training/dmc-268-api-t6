@@ -57,6 +57,8 @@ def test_github_device_flow_start_pending_and_authorized() -> None:
         ({"error": "slow_down", "interval": 11}, "slow_down", 11),
         ({"error": "access_denied"}, "denied", None),
         ({"error": "expired_token"}, "expired", None),
+        ({"error": "token_expired"}, "expired", None),
+        ({"error": "bad_verification_code"}, "expired", None),
     ],
 )
 def test_github_device_poll_terminal_and_backoff_states(
@@ -72,6 +74,37 @@ def test_github_device_poll_terminal_and_backoff_states(
             )
             assert result.status == status
             assert result.interval == interval
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, json={"error": "device_flow_disabled"}),
+        httpx.Response(200, json=["not-an-object"]),
+        httpx.Response(
+            200,
+            json={
+                "device_code": "device-secret",
+                "user_code": "ABCD-EFGH",
+                "verification_uri": "https://example.com/login/device",
+                "expires_in": 900,
+                "interval": 5,
+            },
+        ),
+        httpx.Response(403, json={"error": "forbidden"}),
+        httpx.Response(502, json={"error": "upstream_failure"}),
+    ],
+)
+def test_github_device_start_rejects_provider_failures(response: httpx.Response) -> None:
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: response),
+            base_url="https://github.com",
+        ) as client:
+            with pytest.raises(GitHubProviderUnavailable):
+                await HttpGitHubDeviceOAuthClient(client, client_id="test-client").start_device()
 
     asyncio.run(exercise())
 
