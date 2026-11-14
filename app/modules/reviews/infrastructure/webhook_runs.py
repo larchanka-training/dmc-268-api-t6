@@ -62,6 +62,7 @@ from app.modules.reviews.infrastructure.gitlab_eligibility_candidates import (
 )
 from app.modules.reviews.infrastructure.models import CodeChange, PromptVersion, Run
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition
+from app.modules.workspaces.domain.status import WorkspaceStatus
 from app.modules.workspaces.infrastructure.models import Workspace
 
 
@@ -204,7 +205,10 @@ class SqlAlchemyWebhookRunStore:
             return CandidateMiss.MISSING_INSTALLATION
         identity = preliminary.identity
         levels = (
-            select(Workspace.id).where(Workspace.id == identity.workspace_id),
+            select(Workspace.id).where(
+                Workspace.id == identity.workspace_id,
+                Workspace.status != WorkspaceStatus.DELETED,
+            ),
             select(ProviderInstallation.id).where(
                 ProviderInstallation.id == identity.origin_provider_installation_id
             ),
@@ -250,7 +254,10 @@ class SqlAlchemyWebhookRunStore:
         # Same complete authority levels/order as management and projection. Never
         # change the original target to the current replacement after waiting.
         statements = (
-            select(Workspace.id).where(Workspace.id == target.workspace_id),
+            select(Workspace.id).where(
+                Workspace.id == target.workspace_id,
+                Workspace.status != WorkspaceStatus.DELETED,
+            ),
             select(ProviderInstallation.id).where(
                 ProviderInstallation.id == target.origin_provider_installation_id
             ),

@@ -22,6 +22,7 @@ from app.modules.workspaces.application.link_github_installations import (
     GitHubInstallation,
     InstallationSnapshotReservation,
 )
+from app.modules.workspaces.domain.status import WorkspaceStatus
 from app.modules.workspaces.infrastructure.github_installation_locks import lock_github_account
 from app.modules.workspaces.infrastructure.github_repository_rebinding import (
     SqlAlchemyGitHubRepositoryRebinding,
@@ -123,9 +124,13 @@ class SqlAlchemyGitHubInstallationLinkStore:
             self._session
         ).archived_workspace(installation)
         existing = await self._session.scalar(
-            select(ProviderInstallation.workspace_id).where(
+            select(ProviderInstallation.workspace_id)
+            .join(Workspace, Workspace.id == ProviderInstallation.workspace_id)
+            .where(
                 ProviderInstallation.provider == "github",
                 ProviderInstallation.external_id == installation.id,
+                ProviderInstallation.deleted_at.is_(None),
+                Workspace.status != WorkspaceStatus.DELETED,
             )
         )
         workspace_id = existing

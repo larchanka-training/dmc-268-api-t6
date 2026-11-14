@@ -434,6 +434,10 @@ def test_empty_gitlab_migration_round_trips_preserving_github_receipts_and_setti
                 assert after.pop("bitbucket_binding_generation") is None
                 assert after.pop("bitbucket_webhook_generation") is None
                 assert after.pop("bitbucket_push_after_pr_number") is None
+            if table == "workspaces":
+                assert after.pop("status") == "active"
+                assert after.pop("deleted_at") is None
+                assert after.pop("deleted_by") is None
             assert after == before[table]
         # Alembic does not compare CHECK constraints: retain explicit physical and
         # metadata names; the adversarial tests above exercise their SQL semantics.
