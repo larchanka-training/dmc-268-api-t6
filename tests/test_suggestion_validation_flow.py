@@ -37,6 +37,7 @@ from app.modules.reviews.application.store_review_output import (
 from app.modules.reviews.infrastructure.blob_cache import InMemoryBlobCache
 from app.modules.reviews.infrastructure.subprocess_source_parser import SubprocessSourceParser
 from tests.findings_post_processor_fakes import _diff_map_from_vcs
+from tests.swapi_fixtures import SWAPI_SUGGESTION_CASES
 from tests.verifier_pipeline_fakes import FakeQueue, InProcessSuggestionParser
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "swapi"
@@ -191,90 +192,16 @@ def _make_context(
 
 _SWAPI_EXAMPLES = [
     pytest.param(
-        "src/tools/starships.ts",
-        "added",
-        "starships.ts",
-        None,
-        31,
-        (
-            "      id: z.union([z.number().int().positive(), z.string()]).describe("
-            '"Starship resource ID or full SWAPI starship URL"),'
-        ),
-        "syntax_error",
-        id="starships_ts_added_l31",
-    ),
-    pytest.param(
-        "src/tools/people.ts",
-        "added",
-        "people.ts",
-        None,
-        31,
-        (
-            "      id: z.union([z.number().int().positive(), z.string()]).describe("
-            '"Character resource ID or full SWAPI character URL"),'
-        ),
-        "syntax_error",
-        id="people_ts_added_l31",
-    ),
-    pytest.param(
-        "src/tools/planets.ts",
-        "added",
-        "planets.ts",
-        None,
-        31,
-        (
-            "      id: z.union([z.number().int().positive(), z.string()]).describe("
-            '"Planet resource ID or full SWAPI planet URL"),'
-        ),
-        "syntax_error",
-        id="planets_ts_added_l31",
-    ),
-    pytest.param(
-        "src/tools/films.ts",
-        "modified",
-        "films_8bc8b5d.ts",
-        93,
-        94,
-        (
-            "      if (filmId === undefined && episodeId === undefined) {\n"
-            "        throw new McpError(\n"
-            "          ErrorCode.InvalidParams,\n"
-            "          \"Provide exactly one of 'film_id' or 'episode_id' to identify"
-            ' the episode.",\n'
-            "        );\n"
-            "      }"
-        ),
-        "syntax_error",
-        id="films_ts_modified_8bc8b5d_l93_94",
-    ),
-    pytest.param(
-        "src/tools/films.ts",
-        "modified",
-        "films_858e1c1.ts",
-        None,
-        96,
-        'import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/server/mcp.js";',
-        "syntax_error",
-        id="films_ts_modified_858e1c1_l96",
-    ),
-    pytest.param(
-        "src/tools/common.ts",
-        "added",
-        "common.ts",
-        None,
-        17,
-        (
-            "  if (!(error instanceof ApiError)) {\n"
-            "    return {\n"
-            "      isError: true,\n"
-            '      content: [{ type: "text" as const, text: `Internal error: '
-            "${String(error)}` }],\n"
-            "    };\n"
-            "  }"
-        ),
-        "duplicate_condition",
-        id="common_ts_added_l17_duplicate_condition",
-    ),
+        c.path,
+        c.status,
+        c.fixture_name,
+        c.start_line,
+        c.line,
+        c.suggestion,
+        c.expected_reason,
+        id=f"{c.fixture_name.removesuffix('.ts')}_{c.status}_l{c.line}",
+    )
+    for c in SWAPI_SUGGESTION_CASES
 ]
 
 

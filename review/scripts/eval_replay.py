@@ -77,8 +77,10 @@ import asyncio
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -124,6 +126,7 @@ from review.scripts.validate_dataset import (  # noqa: E402
     DEFAULT_ROOT,
     POLICY_ARMS,
     SCHEMA_PATH,
+    _git_env,
     _patch_added_lines,
     uses_policy_arms,
     validate_case,
@@ -768,6 +771,67 @@ def _rag_warnings(
     return []
 
 
+def reconstruct_head_file_contents(
+    case_dir: Path,
+    record: Mapping[str, Any],
+    *,
+    warnings: list[str] | None = None,
+) -> dict[str, bytes]:
+    """Reconstruct PR-head file bytes by applying the case patch onto ``base_path``."""
+    base_rel = record.get("base_path")
+    patch_rel = record.get("patch_path")
+    if not isinstance(base_rel, str) or not isinstance(patch_rel, str):
+        return {}
+    base = case_dir / base_rel
+    patch = case_dir / patch_rel
+    if not base.is_dir() or not patch.is_file():
+        return {}
+    apply_directory = record.get("apply_directory")
+    with tempfile.TemporaryDirectory(prefix="replay-head-") as tmp:
+        workdir = Path(tmp) / "worktree"
+        shutil.copytree(base, workdir)
+        command = ["git", "-c", "core.autocrlf=false", "apply", "--whitespace=nowarn"]
+        if isinstance(apply_directory, str) and apply_directory:
+            command.append(f"--directory={apply_directory}")
+        env = {**_git_env(), "GIT_CEILING_DIRECTORIES": tmp}
+        applied = subprocess.run(
+            [*command, str(patch)],
+            cwd=workdir,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if applied.returncode != 0:
+            if warnings is not None:
+                err_msg = applied.stderr.strip() or applied.stdout.strip() or "git apply failed"
+                warnings.append(f"case {record.get('id', case_dir.name)}: {err_msg}")
+            return {}
+        source_root = (
+            workdir / apply_directory
+            if isinstance(apply_directory, str) and apply_directory
+            else workdir
+        )
+        if not source_root.is_dir():
+            return {}
+        return {
+            path.relative_to(source_root).as_posix(): path.read_bytes()
+            for path in source_root.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        }
+
+
+def _has_string_suggestion(raw_response: object) -> bool:
+    if not isinstance(raw_response, Mapping):
+        return False
+    findings = raw_response.get("findings")
+    if not isinstance(findings, Sequence) or isinstance(findings, (str, bytes)):
+        return False
+    return any(
+        isinstance(item, Mapping) and isinstance(item.get("suggestion"), str) for item in findings
+    )
+
+
 def replay(
     root: Path = DEFAULT_ROOT,
     *,
@@ -820,6 +884,12 @@ def replay(
         case_id = record["id"]
         response_path = response_paths[case_id]
         raw, valid, exit_code, validator_output = _validated_raw(response_path, v2=v2)
+        answer = _normalized_answer(response_path, v2=v2)
+        file_contents = (
+            reconstruct_head_file_contents(case_dir, record, warnings=warnings)
+            if _has_string_suggestion(raw) or _has_string_suggestion(answer)
+            else None
+        )
         case = ScoringCase(
             case_id=case_id,
             truths=tuple(record["expected_findings"]),
@@ -830,9 +900,9 @@ def replay(
             usage=None if usage is None else tuple(usage[case_id]),
             arm=scoring_arm,
             must_not_flag=tuple(record.get("must_not_flag", ())),
+            file_contents=file_contents,
         )
         cases.append(case)
-        answer = _normalized_answer(response_path, v2=v2)
         normalized_cases.append(
             replace(case, raw_response=answer, response_valid=answer is not None)
         )
@@ -966,6 +1036,13 @@ def format_console(report: dict[str, Any]) -> str:
             f"Usage: calls={usage['calls']} tokens_in={usage['tokens_in']} "
             f"tokens_out={usage['tokens_out']} cost_usd={usage['cost_usd']}"
         )
+    suggestions = report.get("suggestions")
+    if suggestions is not None and (suggestions["total"] or suggestions.get("unchecked", 0)):
+        lines.append(
+            f"Suggestions valid: {_percent(suggestions['share'])} "
+            f"({suggestions['valid']}/{suggestions['total']}, "
+            f"unchecked={suggestions.get('unchecked', 0)})"
+        )
     normalized = report.get("gateway_normalized")
     if normalized is not None:
         loss = normalized["attribution_loss"]
@@ -975,6 +1052,13 @@ def format_console(report: dict[str, Any]) -> str:
             "(not the published review):"
         )
         lines.extend(f"  {line}" for line in _quality_lines(normalized))
+        norm_sugg = normalized.get("suggestions")
+        if norm_sugg is not None and (norm_sugg["total"] or norm_sugg.get("unchecked", 0)):
+            lines.append(
+                f"  Suggestions valid: {_percent(norm_sugg['share'])} "
+                f"({norm_sugg['valid']}/{norm_sugg['total']}, "
+                f"unchecked={norm_sugg.get('unchecked', 0)})"
+            )
         lines.append(
             f"  rule_name nulled by the post-processor: {nulled}/{loss['findings']} findings"
         )
