@@ -28,12 +28,14 @@ from app.modules.integrations.bitbucket.infrastructure.run_http import (
 )
 from app.modules.reviews.application.bitbucket_status import BitbucketStatusSnapshot
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
+from app.modules.reviews.application.conventions import GeneratedConventions
 from app.modules.reviews.application.diff_map import VcsProviderName, build_diff_map
+from app.modules.reviews.application.execute_review import ReviewPromptInput
 from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
 from app.modules.reviews.application.handle_review_run import ClaimedAttempt
 from app.modules.reviews.application.policy_errors import PolicyError
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
-from app.modules.reviews.application.process_run import RunVcsInput
+from app.modules.reviews.application.process_run import RunConventionsInput, RunVcsInput
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.publish_run_review import (
     PublicationIdentity,
@@ -217,13 +219,15 @@ class BitbucketRuns(Runs):
         assert run_id == RUN_ID
         return RUN
 
-    async def get_run_conventions_input(self, run_id: UUID):  # type: ignore[no-untyped-def]
+    async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput:
         return replace(
             await super().get_run_conventions_input(run_id),
             review_binding=_binding(provider="bitbucket"),
         )
 
-    async def get_review_prompt_input(self, run_id: UUID, conventions):  # type: ignore[no-untyped-def]
+    async def get_review_prompt_input(
+        self, run_id: UUID, conventions: GeneratedConventions
+    ) -> ReviewPromptInput:
         return replace(
             await super().get_review_prompt_input(run_id, conventions),
             review_binding=_binding(provider="bitbucket"),
@@ -546,7 +550,7 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
             assert run_id == RUN_ID
             return run
 
-        async def get_run_conventions_input(self, run_id: UUID):  # type: ignore[no-untyped-def]
+        async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput:
             return replace(
                 await super().get_run_conventions_input(run_id), repository_id=TARGET.repository_id
             )

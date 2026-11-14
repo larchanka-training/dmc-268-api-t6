@@ -15,8 +15,9 @@ FastAPI, SQLAlchemy 2 (async), Alembic, Pydantic 2, httpx, pytest, uv, Python 3.
 
 - Always use uv for dependencies and running tools (never pip/poetry).
 - Never `--no-verify`.
-- Run the gates before claiming done: `uv run ruff check .`, `uv run ruff format --check .`,
-  `uv run mypy .`, `uv run pytest`.
+- Run the gates before claiming done without errors or new warnings: `uv run ruff check .`,
+  `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest` (criteria for
+  «без предупреждений» and `ruff` rule rationale: `.agents/rules/backend.md` §4).
 - No new dependency without a line in the PR body (`uv add`, commit `uv.lock`).
 - Never edit files owned by another open PR without a comment there.
 - No DB transaction spans an LLM or GitHub call; network calls happen outside the

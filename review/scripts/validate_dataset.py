@@ -168,7 +168,7 @@ def _patch_added_lines(patch: Path) -> dict[str, set[int]]:
                 new_line += 1
             elif text.startswith(" "):
                 new_line += 1
-            elif text.startswith("-") or text.startswith("\\"):
+            elif text.startswith(("-", "\\")):
                 continue
     return added
 
