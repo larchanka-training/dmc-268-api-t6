@@ -2,11 +2,12 @@
 
 | | |
 |---|---|
-| **Статус** | **Черновик Ч.1, PR #334** (Идентичность находок, подавление дубликатов и стратегия тредов) |
+| **Статус** | Ч.1: PR #334 (идентичность находок, дубликаты и треды); Ч.2: PR #415 (инкрементальный Run и лимиты дельты) |
 | **Владелец** | Техлид (роль 1) |
-| **Область действия** | Идентичность замечания между прогонами (Finding Fingerprint), сопоставление со старыми коммитами, пересчет координат без привязки к абсолютным номерам строк (Line Offset Tracking), алгоритм межпрогонного подавления дубликатов в плане публикации (Cross-Run Dedup), стратегия классификации и разрешения устаревших/исправленных тредов на VCS (Outdated / Resolved Threads) через GraphQL `resolveReviewThread`, права GitHub App, исключение собственных событий бота по правилу Р-9 (для событий тредов — цель FeedbackSignal после MVP, §4.7), квотирование мутаций GitHub API. |
+| **Область действия** | Идентичность замечания между прогонами (Finding Fingerprint), сопоставление со старыми коммитами, пересчет координат без привязки к абсолютным номерам строк (Line Offset Tracking), алгоритм межпрогонного подавления дубликатов в плане публикации (Cross-Run Dedup), стратегия классификации и разрешения устаревших/исправленных тредов на VCS (Outdated / Resolved Threads) через GraphQL `resolveReviewThread`, права GitHub App, исключение собственных событий бота по правилу Р-9 (для событий тредов — цель FeedbackSignal после MVP, §4.7), квотирование мутаций GitHub API. Ч.2: судьба активного Run при `synchronize`, выбор базы и fallback, закреплённый scope дельты, coverage v2, наследование находок и вердикта, QA и лимиты инкремента (§6). |
 | **Связанные документы** | [`SYSTEM_DESIGN.md`](SYSTEM_DESIGN.md) (Р-5, Р-9, §6.9, §8, §13 «Риск схлопывания»), [`CONTEXT_AND_VERIFICATION_SPEC.md`](CONTEXT_AND_VERIFICATION_SPEC.md) (§6.2, §10 «Write-back: неизменяемая публикация»), [`PIPELINE_SPEC.md`](PIPELINE_SPEC.md) (§1, §6, §8), `WEBHOOK_WORKER.md` (§6). |
 | **Definition of Done (DoD Ч.1)** | 1. Ключ идентичности находки между Run не зависит от абсолютных номеров строк; формализованы поля из модели `Finding`, нормализация с сохранением отступов, позиционное сопоставление вхождений и каноническая сериализация.<br/>2. Спроектирован алгоритм подавления дубликатов как фильтр плана публикации (Pass 6b) по квитанциям `comments`: подавленный повтор сохраняет `drop_reason IS NULL`, получает `publication_action = 'suppressed_duplicate'`, учитывается в severity counts, вердикте и Check Run, но исключается из массива `comments[]` со ссылкой на существующий комментарий (`linked_comment_id`).<br/>3. Задана стратегия классификации тредов (оставить, закрыть через GraphQL `resolveReviewThread`, строгий приоритет человека); определены порядок предикатов, проверка полноты покрытия перед закрытием и правила для всех состояний.<br/>4. Сняты противоречия с неизменяемой публикацией (CVS §10), одним review batch (Р-5) и запретом компенсирующего удаления (SD §13).<br/>5. Спроектированы изменения схемы БД (Alembic), модель жизненного цикла треда и интеграция этапа чистки как best-effort шага publisher после T14 и обновления Check Run (§4.5).<br/>6. Составлена расширенная таблица сквозных сценариев для регресса QA с корректными значениями Check Run. |
+| **Definition of Done (DoD Ч.2)** | Заданы переходы T1-INC/T4-INC/T8-INC/T14-INC и T15, пригодная база с проверкой coverage, все причины fallback и лимиты дельты; полный сохранённый diff и закреплённый scope дают один проверяемый coverage v2 без ложного `clean`; описаны ошибки целостности, наследование находок, Check Run и QA-INC-01–28 (§6). Согласованы контракты PIPELINE/CVS/SD и получено ревью исполнителей перед мержем. |
 
 ---
 
@@ -657,9 +658,622 @@ query GetPullRequestReviewThreads($owner: String!, $repo: String!, $pr: Int!, $c
 
 ---
 
-## 6. Инкрементальный анализ при событии `synchronize` (Зарезервировано под Ч.2)
+## 6. Инкрементальный анализ при событии `synchronize` (Спецификация Ч.2)
 
-Спецификация стейт-машины инкрементального ревью, выбора базы разницы (`prev_head...current_head` против полного PR diff), условий полного отката (rebase / force-push / изменение правил), сохранения/отмены in-flight Run по T15 и формирования агрегированного вердикта PR выделена в **Часть 2 (Ч.2)** задачи [#306](https://github.com/larchanka-training/dmc-268-api-t6/issues/306) и оформляется отдельным PR.
+### 6.1. Архитектурная концепция и базовые инварианты инкрементального ревью
+
+#### 6.1.1. Проблематика полного ревью на каждый пуш
+В исходной архитектуре (v1) каждое событие обновления pull request (`pull_request.synchronize`) приводило либо к отмене активного анализа, либо к перезапуску полного анализа всего pull request (`base_sha...head_sha`).
+На реальных проектах с активной разработкой это вызывает критические проблемы:
+1. **Катастрофическая задержка обратной связи (Time-to-Feedback, p95 latency):** При каждом промежуточном коммите (исправление опечатки, линтинг, доработка по замечанию) бот заново вычитывает сотни файлов и тысячи строк диффа. Время анализа вырастает до минут, а очередь воркеров блокируется.
+2. **Экспоненциальный перерасход токенов LLM и бюджета (LLM Token Waste):** Анализ одного и того же неизменённого контекста повторно на каждом пуше существенно увеличивает затраты на инференс моделей (нарушение принципов экономии Р-8, замеры эффективности — §6.7.3).
+3. **Голодание публикаций (Starvation / Push Races):** Если разработчик пушит несколько небольших коммитов подряд с интервалом в 1–2 минуты, каждый последующий пуш отменяет предыдущий Run (по правилу Р-2 / T6 / T15). В итоге ни один Run не успевает дойти до публикации, а разработчик остаётся без ревью до полного прекращения пушей.
+4. **Утрата контекста исправлений:** Полное ревью не проводит детерминированной границы между тем, *что было* на предыдущей итерации, и тем, *что изменилось* в последнем коммите.
+
+> [!NOTE]
+> **Область действия (VCS scope):** Инкрементальный анализ (`is_incremental = true`), обновлённый переход T15 и T1-INC действуют **исключительно для GitHub**. Для GitLab и Bitbucket платформа сохраняет действующий контракт («отмена при сдвиге головы + полное ревью на новой голове»); при поступлении событий для GitLab/Bitbucket выполняется откат к полному ревью с `incremental_fallback_reason = 'vcs_unsupported'` (приём событий GitLab на `main` уже реализован по #169).
+
+#### 6.1.2. Концепция инкрементального анализа
+Цель инкрементального ревью (Re-review) — переход от полного анализа PR к изолированному анализу **коммит-дельты (Incremental Diff)**, вносимой новыми коммитами относительно последней надёжно зафиксированной базы (`diff_base_commit...current_head_sha`), с последующей алгоритмической агрегацией сохраняющихся и новых находок.
+
+```mermaid
+flowchart LR
+    subgraph FullDiff ["Полный PR Diff (base_sha...head_sha_2)"]
+        direction TB
+        BaseSHA["base_sha<br/>(целевая ветка main)"] --> Head1["head_sha_1<br/>(Базовый коммит Run#1)"]
+        Head1 --> Head2["head_sha_2<br/>(Новый коммит Run#2)"]
+    end
+
+    subgraph IncrementalDiff ["Инкрементальная дельта (diff_base_commit...current_head_sha)"]
+        direction TB
+        DeltaHunks["Только изменённые хунки коммита head_sha_2<br/>+ контекст до ±30 строк"]
+    end
+
+    subgraph Aggregation ["Агрегация результатов"]
+        direction TB
+        Persisting["Сохраняющиеся замечания Run#1<br/>(из реестра comments)"]
+        Resolved["Закрытые замечания Run#1<br/>(исправлены в head_sha_2)"]
+        NewFindings["Новые замечания из дельты<br/>(head_sha_2)"]
+
+        Persisting --> UnifiedVerdict["Агрегированный вердикт PR<br/>+ Check Run"]
+        NewFindings --> UnifiedVerdict
+        Resolved -.->|resolveReviewThread| ClosedThreads["Закрытые треды на GitHub"]
+    end
+
+    Head1 -.->|Diff Base| DeltaHunks
+    Head2 -.-> DeltaHunks
+    DeltaHunks --> NewFindings
+```
+
+#### 6.1.3. Базовые инварианты инкрементального анализа (Ч.2)
+
+1. **Инвариант 1 (Доведение активного Run до публикации — «Дефолт лектора»):**
+   При получении события `pull_request.synchronize` с новой головой `head_sha_2`, если на PR уже выполняется прогон Run#1 (`head_sha_1`) в состоянии `running` **после сохранения закреплённого diff** или `publishing`, Run#1 не отменяется из-за нового head. Он доводится до стадии `publishing` и успешного завершения T14 (`succeeded`) с публикацией комментариев на GitHub и фиксацией квитанций в таблице `comments`. Run#2 на `head_sha_2` откладывается (`deferred_run_trigger`) и запускается после T14 как инкрементальный прогон, выбирая `head_sha_1` в качестве `diff_base_commit`.
+   *Исключения:* Если Run#1 находится в очереди `queued` (независимо от `attempt`), он отменяется по T6 (`superseded`), а для `attempt ≥ 1` дополнительно отправляется сигнал отмены; проверка RunGuard при claim служит страховкой. Если новый head обнаружен после claim, но до сохранения diff, `running` отменяется как `superseded` по T11 до вызова LLM: `/pulls/{n}/files` уже не может дать снимок старой головы.
+
+2. **Инвариант 2 (Материальность базы разницы по квитанциям `comments`):**
+   Базой разницы (`diff_base_commit`) может выступать только коммит, для которого в базе данных имеются **подтверждённые внешние квитанции публикации**:
+   - Либо подтверждённые записи в таблице `comments`, связанные с находками прогона (`EXISTS (SELECT 1 FROM comments c JOIN findings f ON f.id = c.finding_id WHERE f.run_id = r.id)`);
+   - Либо подтверждённые body-only находки с `findings.run_id = r.id AND findings.published = true` (как в Ч.1 §3.1);
+   - Либо подтверждённое успешное завершение прогона (`runs.state = 'succeeded'` через T14, включая прогоны с вердиктом `clean` без находок).
+   Абстрактный коммит из Git или коммит отменённого/упавшего Run без квитанций не может служить базой разницы. Прогон, отменённый после POST без единой квитанции, базой не становится и уходит в полное ревью. При отсутствии квитанций выполняется безопасный фоллбек на полное ревью.
+
+3. **Инвариант 3 (Агрегированная безопасность вердикта PR):**
+   Вердикт инкрементального Run строится на основе **полного среза активных дефектов pull request**:
+   $$F_{\text{active}} = (F_{\text{persisting}} \setminus F_{\text{resolved}}) \cup F_{\text{new}}$$
+   где $F_{\text{resolved}}$ вычисляется по исходам Pass 6b текущего прогона (`RESOLVED_BY_FIX`, `RESOLVED_BY_DELETION`, `RESOLVED_MUTATED`), а бакеты находок строго соответствуют Ч.1 и `main` (`inline`, `body_only`, `suppressed`).
+   Отсутствие замечаний в инкрементальном пуше (например, при правке опечатки в README) **не делает вердикт PR `clean`**, если в pull request сохраняются активные критические замечания (`critical` / `high`). GitHub Check Run отражает статус всего PR, предотвращая ложный мерж уязвимого кода.
+
+4. **Инвариант 4 (Строгая изоляция скоупа дельты):**
+   В инкрементальном Run на вход модели и анализатора передаются исключительно хунки коммит-дельты `diff_base_commit...current_head_sha` с каноническим окружающим контекстом (уровни `ContextLevel.L1` и `L2` по `review_context.py:104` и CVS §3.2 с окнами хунков до $\pm 30$ строк) и блоками кода активных замечаний в затронутых файлах. Любые кандидаты в находки, выходящие за пределы хунков инкрементальной дельты, отсекаются на проходах верификации с кодом `out_of_incremental_diff_scope`.
+
+5. **Инвариант 5 (Безопасный откат к полному ревью / Fallback Safety):**
+   При обнаружении расхождения истории Git (force push, rebase), слияния целевой ветки (`git merge main`), изменения снимка политик при `policy.load` (PIPELINE_SPEC §2: `policy_digest` или `rule_version_id` расходится с базовым прогоном) или превышения лимитов размера дельты (> 3000 строк) система детерминированно и прозрачно переключается в режим полного ревью (`is_incremental = false`) с обязательной записью причины в `incremental_fallback_reason`.
+
+---
+
+### 6.2. Расширение модели данных Run и DDL Alembic
+
+#### 6.2.1. Новые поля таблицы `runs`
+
+Для поддержки стейт-машины инкрементального ревью, отслеживания базы разницы и агрегации вердикта таблица `runs` расширяется следующими атрибутами:
+
+| Поле | Тип | Nullable | Default | Описание |
+|---|---|---|---|---|
+| `is_incremental` | `BOOLEAN` | `NOT NULL` | `false` | Флаг режима анализа: `true` — инкрементальный анализ дельты коммитов; `false` — полный анализ PR (`base_sha...head_sha`). |
+| `diff_base_commit` | `VARCHAR(64)` | `NULL` | `NULL` | Git SHA коммита, относительно которого вычислена дельта (`diff_base_commit...head_sha`). Заполнен строго при `is_incremental = true`. |
+| `base_run_id` | `UUID` | `NULL` | `NULL` | Внешний ключ на `runs.id` предшествующего базового прогона, квитанции которого взяты за основу. `ON DELETE RESTRICT`. |
+| `incremental_fallback_reason` | `VARCHAR(64)` | `NULL` | `NULL` | Код причины отказа от инкрементального анализа и выполнения полного ревью. Заполнен при `is_incremental = false` в случаях, когда запуск мог быть инкрементальным, но произошёл откат к полному ревью (включая `no_prior_published_run`, `manual_rerun`, `vcs_unsupported`). |
+| `persisted_active_findings_count` | `INTEGER` | `NOT NULL` | `0` | Количество активных незакрытых замечаний из предшествующих прогонов, унаследованных и учтённых в вердикте текущего Run. |
+
+Допустимые значения перечисления `incremental_fallback_reason`:
+- `no_prior_published_run` — первый прогон на PR либо предшествующие прогоны завершились без опубликованных квитанций (формируется на шаге 2 алгоритма §6.5.1);
+- `target_branch_changed` — сменилась целевая ветка PR (`runs.base_ref != base_run.base_ref`, шаг 2 алгоритма §6.5.1);
+- `force_push_or_rebase` — коммит `diff_base_commit` не является прямым предком `head_sha` (`behind_by > 0`), история переписана либо коммит отсутствует в дереве VCS (404/422 от compare, шаг 3 алгоритма §6.5.1);
+- `diff_truncated` — ответ VCS compare усечён GitHub при превышении лимита 300 файлов или 250 коммитов (`is_complete = false`, шаг 3 алгоритма §6.5.1);
+- `target_branch_merged` — в ветку PR влита целевая базовая ветка (`git merge main`), дельта содержит merge-коммит с $\ge 2$ родителями (шаг 3b алгоритма §6.5.1);
+- `policy_document_changed` — изменён снимок политик (`policy_digest` или `rule_version_id` расходится с `base_run` при проверке на стадии `policy.load` (PIPELINE_SPEC §2), шаг 4 алгоритма §6.5.1);
+- `excessive_diff` — размер дельты коммитов превысил установленный лимит (> 3000 строк по сырому числу строк `compare_commits`, шаг 5 алгоритма §6.5.1);
+- `manual_rerun` — ручной перезапуск через UI эндпоинт `POST /api/runs/{id}/rerun` (T3);
+- `vcs_unsupported` — провайдер VCS (GitLab, Bitbucket) не поддерживает инкрементальный анализ (формируется на T1-INC);
+- `base_coverage_unavailable` — coverage базового прогона очищен по retention (`data_purged_at IS NOT NULL`), отсутствует в `run_actions` (`context.build`) либо не проходит `_restore_run_coverage` (шаг 2b алгоритма §6.5.1 на T1-FULL или in-place fallback на стадии `policy.load` до `vcs.fetch_diff`).
+
+#### 6.2.2. DDL миграции Alembic
+
+```sql
+-- Alembic migration: add incremental review columns and constraints to runs
+
+ALTER TABLE runs
+    ADD COLUMN is_incremental BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN diff_base_commit VARCHAR(64) NULL,
+    ADD COLUMN base_run_id UUID NULL REFERENCES runs(id) ON DELETE RESTRICT,
+    ADD COLUMN incremental_fallback_reason VARCHAR(64) NULL,
+    ADD COLUMN persisted_active_findings_count INTEGER NOT NULL DEFAULT 0;
+
+-- Инвариант консистентности базы инкрементального Run:
+-- При is_incremental = true обязаны быть указаны diff_base_commit и base_run_id.
+-- При is_incremental = false они обязаны быть NULL.
+ALTER TABLE runs ADD CONSTRAINT ck_runs_incremental_base CHECK (
+    (is_incremental = false AND diff_base_commit IS NULL AND base_run_id IS NULL)
+    OR
+    (is_incremental = true AND diff_base_commit IS NOT NULL AND base_run_id IS NOT NULL)
+);
+
+-- Инвариант причины фоллбека:
+-- Причина фоллбека указывается только для полных прогонов.
+ALTER TABLE runs ADD CONSTRAINT ck_runs_fallback_reason CHECK (
+    (is_incremental = true AND incremental_fallback_reason IS NULL)
+    OR
+    (is_incremental = false)
+);
+
+ALTER TABLE runs ADD CONSTRAINT ck_runs_fallback_reason_values CHECK (
+    incremental_fallback_reason IS NULL OR incremental_fallback_reason IN (
+        'no_prior_published_run', 'target_branch_changed', 'force_push_or_rebase',
+        'diff_truncated', 'target_branch_merged', 'policy_document_changed',
+        'excessive_diff', 'manual_rerun', 'vcs_unsupported', 'base_coverage_unavailable'
+    )
+);
+
+-- Индекс для быстрого поиска базы и выборки цепочки прогонов
+CREATE INDEX ix_runs_base_run_id ON runs (base_run_id);
+```
+
+#### 6.2.3. Обновление доменных моделей и контрактов API
+
+1. **SQLAlchemy модель (`app/modules/reviews/infrastructure/models.py`):**
+   В класс `Run` добавляются поля `is_incremental`, `diff_base_commit`, `base_run_id`, `incremental_fallback_reason`, `persisted_active_findings_count`.
+2. **DTO сущности и API (`contracts/openapi.yaml`):**
+   В схемы `RunSession` и `RunDetail` добавляются:
+   ```yaml
+   isIncremental:
+     type: boolean
+     description: Признак инкрементального анализа дельты коммитов
+   diffBaseCommit:
+     type: string
+     nullable: true
+     description: Хеш базового коммита инкрементального ревью (40 hex)
+   incrementalFallbackReason:
+     type: string
+     nullable: true
+     enum: [no_prior_published_run, target_branch_changed, force_push_or_rebase, diff_truncated, target_branch_merged, policy_document_changed, excessive_diff, manual_rerun, vcs_unsupported, base_coverage_unavailable]
+     description: Причина выполнения полного ревью вместо инкрементального
+   persistedActiveFindingsCount:
+     type: integer
+     description: Число сохранённых активных дефектов из предыдущих прогонов
+   ```
+
+---
+
+### 6.3. Стейт-машина инкрементального анализа и таблица переходов
+
+Набор состояний прогона по Р-14 и D5 сохраняется неизменным:
+`queued | running | publishing | succeeded | failed | cancelled | skipped`. Новых состояний Run не вводится.
+
+#### 6.3.1. Таблица переходов инкрементального анализа (нотация PIPELINE_SPEC §1)
+
+| # | Из → в | Триггер | Кто | Guard | Побочные эффекты: сообщение · check-run |
+|---|---|---|---|---|---|
+| **T1-INC** | `[*]` → `queued` | `pull_request.synchronize` / `reopened` / `check_suite.completed` на новый `head_sha` | `webhook-worker` | GitHub (при других VCS → T1-FULL `vcs_unsupported`) ∧ нет активного Run по PR (Р-2) ∧ найден предшествующий Run с подтверждёнными квитанциями публикации (`comments` через `findings`, `findings.published` или `succeeded`) ∧ у базы `data_purged_at IS NULL`, в `run_actions` (`context.build`) присутствует `coverage` и он проходит `_restore_run_coverage` (§6.5.1 Шаг 2b, иначе `base_coverage_unavailable`) ∧ `base_run.head_sha` является прямым предком `head_sha` (`behind_by == 0`, `status == 'ahead'`) ∧ дельта не содержит merge-коммитов с $\ge 2$ родителями (D-3) ∧ дельта $\le 3000$ сырых строк по `compare_commits` (вызов выполняется до DB-транзакции) | `INSERT runs` (`is_incremental = true`, `diff_base_commit = base_run.head_sha`, `base_run_id = base_run.id`, `attempt = 0`, `available_at = now`); публикация `review.run/v1` в RabbitMQ · check-run создаётся при claim (T4) |
+| **T1-FULL** | `[*]` → `queued` | `pull_request.synchronize` / `reopened` / `check_suite.completed` на новый `head_sha` | `webhook-worker` | Нет активного Run по PR (Р-2) ∧ нарушено хотя бы одно условие инкремента (нет квитанций `no_prior_published_run`, `coverage` базы очищен/отсутствует/невалиден `base_coverage_unavailable`, force-push / rebase `force_push_or_rebase`, слияние main `target_branch_merged`, срез compare `diff_truncated`, дельта > 3000 строк `excessive_diff`, смена целевой ветки `target_branch_changed`, VCS не GitHub `vcs_unsupported`) | `INSERT runs` (`is_incremental = false`, `diff_base_commit = NULL`, `base_run_id = NULL`, `incremental_fallback_reason = <reason>`); публикация `review.run/v1` · check-run не создаётся |
+| **T4-INC** | `queued` → `running` | Доставка `review.run/v1` | `worker` | `RunGuard`: `state = queued` ∧ `available_at ≤ now` ∧ ¬`cancel_requested` ∧ PR открыт (если при claim обнаружен устаревший `head_sha` — срабатывает T6-SYNC как страховка от гонки). Проверка снимка политик и доступности coverage базы с in-place деградацией (`policy_document_changed` или `base_coverage_unavailable`) выполняются на стадии `policy.load` (PIPELINE_SPEC §2) до `vcs.fetch_diff` и построения контекста отдельной короткой транзакцией: `is_incremental = false`, `diff_base_commit = NULL`, `base_run_id = NULL`, `persisted_active_findings_count = 0`, `incremental_fallback_reason = <reason>` без падения прогона | `attempt += 1`, `lease_until = now + 5 мин`, `worker_id`, `started_at` при первой попытке · check-run GitHub `in_progress` (без фиксации вида ревью в summary; окончательный вид и сводка формируются после `policy.load`) |
+| **T6-SYNC** | `queued` → `cancelled` | Поступление нового `synchronize` (`head_sha_new`), когда в очереди находится Run на устаревший `head_sha_old` | `webhook-worker`, worker | `state = queued` независимо от `attempt` (для `attempt ≥ 1` дополнительно сигнал отмены; проверка RunGuard при claim — страховка на случай гонки со сдвигом головы) | `error_code = 'superseded'`; отмена не начатого прогона (при `attempt = 0`) экономит 100% LLM-токенов; для `attempt ≥ 1` экономит ресурсы повторных запусков LLM. Новый коммит `head_sha_new` становится кандидатом на постановку в очередь по T1-INC / T1-FULL · check-run не создавался (при attempt=0) либо закрывается сигналом (при attempt≥1) |
+| **T8-INC** | `running` → `publishing` | Завершение фаз инкрементального анализа и Pass 6b | `worker` | ¬`cancel_requested` ∧ PR открыт ∧ сохранённый diff соответствует закреплённым `head_sha` и базе (при смене базы до сохранения diff — T10 `failed/pr_base_changed`; после сохранения diff Run доводится на своей базе) ∧ `FinalReviewResult` сформирован с агрегированным вердиктом PR. Для GitHub актуальность текущей головы не требуется; для GitLab/Bitbucket прежняя проверка сохраняется | Сохранение итогов, вердикта, immutable payload в outbox; `lease_until = now + 5 мин`; публикация `review.publish/v1` в RabbitMQ, ack `review.run` |
+| **T14-INC** | `publishing` → `succeeded` | Подтверждённый POST ревью на GitHub | `publisher` | `cancel_requested = false` ∧ POST для закреплённого `commit_id` подтверждён GitHub | Сохранение квитанций `comments`, `findings.published = true`, `finished_at`. Check-run GitHub обновляется после коммита T14 в `completed / neutral` с заголовком AI-ревью. **Эффект пробуждения:** `publisher` пробуждает `webhook-worker` через сброс `retry_after = now()` и уведомление `NOTIFY webhook_work_available` |
+| **T15-RESOLVED** | `publishing` → `cancelled` | Снятие противоречия T15: закрытие PR, явная отмена пользователем, отзыв прав или отказ GitHub принять закреплённый коммит (GitLab/Bitbucket — по-прежнему отмена по сдвигу головы, §6.4.3) | `publisher` | PR закрыт (`pr_closed`) ∨ явная отмена (`cancelled_by_user`) ∨ отзыв прав (`installation_unavailable` / `installation_replaced`) ∨ POST вернул 422 с диагностикой «commit_id not part of pull request» (`commit_not_found`); 422 с диагностикой координат остаётся ошибкой координат. **Поступление нового `synchronize` на GitHub НЕ вызывает T15!** | Уже созданные remote IDs сохраняются, повторный POST запрещён; ack; check-run GitHub `completed / cancelled` |
+
+---
+
+### 6.4. Судьба активного Run при synchronize: решение «доведение до публикации» и снятие противоречия с T15
+
+#### 6.4.1. Анализ проблемы гонки пушей (Race Condition)
+В распределённой системе неизбежна ситуация:
+1. В момент времени $t_0$ автор пушит коммит $C_1$ (`head_sha_1`). Запускается Run#1.
+2. Воркер берёт Run#1 в обработку (фазы fetch diff, L1–L4 context, вызов LLM Gateway, верификация).
+3. В момент времени $t_1$ (через 40 секунд после старта Run#1, когда LLM уже потратила токены и вернула ответ) автор пушит коммит $C_2$ (`head_sha_2`).
+4. На Webhook API приходит событие `pull_request.synchronize`.
+
+В прежней редакции спецификации (SD §6.3, PIPELINE_SPEC §1 T15):
+- `webhook-worker` выставлял `run#1.cancel_requested = true`.
+- Воркер прерывал работу, или `publisher` в T15 видел, что `head_sha_1 != code_changes.head_sha`, и отменял публикацию по T15 (`superseded`).
+- **Следствие:** Все потраченные деньги и токены на $C_1$ выброшены. Но главное — на GitHub не появилось ни одного комментария и в БД нет квитанций `comments`! Когда стартовал Run#2 на $C_2$, он не находил базы и был вынужден с нуля делать **полное ревью всего PR**, снова сжигая бюджет.
+
+#### 6.4.2. Архитектурное решение «Доведение до публикации» (Дефолт лектора)
+При поступлении события `pull_request.synchronize` судьба активного Run определяется строго по его текущему состоянию:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant GH as GitHub VCS
+  participant WH as Webhook API
+  participant PG as PostgreSQL
+  participant WW as webhook-worker
+  participant W as AI Worker
+  participant P as Publisher
+
+  Note over W: Выполняет анализ Run#1 (sha_1) в состоянии running
+  GH->>WH: POST pull_request.synchronize (head = sha_2)
+  WH->>PG: INSERT webhook_events (квитанция sha_2)<br/>NOTIFY webhook_work_available
+  WH-->>GH: 202 Accepted
+  PG-->>WW: Уведомление о событии
+  WW->>PG: Проверка активного Run для PR под advisory lock
+  Note over WW: Найдена активная работа: Run#1 в состоянии running
+  WW->>PG: Решение: Run#1 НЕ отменяем (cancel_requested=false)!<br/>Квитанция sha_2 отложена: retry_after = now() + 30s (deferred_run_trigger active_run)
+
+  Note over W: Run#1 завершает фазы анализа и Pass 6b
+  W->>PG: T8: state -> publishing, outbox payload готов
+  W->>P: review.publish/v1 (sha_1)
+
+  Note over P: Publisher проверяет разрешение публикации sha_1
+  P->>PG: cancel_requested? -> false! PR open? -> true!
+  P->>GH: POST /pulls/{n}/reviews (commit_id = sha_1)
+  GH-->>P: 200 OK (комментарии на sha_1 приняты GitHub)
+  P->>PG: T14: state -> succeeded, запись comments (квитанции sha_1)
+  P->>GH: Check Run sha_1 -> completed / neutral
+  P->>PG: NOTIFY webhook_work_available / retry_after
+
+  PG-->>WW: Пробуждение webhook-worker
+  WW->>PG: Claim отложенной квитанции sha_2
+  WW->>PG: Поиск базы: Run#1 на sha_1 имеет квитанции в comments!
+  WW->>GH: compare_commits(sha_1, sha_2) -> status = 'ahead'
+  WW->>PG: T1-INC: INSERT Run#2 (head=sha_2, is_incremental=true, diff_base_commit=sha_1)
+  WW->>W: review.run/v1 (Run#2, дельта sha_1...sha_2)
+  Note over W: Run#2 анализирует ТОЛЬКО дельту sha_1...sha_2
+```
+
+#### 6.4.3. Снятие противоречия с T15 (Разрешение публикации на устаревшей голове)
+Чтобы исключить противоречие между доведением базового Run и проверками публикации в T15, фиксируется однозначный контракт:
+
+1. **Разрешённость публикации коммита:**
+   GitHub API ([POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews](https://docs.github.com/rest/pulls/reviews#create-a-review-for-a-pull-request)) принимает параметр `commit_id`. Если `commit_id` указывает на более ранний коммит ветки PR (`sha_1`), GitHub **успешно публикует ревью и привязывает inline-комментарии к строкам этого коммита**. Они корректно отображаются в общем таймлайне PR.
+2. **Точный предикат T15 в Publisher (`app/modules/reviews/application/publish_run_review.py`):**
+   `publisher` переводит Run в T15 (`cancelled`) ИСКЛЮЧИТЕЛЬНО при выполнении любого из следующих условий:
+   - В БД установлен флаг `cancel_requested == true` (что происходит при явной отмене через API `POST /api/runs/{id}/cancel` с кодом `cancelled_by_user`, закрытии PR с кодом `pr_closed`, замене установки с кодом `installation_replaced` или rebind, T6 в PIPELINE_SPEC);
+   - Pull Request закрыт на стороне VCS (`pr_closed`);
+   - Отозваны или перепривязаны права приложения (`installation_unavailable` / `installation_replaced`);
+   - GitHub API при вызове `POST /pulls/{n}/reviews` возвращает `422 Unprocessable Entity` с диагностикой, что `commit_id` не входит в PR (наш внутренний `error_code = 'commit_not_found'`; ответ 422 с диагностикой координат остаётся `coordinates`, остальные 422 классифицируются отдельно). Проверка доступности SHA до POST не доказывает, что коммит входит в PR.
+3. **Запрет ложной отмены по факту наличия нового коммита:**
+   Простая проверка `head_sha != code_changes.head_sha` или `head_sha != pr.current_head_sha` **СТРОГО ЗАПРЕЩЕНА как условие перехода T15 для GitHub**. Наличие более нового коммита в PR означает лишь то, что текущий Run формирует базу для последующего инкрементального прогона.
+4. **Пуш между GET и POST и фиксация квитанций T14:**
+   Если автор запушил новый коммит в интервале между чтением контекста (GET) и отправкой ревью на GitHub (POST), подтверждённый ответ POST `201 Created` завершает прогон переходом **T14** в состояние `succeeded`:
+   - Inline-комментарии публикуются на исходном закреплённом `commit_id` (`sha_1`), а полученные от GitHub remote IDs сохраняются в таблице `comments`;
+   - Текущий Run переходит в `succeeded` с квитанциями публикации и становится легитимной базой для последующего инкрементального Run на новую голову PR;
+   - Новая голова PR (`sha_2`) при этом **не объявляется проверенной** (Check Run текущего Run относится к `sha_1`), а ожидает собственный запуск через `webhook-worker` (T1-INC).
+5. **Реестр швов кода, подлежащих модификации Инженером 3 (#306):**
+   - Новый `error_code` `commit_not_found` (состояние `cancelled`, без retry, текст для автора PR — PIPELINE_SPEC §6: «GitHub не принял закреплённый коммит для PR»): добавить в `_ERROR_TEXTS` (`check_runs.py`); в `publish_run_review.py` сопоставить только `PublishError("stale_commit")` с диагностикой GitHub POST 422 «commit_id not part of pull request» с этим кодом вместо `superseded`. POST 422 с диагностикой координат остаётся `coordinates`, а предварительный GET коммита не заменяет ответ POST.
+   - `cancellation_reason()` (`run_failures.py`, вызовы RunGuard, worker checkpoints и publisher): для GitHub сдвиг головы сам по себе не отменяет `running`/`publishing`; `queued` по-прежнему отменяется как `superseded`. Единственное исключение для `running` — пуш между claim и сохранением diff: старую голову уже нельзя прочитать через `/pulls/{n}/files`, поэтому Run отменяется как `superseded` до вызова LLM. Проверка `guard.head_current` при T8 (`store_review_output.py:250-256`, `run_repository.py:1035`) снимается только для GitHub после сохранения закреплённого diff; GitLab и Bitbucket сохраняют отмену по сдвигу головы. Смена базы до сохранения diff даёт `failed/pr_base_changed`, после сохранения diff Run доводится на своей базе.
+   - Загрузка diff закреплённой головы и проверка сохранности ревизии (`vcs_diff.py` и `github_vcs.py`):
+     - Полный diff остаётся на `/pulls/{n}/files` (до 3000 файлов с проверкой `meta.files_changed`); `compare_commits` не подменяет этот путь, так как его ответ ограничен 300 файлами и не содержит счётчика полноты полного PR. Общая для провайдеров проверка в `vcs_diff.py:205-206` после `get_pull_request(locator)` оставляет несовпадение locator как `ValueError`, сдвиг головы относительно `expected_head_sha` до чтения diff даёт `RunCancelled("superseded")`, смена базы — `failed/pr_base_changed`. GitLab/Bitbucket уже дают `superseded` в своих `get_diff`. Проверка головы не убирается: без неё патчи новой головы могли бы сохраниться под старой.
+     - В `github_vcs.py:334-335` после пагинации `/pulls/{n}/files` повторно читается PR: сдвиг головы даёт `superseded`, смена базы — `pr_base_changed`. Сравниваются locator, head и base; изменение только заголовка, меток или draft не меняет diff и не даёт `ValueError` из-за прежнего сравнения всего `VcsPullRequest`. Только после этой проверки сохраняются diff и проверенный `meta.files_changed` как счётчик полноты снимка. Это исключение для `running` действует до сохранения diff и до вызова LLM.
+     - `review_context_stage.py:570-603` (`context.build`): после чтения живого PR для GitHub снимается отказ `RunFailure("diff_fetch_failed")` только из-за нового head и создаётся закреплённое представление `replace(pull_request, base_sha=run.base_sha, head_sha=run.head_sha, meta=replace(pull_request.meta, files_changed=len(stored)))`. `get_merge_base`, `build_diff_map` (`diff_map.py:228`) и `self._head_sha` используют его. GitHub `get_diff` уже сверил `len(stored)` с `meta.files_changed` при чтении `/pulls/{n}/files`; проверка `not stored` на `:585` тоже использует сохранённый счётчик и для инкремента выполняется только после compare (пустой полный PR diff при непустом compare не означает `no_changes`). После сохранения diff текущая голова не отменяет Run.
+     - Для инкрементального прогона (`is_incremental = true`) получение файлов и хунков дельты выполняется вызовом `vcs_provider.compare_commits(repo, run.diff_base_commit, run.head_sha)` вне транзакции БД (фаза `context.build`).
+     - `store_review_output.py:250-256` (T8): после `lock_for_publishing` достаточно отсутствия `cancel_requested`, открытого PR и закреплённого diff; проверка «коммит существует в VCS» здесь не выполняется. Снимается только GitHub-требование `guard.head_current`; для GitLab/Bitbucket оно сохраняется. Принадлежность `commit_id` PR окончательно проверяет GitHub POST на T15.
+     - Чтение дерева файлов на голове (`github_vcs.py:358`, `git/trees/{head_sha}`) выполняется по закреплённому commit SHA `expected_head_sha`.
+   - Адаптер `VcsProvider.compare_commits` реализуется в `github_vcs.py` для выбора инкремента; его 404/422 относится к fallback `force_push_or_rebase`, а не к `commit_not_found` публикации. На T1 и повторно в `context.build` 404/422 compare или усечённый ответ до вызова LLM переключают Run на полное ревью (`force_push_or_rebase` / `diff_truncated`), 429/лимитный 403 и 5xx/transport дают retry. Этот путь обрабатывается отдельно от общего `app/modules/reviews/infrastructure/vcs_failures.py:classify_vcs_error`, который иначе превратил бы compare 404 в `github_forbidden`; отдельного `app/modules/reviews/domain/` на main нет.
+   - Потребители координатного фильтра дельты: добавление обработки `out_of_incremental_diff_scope` в `diff_anchor.py:28` и `review_output.py:257`.
+   - Summary-only по дельте коммитов (#365) и обработка пустой/исключённой дельты (D-13, D-14):
+     - `RunDiffInput` / `RunVcsInput` (`process_run.py:68-94`) получают `runs.is_incremental` из `SqlAlchemyRunRepository` и передают его в оба вызова `StoreDiffSnapshot.execute` (`process_run.py:266`, `:304`); `RunVcsInput` и `get_run_vcs_input` дополнительно несут `runs.diff_base_commit` и `runs.base_run_id` для compare и запроса активной базы в `context.build`.
+       Для инкрементального Run полный diff сохраняется для UI и координат, но порог 3000 строк всего PR не выставляет файлам `summary_only` и не обнуляет `review_patch` (`get_run_diff.py:116-123`).
+       Иначе параметр `summary_only` (`findings_post_processor.py:200`) отбросит находки маленькой дельты как `insufficient_context` (`:229-233`) после уже оплаченного вызова модели.
+       `review_context.py:578-588` и `review_context_stage.py:_summary_only_reason` также не применяют лимит строк всего PR к входу модели: дельта проверена на T1.
+     - `review_context_stage.py` (`context.build`) сначала получает полный `stored` и полный `DiffMap` из `code_change_diffs` и применяет к нему `apply_ignore`. `compare_commits` даёт **только** пути и хунки коммит-дельты для входа модели; он не заменяет сохранённые строки и не задаёт digest полного снимка.
+       Из пар `filename` / `previous_filename` compare однозначно сопоставляются строки полного снимка, закрепляются `delta_scope_paths` (включая старый путь rename), `delta_absent_paths` и координаты `delta_hunk_ranges` (`file_id`, side, start/end) в ответе `context.build` / `context_payloads.summary`.
+       Digest scope покрывает оба списка, координаты, закреплённые head/base SHA и наличие patch по каждому пути; при восстановлении они проверяются вместе.
+       Классификация D-13/D-14 использует сохранённый `omission_reason` из `vcs_diff.py:219-269` **и** наличие patch в compare, без повторного `get_blob`: у `ComparisonFile` нет `blob_sha`.
+       Если compare содержит `new` с `previous_filename = old`, а полный diff содержит `added new`, новая строка сопоставлена: `old` — alias для переноса находки, не `delta_absent_paths` и не `RESOLVED_BY_FIX`. При отсутствии patch compare и без доказательства metadata-only этот файл идёт в D-13 (`missing_patch`), даже если полный снимок содержит patch; доказанный чистый rename остаётся `technical_only` по QA-INC-19. Пустой compare означает `no_changes`, даже если полный PR содержит файлы.
+     - Для входа модели `review_context_stage.py` разбирает patch compare общим парсером хунков в **временную** проекцию `delta_hunks_by_file_id` по сопоставленным строкам. `BuildReviewContext.execute` (`review_context.py:496-535`) получает дополнительные `delta_scope_file_ids` и `delta_hunks_by_file_id`: итерирует только эти file ID и строит L1–L4 из хунков compare, а не из `diff_map.files[*].hunks` полного PR.
+       После применения ignore и доказанных исключений D-14 разрешённый текстовый файл проверяем только если patch compare **и** `review_patch` полного снимка доступны; если отсутствует один из них, он получает scoped-причину `missing_patch`, модель не получает его текст и inline-якорь не создаётся.
+       Для полного Run параметры отсутствуют и поведение прежнее.
+       Текст временной проекции не сохраняется как второй `DiffMap`; в `context_payloads.summary` остаются только координаты `delta_hunk_ranges` для Pass 2, а полный `diff_digest`, coverage и UI diff не подменяются. `review_context.py:578-588` проверяет лимиты только scoped-входа.
+     - `run_coverage.py:project_run_coverage` принимает тот же закреплённый scope, но строит coverage на **полных** `stored` и `DiffMap`: `diff_digest`, `snapshot_digest`, `total_files` и проверка полноты относятся к полному снимку.
+       Файлы вне дельты получают отдельное доказанное исключение `outside_incremental_delta`, а не считаются просмотренными; `reviewed_files` и причины относятся к отобранным файлам. `delta_coverage_status` считается по ним; `base_coverage_status` берётся из проверенного сохранённого coverage `base_run_id` (v1 или v2). Итоговый `coverage.status` равен статусу дельты только при `base_coverage_status = complete`, иначе `partial`, и именно его читает `coverage_verdict`. При любом `base_coverage_status != complete` для итогового `partial` добавляется глобальная причина `base_coverage_incomplete` (в том числе при `delta_coverage_status = none` без файловых причин) (с текстом «часть файлов базового ревью не была проверена» в `coverage_schema.py:REASON_TEXT` и CVS §2.2/PS §6), учитываемая в `global_reasons`, а не в файловом partition.
+       Версия хранится в `run_actions` (`context.build.response.coverage.version`) и в копии того же ответа `context_payloads.summary.coverage.version` (не в `context_payloads.schema_version`): полный Run пишет v1, только инкрементальный пишет v2; оба формата читаются.
+       V2 хранит `base_run_id`, `base_snapshot_digest` (из проверенного coverage базы), оба статуса, scope и его digest; `coverage_schema.py:COVERAGE_EXCLUSION_CODES`, `valid_coverage_status` и `run_coverage.py:read_context_coverage_pins` / `restore_context_coverage` / `_restore_run_coverage` принимают v1 и v2 (включая `outside_incremental_delta` в v2), сверяют оба списка scope, диапазоны хунков, полный digest и допустимые исключения. В правилах конкретных швов для v2:
+       - `valid_coverage_status` (`coverage_schema.py:106-133`) в v2 проверяет `delta_coverage_status` и инвариант partition (`reviewed + sum(reasons) + sum(exclusions) == total + global_reasons`), а итоговый `coverage.status` пересчитывается из `delta_coverage_status` и `base_coverage_status`; при любой неполной базе причина `base_coverage_incomplete` входит в `global_reasons` независимо от статуса дельты, чтобы итог `partial` никогда не имел пустых `reasons`;
+       - для проверки ёмкости в `_restore_run_coverage` (`run_coverage.py:569-577`), где `_project_run_coverage` строит проекцию `available` без compare scope (и дала бы `0` для `outside_incremental_delta`), допустимый максимум для `outside_incremental_delta` равен числу строк полного снимка вне закреплённого scope дельты (до правил ignore/policy), а не `available.exclusion_counts.get('outside_incremental_delta', 0)`; для scoped `missing_patch`, когда compare не дал patch, а полный снимок дал, ёмкость равна `available.reason_counts["missing_patch"]` плюс число таких сопоставленных текстовых файлов с закреплённым доказательством отсутствия patch в compare (без двойного счёта); глобальная причина `base_coverage_incomplete` освобождена от файловой проверки ёмкости только при проверенном `base_coverage_status != complete`;
+       - `RunCoverage.all_excluded` и `RunCoverage.technical_only` (`run_coverage.py:136-151`): `outside_incremental_delta` участвует в сумме exclusions для partition (`valid_coverage_status`), но **не входит** в `all_excluded` (который проверяется только по файлам дельты без нетронутых файлов базы) и не влияет на `technical_only` (который оценивается по `delta_coverage_status is NONE and bool(reasons)` для дельты);
+       - `excluded_files` в `summary.done_well` (PIPELINE_SPEC §6 `:357`, CVS §2.2 `:164`) суммирует исключения только по файлам дельты (policy/binary/generated/empty) и **не включает** `outside_incremental_delta`, чтобы нетронутые файлы не попадали в «исключено файлов: N»;
+      - `run_coverage.py:580-582`: равенство `unsupported_path` и `identity_unresolved` с `available.reason_counts` в v2 проверяется исключительно по файлам закреплённого scope дельты, а не по всему полному снимку (так как нетронутые файлы полного снимка получают доказанное исключение `outside_incremental_delta`); наличие нетронутого в дельте неподдерживаемого пути всего PR не приводит к падению в `snapshot_integrity_error`;
+      - `run_coverage.py:594`: проверка `file_list_complete` с `diff_inventory_incomplete` в v2 относится исключительно к ответу compare дельты (`compare.is_complete`), а не к полному diff PR; неполнота инвентаря полного PR при доказанной полноте compare дельты не навязывает причину `diff_inventory_incomplete` дельте.
+       При `context.build` проверенный `base_coverage_status` и `snapshot_digest` coverage базы закрепляются в coverage v2 текущего Run как `base_coverage_status` и `base_snapshot_digest` и входят в digest scope. Для v2 `get_post_processing_input` читает закреплённый coverage **текущего** Run, сверяет `base_run_id` с записью `runs`, формат закреплённого `base_snapshot_digest` и digest scope и повторно вычисляет итоговый `coverage.status` из закреплённых статусов базы и дельты; повторного чтения старого Run после LLM нет, поэтому очистка базы во время вызова модели не ломает текущий Run. `save_summary_only_stop` использует тот же итог. Несовпадение закреплённых полей, scope или digest **текущего** Run — ошибка целостности, не повод принять статус `complete`. Scoped `missing_patch` допускается также по сохранённому доказательству отсутствия patch в compare, даже если полный снимок имеет patch; проверка не подменяет его полным хунком. `ignored_files` в контексте не включает `outside_incremental_delta`: это нетронутые файлы, а не policy/binary/generated/empty исключения.
+       В `context.build` неоднозначный путь compare или несовпадение закреплённых полей / scope / digest **текущего** Run вызывает `RunFailure("snapshot_integrity_error")` до LLM; обработчик исключений в `review_context_stage.py:711-723` обязан пропускать этот код наружу, а не превращать его в optional context error. Повторная проверка доступности и валидности coverage базового Run выполняется на стадии `policy.load` до `vcs.fetch_diff` и фиксации diff дельты: если база прошла `purge_expired_runs` между постановкой и захватом, либо `_restore_run_coverage` не может восстановить coverage базового прогона, воркер выполняет in-place деградацию на `policy.load` в полное ревью с `incremental_fallback_reason = 'base_coverage_unavailable'` (шаг 4 §6.5.1). На стадии `context.build` scope и diff дельты уже зафиксированы, поэтому переключение на полное ревью здесь невозможно и не требуется.
+       После LLM `get_post_processing_input` поднимает типизированный `SnapshotIntegrityError` (объявлен рядом с портом `ReviewOutputRepository.get_post_processing_input` в `app/modules/reviews/application/review_output.py`) при ошибке проверки v2 (сохраняя `None` только для отсутствующего Run); `StoreReviewOutput.execute` перехватывает его и поднимает `RunFailure("snapshot_integrity_error")` до сохранения результата.
+       Ни один из этих случаев не превращается в тихий `classification_unavailable` и не публикуется. В `_ERROR_TEXTS` (`check_runs.py`) добавляется текст PIPELINE_SPEC §6 для `snapshot_integrity_error`; Check Run: `completed / neutral`, заголовок «AI-ревью не выполнено», новые находки не публикуются; QA — §6.9.
+       `get_post_processing_input` (`run_repository.py:840-945`) восстанавливает полный `DiffMap` и это coverage из полного снимка, ограничивает `checked_paths` закреплённой дельтой и использует сохранённые `delta_hunk_ranges` для Pass 2. Миграция `code_change_diffs` не нужна.
+     - Для D-13 `review_context_stage.py:_summary_only_reason` выбирает по scoped-строкам только остаточный `no_reviewable_files` (текстовый файл с `missing_patch`), а не `diff_too_large` или `diff_inventory_incomplete` всего PR. `review_context.py:578-588` не отклоняет маленькую дельту из-за полного PR.
+       Путь compare, отсутствующий в полном diff PR при доказанной полноте `/pulls/{n}/files` и **не сопоставленный** с его строкой через пару `filename` / `previous_filename`, означает возврат файла к базе: его нельзя отправлять модели или использовать как inline-якорь; это не `no_changes`. До `NoModelAnswer` детерминированное сопоставление старого/нового пути отмечает находки базы на нём как `RESOLVED_BY_FIX` (код PR на этом пути больше не отличается от базы) и передаёт исходы в `StoreReviewOutput.execute`. При неоднозначной идентичности пути Run завершается `snapshot_integrity_error` без публикации, а не удерживает ложный дефект.
+       Если проверяемых хунков больше нет, `context.build` проверяет `delta_absent_paths` **до** `all_excluded` и напрямую возвращает `NoReviewableText` (исход `technical_only`, coverage `none`), даже если обычный предикат `coverage.technical_only` ложен из-за отсутствия строки полного diff. Так Run доходит до T14 и применяет `RESOLVED_BY_FIX`.
+       `outside_incremental_delta` не входит в сумму исключений для `all_excluded`; только реальные файлы дельты с доказанными policy/binary/generated/empty исключениями дают `all_changes_ignored`.
+     - Для D-14 новый метод `RunVcsRepository.count_active_base_findings(base_run_id)` (реализация в `SqlAlchemyRunRepository`, критерии активных опубликованных находок §6.8.1) заполняет `persisted_active_findings_count` до выбора исхода.
+       `context.build` сначала получает compare и строит полный `DiffMap`, затем применяет scope и только потом выбирает `no_changes` / `all_changes_ignored`: ранний `RunSkipped` на `review_context_stage.py:585-590` переносится после этой сборки.
+       В остальных точках `RunSkipped` (`:636-646`, `:733`) при ненулевом счётчике стадия вызывает `_commit_summary_only(reason=...)` и возвращает `SummaryOnlyReview` → `NoModelAnswer`; при нуле сохраняется T19 `skipped`.
+     - `save_summary_only_stop` (`run_lifecycle_store.py:843-907`) перечитывает все строки Run и получает полный `DiffMap` с теми же digest и scope; `summarize` не получает короткий DiffMap при полном списке строк (`zip(..., strict=True)`). Для инкрементального Run `_mark_summary_only_rows` не обнуляет `review_patch` полного PR: причина хранится в `context_payloads.summary`, флаг summary-only выводится из проекции Run, не из новых колонок `runs`.
+     - В **любом** пути `NoModelAnswer` инкрементального Run (`execute_review.py:279-283`), включая `technical_only` → `NoReviewableText`, `StoreReviewOutput.execute` получает активные находки базы через `get_post_processing_input` (`store_review_output.py:185`) и добавляет синтетические строки после отбрасывания кандидатов в `findings_post_processor.py:229-233`: они не проходят lint, дедупликацию и порог модели. Без анализа хунков $F_{\text{resolved}}$ пусто, кроме подтверждённых возвратов пути к базе по предыдущему пункту. Сохраняются `publication_action = 'suppressed_duplicate'`, `published = false` до T14, `linked_comment_id` для inline (NULL для publish_body), `drop_reason = NULL`.
+     - `list_pulls.py:75` (`run_verdict`) убирает безусловное `or summary_only` и возвращает уже сохранённый `saved_result.verdict`, вычисленный через `coverage_verdict` в `StoreReviewOutput.execute`. У D-13 с чистой базой и частичным покрытием он `null`, с активными critical/high — `blocking`, medium/low — `attention`; новый параметр `is_incremental` не нужен.
+     - `run_lifecycle_store.py:489` (`check_run_report`) не заменяет удержанный `saved_result.verdict` на `None` только из-за `summary_only` инкрементального Run; `check_runs.py:18-20`, `:161-165`, `:204-210` добавляет в `SUMMARY_ONLY_LINES` строки для `no_changes` («Построчное AI-ревью не выполнено: нет изменений в дельте») и `all_changes_ignored` («Построчное AI-ревью не выполнено: все файлы дельты исключены из проверки»). Заголовок остаётся «AI-ревью: только сводка», но summary показывает причину, строку статуса инкремента §6.8 и удержанный вердикт. `StoreReviewOutput.execute` передаёт тот же `blocking` в `review_event`: при включённой настройке допустим `REQUEST_CHANGES` и для summary-only инкремента.
+     - Публичный контракт реализации #306: `contracts/openapi.yaml` описывает новые причины `summaryOnly` (`no_changes`, `all_changes_ignored`) и сочетание `summaryOnly = true` с непустым вердиктом; UI issue/PR должен обновить `RunHeader.tsx` (severity counts) и `runs.ts` (текст причины). Реализационный API PR связывает UI issue/PR по `docs/CONTRIBUTING.md` §8 до заявления готовности пользовательского поведения.
+   - `cancel_for_pr` (`app/modules/reviews/infrastructure/github_pull_request_projection.py:264-265`, вызов из `project_github_pull_request.py:486-493`): при `synchronize` не выставлять `cancel_requested` выполняющимся Run (`running`/`publishing`).
+   - `_ensure_current_head` (`app/modules/reviews/infrastructure/github_review_publication.py:162`, `:182-196`) не отклоняет более старый закреплённый head GitHub; `publish_run_review.py:534-538` различает GitHub POST 422 «commit_id not part of pull request» → `commit_not_found` и 422 с диагностикой координат → `coordinates`. Для GitLab/Bitbucket `stale_commit` при сдвиге головы по-прежнему означает `superseded`.
+   - Преобразование деградации политики на стадии `policy.load` (PIPELINE_SPEC §2): воркер читает сохранённый снимок политики базового прогона из таблицы `run_policy_snapshots` (`policy_digest WHERE run_id = base_run_id` через `SqlAlchemyPolicySnapshotStore.get_snapshot(base_run_id)`); при расхождении с новым `snapshot.policy_digest` выполняется in-place UPDATE прогона в полное ревью (`incremental_fallback_reason = 'policy_document_changed'`).
+   - Селекция агрегатов метрик за период (`app/modules/reviews/infrastructure/metrics_summary.py:193`, `:266`): добавить фильтр `publication_action != 'suppressed_duplicate'` для исключения дублирования унаследованных дефектов при каждом инкрементальном пуше (это также исключает дубли Ч.1 при периодических агрегациях, сохраняя точный срез последнего Run в `metrics_summary.py:150`).
+   - предикат `DEFERRED` в `app/modules/reviews/application/try_enqueue_webhook_run.py:288-290`: «другая голова + активный Run → `deferred` независимо от `cancel_requested`».
+   - уведомление диспетчера квитанций: после успешного коммита публикации (T14) publisher отправляет `pg_notify('webhook_work_available')` и сбрасывает `retry_after = now()` строго для ожидающих квитанций данного PR (`publish_run_review.py`).
+   - гонка со сменой целевой ветки (D-9): если до сохранения diff изменилась целевая ветка PR, Run завершается с ошибкой `failed` (`pr_base_changed`), а следующий Run на новой целевой ветке запускает полное ревью с кодом `target_branch_changed`. Если целевая ветка изменилась после сохранения diff, текущий Run завершается на своей базе, а следующий запустит полное ревью.
+5. **Список существующих тестов, закрепляющих отмену выполняющегося Run, обновляемых в реализации:**
+   - `tests/test_webhook_run_trigger_postgres.py:487`
+   - `tests/test_github_pr_projection.py:394`
+   - `tests/test_github_webhook_delivery.py:2875`
+   - `tests/test_publish_run_review.py:402`, `:644`
+   - `tests/test_review_run_worker.py:346`
+
+---
+
+### 6.5. Определение базы разницы (Diff Base Selection)
+
+#### 6.5.1. Алгоритм выбора базового коммита
+Выбор базового коммита разницы выполняется по строгому алгоритму в момент постановки задачи в очередь (`webhook-worker`) и повторно верифицируется при захвате задачи воркером (`RunGuard` при T4):
+
+```text
+ВХОД:
+  - code_change: текущий pull request
+  - current_head_sha: целевой коммит нового запуска
+  - repository_id: репозиторий
+
+ШАГ 1: Поиск последнего пригодного прогона с подтверждёнными квитанциями публикации
+  Выполнить запрос к PostgreSQL:
+```
+```sql
+SELECT r.id, r.head_sha, r.rule_version_id, r.created_at, r.base_ref
+FROM runs r
+WHERE r.code_change_id = :code_change_id
+  AND r.trigger != 'dry_run'
+  AND (
+    -- Условие 1: Наличие подтверждённых квитанций inline-комментариев через findings
+    EXISTS (
+      SELECT 1 FROM comments c
+      JOIN findings f ON f.id = c.finding_id
+      WHERE f.run_id = r.id
+    )
+    -- Условие 2: Наличие опубликованных body-only находок (Ч.1 §3.1)
+    OR EXISTS (
+      SELECT 1 FROM findings f
+      WHERE f.run_id = r.id AND f.published
+    )
+    -- Условие 3: Либо подтверждённый POST (T14), в т.ч. clean без находок
+    OR r.state = 'succeeded'
+  )
+ORDER BY r.created_at DESC
+LIMIT 1;
+```
+
+```text
+ШАГ 2: Оценка результата запроса и целевой ветки
+  Если запись не найдена:
+    -> Возврат: FALLBACK_TO_FULL_REVIEW (reason = 'no_prior_published_run')
+    (будущий Run, ставший `succeeded` без POST, например `dry_run`, исключается по фильтру `trigger`)
+  Если целевая ветка PR изменилась (runs.base_ref != base_run.base_ref):
+    -> Возврат: FALLBACK_TO_FULL_REVIEW (reason = 'target_branch_changed')
+
+ШАГ 2b: Проверка доступности и целостности coverage базового Run
+  Источник coverage базы — таблица `run_actions` (`tool = 'context.build'`, строка для `run_id = base_run.id`; ответ читается из `RunAction.response` либо по `response_ref` из `RunActionResponseBody.body`, а НЕ из `context_payloads`, который удаляется политикой хранения).
+  Проверяется:
+  1. У `base_run` не наступила очистка текста: `base_run.data_purged_at IS NULL` (при очистке `purge_expired_runs` #548 поля `patch`/`review_patch` в `code_change_diffs` обнуляются, что делает пересчёт `snapshot_digest` в `_restore_run_coverage` невалидным).
+  2. В `run_actions` (`tool = 'context.build'`) присутствует JSON `response.coverage` (у старых Run до внедрения coverage #213 это поле отсутствует).
+  3. Вызов `_restore_run_coverage` для `base_run.id` успешно читает coverage (v1 или v2) и подтверждает его совпадение с сохранёнными строками `code_change_diffs`, `diff_digest` и `snapshot_digest` базы.
+  Если любое из условий 1–3 нарушено (очищенная база, старый Run без coverage или битый coverage старого Run):
+    -> Возврат: FALLBACK_TO_FULL_REVIEW (reason = 'base_coverage_unavailable')
+    (предотвращает бесконечный цикл `failed/snapshot_integrity_error` на последующих пушах; код `snapshot_integrity_error` остаётся только для несовпадения закреплённых полей текущего Run).
+
+ШАГ 3: Проверка непрерывности истории Git (Ancestry Check)
+  - Если base_run.head_sha == current_head_sha:
+    -> Повторный вызов на той же голове (идемпотентный NOOP по uq_runs_webhook_code_change_head, вызов compare не требуется).
+
+  Вызвать `VcsProvider.compare_commits(repo, base_run.head_sha, current_head_sha)` (вызов выполняется до открытия DB-транзакции как в webhook-worker, так и в воркере):
+  Контракт метода:
+    async def compare_commits(self, repo: RepoRef, base_sha: str, head_sha: str) -> ComparisonResult:
+      Сравнение коммитов дельты через GitHub REST API GET /repos/{owner}/{repo}/compare/{base}...{head}.
+      Модель ComparisonResult и CommitInfo объявлены в docs/SYSTEM_DESIGN.md §8.1.
+      Ошибки HTTP/transport классифицируются отдельно для compare до общего classify_vcs_error.
+
+  - Если compare_commits получает 404 / 422 для сравниваемых коммитов:
+    -> Возврат: FALLBACK_TO_FULL_REVIEW (reason = 'force_push_or_rebase')
+  - Если compare_commits получает 429 или 403 с признаками лимита:
+    -> Отложить обработку (retry_after с учётом заголовка Retry-After или лимита запросов GitHub).
+  - Если compare_commits получает 5xx / транспортную ошибку:
+    -> Повторить попытку обработки по стандартному циклу retry диспетчера.
+  - Если compare_commits получает 401/403 без признаков лимита:
+    -> Отказ доступа по provider-specific коду, не fallback истории.
+  - Если is_complete == false (ответ compare усечён GitHub при превышении 300 файлов или 250 коммитов):
+    -> Возврат: FALLBACK_TO_FULL_REVIEW (reason = 'diff_truncated')
+  - Если behind_by > 0 (старая голова содержит коммиты, отсутствующие в новой) или status != 'ahead':
+    -> Ветка была перебазирована или запушена с --force.
+    -> Возврат: FALLBACK_TO_FULL_REVIEW (reason = 'force_push_or_rebase')
+
+ШАГ 3b: Обнаружение слияния базовой ветки в PR (Target Branch Merged Check)
+  Проверить список compare.commits:
+  - Если среди коммитов дельты присутствует коммит с двумя и более родителями (`len(commit.parents) >= 2`, merge commit):
+    -> Ветка PR вобрала слияние (merge commit).
+    -> Возврат: FALLBACK_TO_FULL_REVIEW (reason = 'target_branch_merged')
+
+ШАГ 4: Проверка снимка конфигурации, политик и доступности coverage базы (Policy & Base Coverage Check)
+  Политика читается из доверенной базы (`policy_base_sha = Run.base_sha`).
+  Проверка снимка политик и доступности coverage базы выполняется на стадии `policy.load` (PIPELINE_SPEC §2), когда Run находится в состоянии `running`:
+  - Воркер загружает `policy_digest` базового прогона из таблицы `run_policy_snapshots` (`run_policy_snapshots.policy_digest WHERE run_id = base_run.id` через `SqlAlchemyPolicySnapshotStore.get_snapshot(base_run.id)`) и сверяет его, а также `runs.rule_version_id`, со сформированным снимком текущего прогона:
+    - Если снимки расходятся:
+      -> In-place деградация отдельной короткой транзакцией до `vcs.fetch_diff` / `context.build`:
+         `runs.is_incremental = false`, `runs.diff_base_commit = NULL`, `runs.base_run_id = NULL`, `runs.persisted_active_findings_count = 0`, `runs.incremental_fallback_reason = 'policy_document_changed'` (без падения прогона, продолжение выполнения как полного анализа PR).
+  - Воркер повторно проверяет доступность coverage базового прогона: если база прошла `purge_expired_runs` (`data_purged_at IS NOT NULL`) между постановкой в очередь и захватом, либо `_restore_run_coverage` не восстанавливает coverage базового Run:
+    -> In-place деградация отдельной короткой транзакцией до `vcs.fetch_diff` / `context.build`:
+       `runs.is_incremental = false`, `runs.diff_base_commit = NULL`, `runs.base_run_id = NULL`, `runs.persisted_active_findings_count = 0`, `runs.incremental_fallback_reason = 'base_coverage_unavailable'` (без падения прогона, продолжение выполнения как полного анализа PR).
+
+ШАГ 5: Проверка лимита размера коммит-дельты (Diff Size Check)
+  Рассчитать суммарное число изменённых строк в дельте (сырое число строк дельты из `compare_commits`):
+  - Если total_lines > 3000 (внутренний лимит DMC):
+    -> Возврат: FALLBACK_TO_FULL_REVIEW (reason = 'excessive_diff')
+
+ШАГ 6: Успешное назначение базы
+  -> Возврат: INCREMENTAL_RUN (
+       diff_base_commit = base_run.head_sha,
+       base_run_id = base_run.id
+     )
+  Таблица `code_change_diffs` по-прежнему хранит полный дифф PR на `head_sha` (для UI `/api/runs/{id}/diff`, восстановления DiffMap в `post_processing_diff_map.py` и расчета inline-координат по §1.1).
+  Дельта коммитов передаётся как отдельный вход контекста модели (review context payload); Pass 2 сверяет координаты с DiffMap полного диффа и дополнительно валидирует попадание кандидатов в границы дельты (`out_of_incremental_diff_scope`).
+```
+
+---
+
+### 6.6. Каталог развилок: Инкремент vs Полное ревью
+
+Исчерпывающий реестр условий и развилок при принятии решения о виде прогона:
+
+| # | Сценарий / Событие | Условие в Git / БД / Webhook | Исход | Значение полей в `runs` | Пояснение и обоснование |
+|---|---|---|---|---|---|
+| **D-1** | **Обычный push в ветку PR** | `base_run.head_sha` является прямым предком `current_head_sha` (`behind_by == 0`, `status == 'ahead'`), нет merge-коммитов, правила не менялись, строки дельты $\le 3000$. | **Инкрементальный анализ** | `is_incremental = true`<br/>`diff_base_commit = base.head`<br/>`base_run_id = base.id`<br/>`incremental_fallback_reason = NULL` | Штатный режим: анализируются только новые хунки, экономя токены и время. |
+| **D-2** | **Force-push или Rebase ветки PR** | `behind_by > 0`, `status != 'ahead'` или 404/422 от compare. Старая голова не входит в линейную историю новой. | **Полное ревью** | `is_incremental = false`<br/>`diff_base_commit = NULL`<br/>`base_run_id = NULL`<br/>`incremental_fallback_reason = 'force_push_or_rebase'` | При переписывании истории координаты строк теряют смысл; старые комментарии становятся outdated. Необходима полная переоценка всего PR. |
+| **D-3** | **Слияние базовой ветки в PR (`git merge main`)** | Дельта `base_run.head_sha...current_head_sha` содержит merge-коммит с $\ge 2$ родителями. | **Полное ревью** | `is_incremental = false`<br/>`diff_base_commit = NULL`<br/>`base_run_id = NULL`<br/>`incremental_fallback_reason = 'target_branch_merged'` | В инкрементальную дельту попадут сторонние строки из `main`. Полное ревью PR (`base_sha...current_head_sha`) чисто выделит авторский дифф. |
+| **D-4** | **Смена снимка политик при `policy.load` (PIPELINE_SPEC §2)** | При загрузке политики на стадии `policy.load` (PIPELINE_SPEC §2) `policy_digest` или `rule_version_id` расходится со снимком базового прогона. | **Полное ревью (In-place fallback)** | `is_incremental = false`<br/>`diff_base_commit = NULL`<br/>`base_run_id = NULL`<br/>`incremental_fallback_reason = 'policy_document_changed'` | При изменении правил дефекты в неизменённом коде могут стать невалидными или потребовать новых правил; прогон деградирует в полный анализ PR. |
+| **D-5** | **Переименование файла (Rename without changes)** | В дельте файл имеет статус `renamed`, содержимое не менялось или изменилось минимально ($< 50\%$). | **Инкрементальный анализ** | `is_incremental = true`<br/>`diff_base_commit = base.head`<br/>`base_run_id = base.id` | Сопоставление путей выполняется через `previous_filename` (Ч.1 §2.2). Тред переносится на новый путь без дубликатов. |
+| **D-6** | **Переименование файла с масштабной правкой** | Переименование с глубокой модификацией кода ($> 50\%$) определяется Git как удаление старого файла и добавление нового. | **Инкрементальный анализ** | `is_incremental = true`<br/>`diff_base_commit = base.head`<br/>`base_run_id = base.id` | Обрабатывается в рамках инкрементальной дельты: старый тред закрывается по удалению файла (QA-REC-04), на новый файл генерируются новые замечания. |
+| **D-7** | **Превышение лимита дельты (> 3000 строк) или усечение compare** | Количество изменённых строк в дельте (сырое число строк дельты из `compare_commits`) $> 3000$ (лимит DMC `excessive_diff`) либо `compare.is_complete == false` / >250 коммитов (лимит GitHub `diff_truncated`). | **Полное ревью** | `is_incremental = false`<br/>`diff_base_commit = NULL`<br/>`base_run_id = NULL`<br/>`incremental_fallback_reason = 'excessive_diff'` (или `'diff_truncated'`) | При чрезмерной дельте инкремент не даёт преимуществ; выполняется полное ревью всего PR по каталогу PIPELINE_SPEC §6. |
+| **D-8** | **Ручной перезапуск из UI (`POST /api/runs/{id}/rerun`)** | Пользователь нажал кнопку перезапуска в интерфейсе (переход T3, `rerun_run.py`). | **Полное ревью** | `is_incremental = false`<br/>`diff_base_commit = NULL`<br/>`base_run_id = NULL`<br/>`incremental_fallback_reason = 'manual_rerun'` | Ручной запрос через T3 всегда создаёт полный прогон (`is_incremental = false`, `incremental_fallback_reason = 'manual_rerun'`), выражая явное намерение перепроверить весь PR. |
+| **D-9** | **Смена целевой базовой ветки (`pull_request.edited`)** | В событии изменено поле `base.ref`. `edited` сам по себе Run не создаёт; при следующем запуске `runs.base_ref != base_run.base_ref`. | **Полное ревью** | `is_incremental = false`<br/>`diff_base_commit = NULL`<br/>`base_run_id = NULL`<br/>`incremental_fallback_reason = 'target_branch_changed'` | Смена целевой ветки полностью меняет базовый коммит `base_sha` и весь дифф PR. Инкремент не применим. |
+| **D-10** | **Повторное открытие PR (`pull_request.reopened`)** | Закрытый ранее PR открыт заново. | **Инкрементальный анализ** (при наличии базы) | По §6.5.1 | Выбор базы следует общему алгоритму §6.5.1. Если прошлый успешный Run с квитанциями найден и целевая ветка не менялась (шаги 2, 3b) — выполняется инкрементальное ревью дельты. При смене целевой ветки выполняется полное ревью (`target_branch_changed`), а при отсутствии прошлого Run — полное ревью (`no_prior_published_run`). |
+| **D-11** | **Авто-запуск по готовности CI (#293, Р-10)** | Приход `check_suite.completed (success)` или срабатывание sweep 2 мин без CI при включённом авто-режиме без лейбла `ai-review`. | **Инкрементальный анализ** (при наличии базы) | По §6.5.1 | Авто-запуск в режиме #293 использует общий пайплайн выбора базы разницы. |
+| **D-12** | **Повторное событие на той же голове PR** | Повторная доставка вебхука `synchronize` / `check_suite` на уже обработанный `head_sha`. | **NOOP / Пропуск** | Запись `runs` не создаётся | Отсекается индексом `uq_runs_webhook_code_change_head` (`DuplicateReason.HEAD_ALREADY_REVIEWED`). |
+| **D-13** | **Инкрементальный Run и summary-only (#365)** | В коммит-дельте есть текстовый файл, для которого VCS не вернул patch (`missing_patch`), поэтому остаётся `no_reviewable_files` по `_is_residual_no_reviewable_files`; лимиты >3000 строк и неполный compare отсекаются ранее на T1. | **Summary-only без вызова LLM** | `is_incremental = true`; причина `no_reviewable_files` в `context_payloads.summary`; активные находки базы сохраняются | Проверка выполняется по дельте, а не по полному diff PR. Check Run получает заголовок «AI-ревью: только сводка» и причину. Активные находки базы сохраняются в `findings` как `suppressed_duplicate`; при critical/high вердикт `blocking`, при medium/low — `attention`. Если база чистая, частичное покрытие без проверенного кода даёт вердикт `null`, а не `clean`. |
+| **D-14** | **Пустая дельта или все изменения в дельте проигнорированы** | Compare возвращает пустую дельту (`no_changes`) либо все её файлы подпадают под встроенные coverage exclusions (`.lock`, `.min.js` как `GENERATED`, бинарные файлы и изображения) или `.reviewignore` (`all_changes_ignored`). | **Дифференцированный исход по наличию активных дефектов базы** | При активных дефектах базы: `is_incremental = true`, `state = succeeded`, причина `no_changes` или `all_changes_ignored` в `context_payloads.summary`; при 0 дефектов: `state = skipped`, `error_code = 'no_changes'` \| `'all_changes_ignored'` | При активных дефектах базы `_commit_summary_only` заменяет `RunSkipped`, находки сохраняются как `suppressed_duplicate`, вердикт остаётся `blocking`/`attention`, треды открыты. При чистой базе сохраняется T19 `skipped`, вердикт `null`, чистка тредов не запускается (§4.5). |
+| **D-15** | **Coverage базового Run недоступен или очищен (#548)** | У базового Run `data_purged_at IS NOT NULL`, отсутствует coverage в `run_actions` (`context.build`) либо coverage не проходит `_restore_run_coverage`. | **Полное ревью** | `is_incremental = false`<br/>`diff_base_commit = NULL`<br/>`base_run_id = NULL`<br/>`incremental_fallback_reason = 'base_coverage_unavailable'` | Без валидного снимка покрытия базы невозможно рассчитать итоговое покрытие PR и провести отслеживание замечаний; прогон переводится в полное ревью всего PR (шаг 2b алгоритма §6.5.1 на T1-FULL либо in-place fallback на стадии `policy.load` до `vcs.fetch_diff`). |
+
+---
+
+### 6.7. Входные данные модели, ограничение скоупа анализа и учет затрат токенов (`usage_events`)
+
+#### 6.7.1. Входной контекст модели при инкрементальном анализе
+В инкрементальном режиме `is_incremental = true` формируется изолированный контекст, исключающий неизменённые части PR:
+1. **Дифф дельты (Incremental Diff Hunks):**
+   На вход модели передаются исключительно строки хунков коммит-дельты `diff_base_commit...current_head_sha`, полученные через вызов `VcsProvider.compare_commits`.
+2. **Окружающий контекст (Surrounding Context):**
+   Для каждой изменённой строки хунка передаётся окружающий контекст в пределах разрешённого уровня контекста (канонические уровни `ContextLevel.L1` и `L2` по `review_context.py:104` с ограничением окна строк хунка). Расширение до уровня файла (`L3`) или межфайловых определений и графа (`L4`) подчиняется каноническим правилам и лимитам бюджета токенов CVS §3.2.
+3. **Контекст незакрытых замечаний в изменённых файлах:**
+   Если инкрементальный пуш затронул файл, в котором есть открытые треды из реестра `comments`, в промпт верификатора (`verifier_prompt`) передаются утверждения (`claim`) и фрагменты кода этих замечаний. Это позволяет модели и верификатору явно определить, был ли дефект устранён новой правкой (`RESOLVED_BY_FIX`), остался неизменённым (`PERSISTING`) или мутировал (`RESOLVED_MUTATED`).
+4. **Проверка лимитов summary-only (#365):**
+   `StoreDiffSnapshot` сохраняет полный diff для UI без флага summary-only и без обнуления `review_patch` из-за размера полного PR. В `review_context_stage` и `review_context.py` инкрементальный Run не останавливается по `diff_too_large` или `diff_inventory_incomplete` полного PR: дельта уже проверена на T1. Если PR содержит 5000 строк, а новая дельта — 50 строк кода, модель получает эти 50 строк и её находки не отбрасываются как `insufficient_context`. Остаточный `no_reviewable_files` по дельте относится к текстовому файлу без patch (`missing_patch`); бинарные файлы, изображения, generated и ignored относятся к D-14.
+
+#### 6.7.2. Отсечение находок вне дельты (CVS Pass 2 Координаты)
+Для предотвращения галлюцинаций модели (попыток сгенерировать замечания на старый неизменённый код за пределами коммит-дельты) в пайплайн верификации [`CONTEXT_AND_VERIFICATION_SPEC.md`](CONTEXT_AND_VERIFICATION_SPEC.md) (Pass 2 Координаты) встраивается строгое правило:
+```text
+ЕСЛИ run.is_incremental == true:
+  ДЛЯ КАЖДОГО кандидата в находки candidate:
+    ЕСЛИ candidate.file_path отсутствует в файлах коммит-дельты diff_base_commit...current_head_sha
+         ИЛИ candidate.side != 'RIGHT'
+         ИЛИ диапазон [candidate.line_start, candidate.line_end] НЕ пересекается
+              ни с одним хунком коммит-дельты по данному файлу:
+      candidate.drop_reason = 'out_of_incremental_diff_scope'
+      candidate.publication_action = 'dropped'
+```
+Кандидаты с `drop_reason = 'out_of_incremental_diff_scope'` не публикуются, не создают комментариев и не влияют на вердикт PR. Этот drop-код относится к кандидату модели; coverage exclusion `outside_incremental_delta` относится к файлу полного снимка, который не менялся в дельте.
+
+#### 6.7.3. Учёт экономии токенов и биллинг в `usage_events` (Р-8)
+Каждый вызов LLM Gateway в рамках Run логируется в неизменяемую таблицу `usage_events` стандартным писателем `SqlAlchemyUsageLedger.record` (Р-8):
+- `provider`, `model`, `operation` ('review', 'conventions', 'verification', 'change_summary')
+- `tokens_in`, `tokens_out`, `cache_read_tokens`, `cost_usd`
+
+Оценка эффективности и экономии токенов инкрементального ревью рассчитывается аналитическим запросом через связь `usage_events` с таблицей `runs` по полю `is_incremental`:
+```sql
+SELECT
+    r.is_incremental,
+    COUNT(DISTINCT r.id) AS runs_count,
+    SUM(u.tokens_in) AS total_tokens_in,
+    SUM(u.tokens_out) AS total_tokens_out,
+    SUM(u.cache_read_tokens) AS total_cache_read_tokens,
+    SUM(u.cost_usd) AS total_cost_usd
+FROM usage_events u
+JOIN runs r ON r.id = u.run_id
+WHERE r.code_change_id = :code_change_id
+GROUP BY r.is_incremental;
+```
+Сравнение суммарного потребления полного прогона (baseline) и последующих инкрементальных прогонов на том же PR даёт фактическую экономию токенов и затрат без расширения схемы `usage_events`. Операция `change_summary` (агент «что изменилось», PS §1.2 / §4.5) логируется в `usage_events` наряду с остальными и входит в общий суммарный расход токенов и биллинг PR, однако при сопоставлении профиля экономии качества и ревью между полным и инкрементальным Run может анализироваться отдельно (через фильтрацию по `operation`), так как объём её вызова зависит от числа изменённых файлов дельты, а не от всей базы PR.
+
+---
+
+### 6.8. Формирование вердикта, Check Run и агрегация сохраняющихся дефектов
+
+#### 6.8.1. Формула агрегации дефектов PR
+Вердикт инкрементального прогона отражает **текущее интегральное качество всего pull request**, а не только отдельного коммита.
+В фазе Pass 6b (`findings_post_processor.py:process`) выполняется сведение дефектов:
+
+1. **Множество сохраняющихся открытых дефектов ($F_{\text{persisting}}$):**
+   На вход Pass 6b (в дополнение к кандидатам модели и реестру `comments` с `github_comment_id`) передаются активные подтверждённые находки базового Run (`findings` с `publication_action IN ('publish_inline', 'publish_body', 'suppressed_duplicate') AND drop_reason IS NULL`). На их основе `process()` инстанциирует синтетические `ProcessedFinding` для сохранения в текущем Run:
+   - Если дефект находится в файле, который **не изменялся** в дельте коммитов: он гарантированно сохраняется со статусом `PERSISTING` и персистируется в текущем Run строкой `findings` с `published = false` (до коммита T14), `publication_action = 'suppressed_duplicate'`, `linked_comment_id = (comments.id WHERE comments.finding_id = base.id для inline-комментариев; NULL для body-only находок publish_body, так как отдельного inline-комментария на GitHub не создавалось)`, `finding_fingerprint = base_finding.finding_fingerprint` и `drop_reason = NULL`.
+   - Если дефект находится в файле, который **был изменён**, но код под якорем дефекта остался прежним (`anchor_code_hash` совпадает, смещение строк отслежено по §2.4): он сохраняется со статусом `PERSISTING` и персистируется аналогичной строкой `findings` со ссылкой на существующий комментарий (`linked_comment_id` из базовой находки либо NULL для body-only).
+   - **Контракт сохраняемой строки `findings`:**
+     - Обязательные NOT NULL колонки заполняются полностью: `file_path`, `line_start`, `side`, `confidence`, `severity`, `category`, `title`, `body` (с учётом трансляции диапазона строк по §2.4 при сдвигах в файле).
+     - Значения `anchor_code_hash` и `occurrence_index` строго копируются из базовой находки для сохранения сопоставления body-only находок (Ч.1 §3.1).
+     - Флаг `published = false` проставляется при первичной вставке в БД и выставляется в `published = true` строго на этапе T14 (`run_lifecycle_store.py:complete_publication`, строка 613, флаг выставляется на строке 682; метод `mark_review_published` находится в `run_repository.py:1002`) вместе с остальными строками. Это исключает попадание незавершённого или упавшего Run в качестве базы инкрементального анализа на шаге 1 алгоритма §6.5.1.
+     - **Шов метрик за период:** Для исключения завышения периодических агрегатов метрик (`metrics_summary.py:193`, `:266`) в SQL-запросы подсчёта находок добавляется фильтр `publication_action != 'suppressed_duplicate'`. Это исключает повторное дублирование находок как для инкрементальных прогонов Ч.2, так и для собственных дублей Ч.1, сохраняя точный срез последнего Run в `metrics_summary.py:150`.
+   - Находка входит в бакет `suppressed` текущего Run и учитывается в `kept` и counts (`summary_from_result`).
+   - Ключ объединения — `finding_fingerprint`, что исключает повторный учёт при подавлении стохастического дубля от модели.
+2. **Множество устранённых дефектов ($F_{\text{resolved}}$):**
+   Замечания, для которых в текущем прогоне Pass 6b зафиксировал исходы `RESOLVED_BY_FIX` (QA-REC-03), `RESOLVED_BY_DELETION` (QA-REC-04) или `RESOLVED_MUTATED`, а также доказанные возвраты пути к базе из `delta_absent_paths` (детерминированный `RESOLVED_BY_FIX` до `NoModelAnswer`, §6.4.3). На момент вычисления вердикта (T8) статусы в таблице `comments` ещё не обновлены (чистка выполняется после T14), поэтому $F_{\text{resolved}}$ рассчитывается по сохранённым исходам текущего Run, а не по статусам `comments`. Они исключаются из активного вердикта и отправляются на закрытие мутацией `resolveReviewThread`.
+3. **Множество новых подтверждённых дефектов ($F_{\text{new}}$):**
+   Подтверждённые находки из инкрементальной дельты (бакеты `inline` и `body_only`).
+
+Итоговое множество активных дефектов для вычисления вердикта:
+$$F_{\text{active}} = (F_{\text{persisting}} \setminus F_{\text{resolved}}) \cup F_{\text{new}}$$
+
+#### 6.8.2. Снятие противоречия с PIPELINE_SPEC §11 и CVS §8.1
+В канонических спецификациях зафиксировано правило: *«Только supported findings определяют counts и verdict»*.
+Для инкрементального анализа это правило уточняется следующим образом:
+- **Единый контур supported findings:** В инкрементальном Run набор `supported` находок, передаваемый в расчёт вердикта (`summary_from_result` и `_overview_block`), состоит из `kept = (*inline, *body_only, *suppressed)`.
+- **Наследование coverage:** `context.build` читает сохранённый coverage базового `base_run_id` (из `run_actions` `tool = 'context.build'`, v1 или v2), проверяет его и записывает `base_coverage_status` в `coverage.version = 2` текущего Run. `delta_coverage_status` считается только по дельте; `valid_coverage_status` проверяет `delta_coverage_status` и partition, а итоговый `coverage.status`, сохраняемый в том же JSON и читаемый `coverage_verdict`, равен `delta_coverage_status` лишь при `base_coverage_status = complete`; иначе он равен `partial` (при любой неполной базе в `reasons` добавляется глобальная причина `base_coverage_incomplete` с текстом из `REASON_TEXT` / CVS §2.2). Недоступный/очищенный по retention coverage базы переводит Run в полное ревью с `incremental_fallback_reason = 'base_coverage_unavailable'` (не застревает в `snapshot_integrity_error`, который остаётся только для несовпадения закреплённых полей **текущего** Run). Поэтому неполное покрытие базы не превращается в ложный `clean` после чистой дельты:
+  - Вердикт становится `null` только если среди активных находок $F_{\text{active}}$ нет замечаний выше `info` (по канонической логике `coverage_verdict` в `verdict.py:62-65` и CVS §8.2);
+  - Если есть активные находки уровня `medium` или `low` — вердикт остаётся `attention`;
+  - Если есть хотя бы одна активная находка уровня `critical` или `high` — вердикт остаётся `blocking`.
+- **Правило вердикта:**
+  - Если в $F_{\text{active}}$ есть хотя бы одна находка уровня `critical` или `high` $\rightarrow$ `verdict = 'blocking'`.
+  - Если есть находки уровня `medium` или `low` (и нет critical/high) $\rightarrow$ `verdict = 'attention'`.
+  - Если в $F_{\text{active}}$ ровно 0 находок или присутствуют только находки уровня `info` $\rightarrow$ `verdict = 'clean'` (только при условии `coverage.status == 'complete'`).
+- **Случай без модели (#365, D-13, D-14 и `technical_only`):** При отсутствии проверяемых файлов в дельте (D-13), пустой / исключённой дельте с активными дефектами базы (D-14) или технических изменениях (например, rename-only) инкрементальный Run идёт через `NoModelAnswer` (`execute_review.py:279-283`):
+  - Вызовы LLM отсекаются (0 токенов модели);
+  - `StoreReviewOutput.execute` сохраняет все активные замечания базы ($F_{\text{persisting}} \setminus F_{\text{resolved}}$) в `findings` (`publication_action = 'suppressed_duplicate'`, `published = false` до T14 `complete_publication`, `linked_comment_id` на существующие комментарии либо NULL для body-only);
+  - Вердикт PR вычисляется по составу $F_{\text{active}}$ через `coverage_verdict` и сохраняется в `saved_result.verdict`: `blocking` при critical/high, `attention` при medium/low, `null` при чистой базе и частичном покрытии D-13;
+  - Для D-13/D-14 Check Run получает заголовок «AI-ревью: только сводка» (по `check_runs.py:208`), каноническую причину из `SUMMARY_ONLY_LINES` и сводную строку инкремента §6.8. `technical_only` сохраняет канонический заголовок coverage `none` по PIPELINE_SPEC §7 и тот же удержанный вердикт PR.
+- **Защита от ложного одобрения:** Если автор запушил коммит с правкой документации, не исправив критический баг в коде, вердикт инкрементального прогона остаётся `blocking`.
+
+#### 6.8.3. Представление в GitHub Check Run
+GitHub Check Run обновляется после коммита T14 (вызов GitHub API строго вне транзакции БД):
+- `name`: `"AI Review"`
+- `status`: `"completed"`
+- `conclusion`: `"neutral"` (по канону PIPELINE_SPEC §7)
+- `title`: `"AI-ревью: blocking"` (или `attention` / `clean` / при summary-only: `"AI-ревью: только сводка"`)
+- `summary` выводится в строгом соответствии с шаблоном PIPELINE_SPEC §7 с указанием дельты и сохраняющихся находок:
+  ```markdown
+  AI-ревью: blocking
+  Инкрементальное ревью (дельта a1b2c3d...f5e6d7c): 1 новое замечание, 2 сохраняющихся активных замечания PR (всего активных: 3)
+  ```
+  При срабатывании summary-only по дельте (#365, D-13, D-14) заголовок Check Run по `check_runs.py:208` — «AI-ревью: только сводка», а в `summary` выводятся точная причина из `SUMMARY_ONLY_LINES` (check_runs.py:19) и статус сохраняющихся замечаний. Канонический шаблон может также содержать строки `problem` и `done_well`:
+  ```markdown
+  Построчное AI-ревью не выполнено: нет проверяемых файлов
+  Инкрементальное ревью (дельта a1b2c3d...f5e6d7c): 0 новых замечаний, 2 сохраняющихся активных замечания PR (всего активных: 2)
+  ```
+
+---
+
+### 6.9. Сквозная матрица сценариев для регрессионного тестирования QA (QA-INC-01 — QA-INC-28)
+
+| ID | Сценарий | Исходное состояние PR (Run 1) | Действие автора (Событие) | Вид Run 2 и База | Ожидаемые публикации на GitHub | Вердикт PR и Check Run | Состояние в БД (`runs`, `comments`, `findings`) |
+|---|---|---|---|---|---|---|---|
+| **QA-INC-01** | **Штатный инкрементальный пуш (Clean → Clean)** | Run 1 на `sha_1` завершён, вердикт `clean`, 0 замечаний; полный PR содержит несколько файлов. Опубликовано тело ревью. | Пуш коммита `sha_2` с новой функцией (чистый код). | **Инкрементальный Run** (`diff_base_commit = sha_1`, `base_run_id = Run 1.id`). | 0 inline-комментариев. Обновление тела ревью и Check Run. | Verdict: `clean`. Check Run: `completed / neutral` (`clean`). | Run 2: `is_incremental = true`, `persisted_active_findings_count = 0`; сохранённое coverage по полному `DiffMap` восстанавливается как `complete`, без `classification_unavailable`. |
+| **QA-INC-02** | **Устранение критического дефекта в новом коммите** | Run 1 на `sha_1` завершён, опубликован inline-комментарий (critical) на строке 42 `auth.py`. Verdict: `blocking`. | Автор переписал строку 42, исправив уязвимость (`sha_2`). Pass 6b текущего Run фиксирует исход `RESOLVED_BY_FIX`. | **Инкрементальный Run** (`diff_base_commit = sha_1`). | **0 новых комментариев**. Тред на строке 42 закрыт мутацией `resolveReviewThread` (QA-REC-03) после T14. | Verdict: `clean` (при отсутствии других дефектов; $F_{\text{resolved}}$ вычтен на T8). Check Run: `completed / neutral` (`clean`). | Run 1 comment: `thread_status = 'RESOLVED_BY_BOT'`. Run 2: `is_incremental = true`, `persisted_active_findings_count = 0`. |
+| **QA-INC-03** | **Событие `synchronize` во время активного `running` (Гонка пушей)** | Run 1 на `sha_1` находится в состоянии `running` (выполняется LLM-анализ). | Запушен коммит `sha_2`. Пришёл вебхук `synchronize`. | **Run 1 доводится до конца!** Затем Run 2 стартует инкрементально от `sha_1`. | Run 1 штатно публикует замечания на `sha_1`. Затем Run 2 публикует дельту на `sha_2`. | Run 1 -> `blocking` на `sha_1`. Затем Run 2 -> вердикт по `sha_2`. | Webhook квитанция `sha_2`: `deferred (active_run)`. После T14 Run 1 создаётся Run 2 с `diff_base_commit = sha_1`. |
+| **QA-INC-04** | **Событие `synchronize` при Run в состоянии `queued`** | Run 1 на `sha_1` стоит в очереди `queued` (независимо от `attempt`). | Запушен коммит `sha_2`. Пришёл вебхук `synchronize`. | Run 1 **отменяется по T6** (`superseded`). Run 2 создаётся для `sha_2`. | 0 публикаций от Run 1. Публикация полного ревью от Run 2. | Run 1: `cancelled`. Run 2: вердикт по `sha_2`. | Run 1: `state = 'cancelled'`, `error_code = 'superseded'`. Run 2: `is_incremental = false` (нет базы с квитанциями). |
+| **QA-INC-05** | **Force-push / Rebase (История переписана)** | Run 1 на `sha_1` завершён (`succeeded`), есть опубликованный тред. | Автор выполнил `git rebase` и `push --force` (`sha_rebased`). `compare_commits` показывает `behind_by > 0`. | **Откат к полному ревью (Fallback)** (`is_incremental = false`). | Полное ревью всего PR. Старый тред остаётся в статусе `ACTIVE`/`PERSISTING` (QA-REC-09). | Verdict: по полному анализу. Check Run: `completed / neutral`. | Run 2: `is_incremental = false`, `diff_base_commit = NULL`, `incremental_fallback_reason = 'force_push_or_rebase'`. |
+| **QA-INC-06** | **Merge базовой ветки в PR (`git merge main`)** | Run 1 завершён на `sha_1`. | Автор выполнил `git merge main` (`sha_merge`). В дельте обнаружен коммит с 2 родителями. | **Откат к полному ревью (Fallback)** (`is_incremental = false`). | Публикация ревью по всему актуальному PR относительно нового `merge-base`. | Verdict: по полному анализу. Check Run: `completed / neutral`. | Run 2: `is_incremental = false`, `diff_base_commit = NULL`, `incremental_fallback_reason = 'target_branch_merged'`. |
+| **QA-INC-07** | **Изменение снимка правил ревью на стадии `policy.load` (PIPELINE_SPEC §2)** | Run 1 завершён на `sha_1`. | Изменился `policy_digest` или `rule_version_id` базовой ветки. | **In-place деградация на `policy.load`** (`is_incremental = false`). | Полный пересчёт находок PR по новым правилам. | Verdict: по полному анализу. Check Run: `completed / neutral`. | Run 2: `is_incremental = false`, `diff_base_commit = NULL`, `persisted_active_findings_count = 0`, `incremental_fallback_reason = 'policy_document_changed'`. |
+| **QA-INC-08** | **Переименование файла без изменения содержимого** | Опубликован комментарий в `src/old.py`. | Файл переименован в `src/new.py` без правки логики (`sha_renamed`). | **Инкрементальный Run** (`diff_base_commit = sha_1`). | **0 новых комментариев**. Тред отслеживается по новому пути `src/new.py` (QA-REC-15). | Verdict: `blocking` (дефект сохраняется). Check Run: `completed / neutral`. | Run 2: `is_incremental = true`, `persisted_active_findings_count = 1`. Тред: `thread_status = 'PERSISTING'`. |
+| **QA-INC-09** | **Превышение лимита дельты (> 3000 строк)** | Run 1 завершён на `sha_1`. | Автор добавил файл на 4500 строк (`sha_big`). | **Откат к полному ревью (Fallback)** (`is_incremental = false`). | Полное ревью PR по каталогу PIPELINE_SPEC §6 (summary-only `diff_too_large` при превышении полного лимита PR). | Verdict: по полному анализу. Check Run: `completed / neutral`. | Run 2: `is_incremental = false`, `diff_base_commit = NULL`, `incremental_fallback_reason = 'excessive_diff'`. |
+| **QA-INC-10** | **Инкрементальный Run с остаточным `no_reviewable_files` по дельте (D-13, #365)** | Run 1 завершён на `sha_1` с critical дефектом (verdict `blocking`). Общий PR diff 4000 строк. | Автор запушил `sha_2`: compare показывает текстовый файл дельты без patch (`missing_patch`), хотя полный снимок PR может содержать его `review_patch`; проверяемых хунков в дельте нет. | **Инкрементальный Run**, summary-only с причиной `no_reviewable_files` в `context_payloads.summary`. | **0 вызовов модели**. Сохраняется critical дефект из Run 1 (`publication_action = 'suppressed_duplicate'`). Check Run: заголовок «AI-ревью: только сводка» (причина в summary). | **Verdict: `blocking`** (удержан активным дефектом базы). Check Run: `completed / neutral`. | Run 2: `is_incremental = true`, `persisted_active_findings_count = 1`; summary-only выводится из сохранённого контекста, не из колонки `runs`. |
+| **QA-INC-11** | **Ручной перезапуск из UI (`POST /api/runs/{id}/rerun`)** | Run 1 завершён инкрементально. | Пользователь нажал «Rerun review» в веб-интерфейсе (T3). | **Откат к полному ревью (Fallback)** (`is_incremental = false`). | Полная перепроверка всего PR. | Verdict: по полному анализу. Check Run: `completed / neutral`. | Run 3: `trigger = 'rerun'`, `is_incremental = false`, `incremental_fallback_reason = 'manual_rerun'`. |
+| **QA-INC-12** | **Смена целевой ветки PR (`pull_request.edited`)** | Run 1 завершён для целевой ветки `develop`. | Автор сменил целевую ветку PR на `main`. | **Откат к полному ревью (Fallback)** (`is_incremental = false`). | Полное ревью PR относительно `main`. | Verdict: по полному анализу. Check Run: `completed / neutral`. | Run 2: `is_incremental = false`, `diff_base_commit = NULL`, `incremental_fallback_reason = 'target_branch_changed'`. |
+| **QA-INC-13** | **Отсечение галлюцинации модели вне дельты** | Run 1 завершён на `sha_1`. | Коммит `sha_2` изменил только `utils.py`. Модель вернула дефект в неизменённом `auth.py`. | **Инкрементальный Run**. | Находка в `auth.py` **не публикуется** (отсечена на Pass 2 с `out_of_incremental_diff_scope`). | Verdict: по подтверждённым дефектам. Check Run: `completed / neutral`. | Находка: `drop_reason = 'out_of_incremental_diff_scope'`, `publication_action = 'dropped'`. |
+| **QA-INC-14** | **Сохранение блокирующего вердикта при отсутствии новых замечаний** | В Run 1 открыт critical тред в `billing.py`. Verdict: `blocking`. | Автор запушил коммит `sha_2`, исправив опечатку в `README.md`. В дельте 0 замечаний. | **Инкрементальный Run**. | **0 новых комментариев**. Тред в `billing.py` остаётся открытым. | **Verdict: `blocking`** (защита от ложного `clean`!). Check Run: `completed / neutral` (`blocking`). | Run 2: `is_incremental = true`, `persisted_active_findings_count = 1`. |
+| **QA-INC-15** | **Серия из трёх пушей подряд во время активного Run** | Run 1 на `sha_1` выполняется (`running`), закреплённый diff уже сохранён. | Автор пушит `sha_2` (вебхук получает `deferred active_run`), затем сразу `sha_3`. | **Run 1 доводится до конца!** Delivery `sha_2` переходит в `ineligible (stale_head)`, Run 2 запускается для `sha_3`. | Run 1 публикует замечания на `sha_1`. Затем Run 2 публикует дельту `sha_1...sha_3`. | Verdict: сначала по `sha_1`, затем по `sha_3`. Check Run: `completed / neutral`. | Run 2: `is_incremental = true`, `diff_base_commit = sha_1`, `head_sha = sha_3`. |
+| **QA-INC-16** | **Пустая или исключённая дельта при активных замечаниях (D-14)** | Run 1 завершён на `sha_1` с critical дефектом (verdict `blocking`). | Пуш пустого коммита `sha_2` или правка только `.lock`, `.min.js` (GENERATED), бинарных файлов, изображений и файлов из `.reviewignore`. | **Инкрементальный Run** (`state = succeeded`), summary-only с причиной `no_changes` или `all_changes_ignored` в `context_payloads.summary`. | **0 новых комментариев**. Сохраняются открытые треды базы; чистка по §4 не закрывает их. | **Verdict: `blocking`** (удержан активным дефектом базы). Check Run: `completed / neutral`. | Run 2: `is_incremental = true`, `persisted_active_findings_count = 1`; summary-only выводится из сохранённого контекста, полный UI patch не обнуляется, `save_summary_only_stop` не получает короткий `DiffMap`. |
+| **QA-INC-17** | **Пустая дельта или all_changes_ignored при чистой базе (0 дефектов) (D-14)** | Run 1 завершён на `sha_1` без дефектов (`clean`, 0 замечаний). | Пуш пустого коммита `sha_2` или файлов, исключённых по GENERATED / `.reviewignore`. | **Пропуск Run (T19)** (`state = skipped`). | **0 новых комментариев**. Чистка тредов не вызывается (§4.5). | **Verdict: `null`** (по канону main для skipped). Check Run: `completed / skipped`. | Run 2: `state = 'skipped'`, `error_code = 'no_changes'` \| `'all_changes_ignored'`, `persisted_active_findings_count = 0`. |
+| **QA-INC-18** | **Пуш между claim и сохранением diff** | Run 1 на `sha_1` перешёл из `queued` в `running`, diff ещё не прочитан. | Автор пушит `sha_2` до `/pulls/{n}/files` или во время пагинации. | Run 1 отменяется как `superseded` до LLM; Run 2 после освобождения слота выбирает новую голову. | Run 1 ничего не публикует, вызовов модели нет. | Run 1: `cancelled`; Check Run: `completed / cancelled`. | Патчи `sha_2` не сохраняются под `Run 1.head_sha = sha_1`; при смене базы до сохранения diff — `failed/pr_base_changed`. |
+| **QA-INC-19** | **Только доказанный rename без изменения текста при активном дефекте** | Run 1 на `sha_1` завершён с critical находкой в `src/old.py`, вердикт `blocking`. | Автор переименовывает файл в `src/new.py`; сохранённый VCS-снимок доказывает чистый metadata-only rename без текстовых изменений. | **Инкрементальный Run**, `technical_only` → `NoReviewableText` → `NoModelAnswer`; модель не вызывается. | Нового inline-комментария нет, существующий тред остаётся связан с перенесённой находкой. | Вердикт `blocking`, Check Run `completed / neutral` с заголовком coverage `none` («AI-ревью: нет доступных для анализа изменений»). | Run 2: `persisted_active_findings_count = 1`, находка в `src/new.py` сохранена как `suppressed_duplicate`, а не потеряна при техническом исходе. |
+| **QA-INC-20** | **Файл дельты вернулся к базе PR** | Run 1 на `sha_1` завершён с critical находкой в `src/bug.py`. | Автор возвращает `src/bug.py` к содержимому базы; compare по `sha_1...sha_2` содержит путь, полный проверенный diff PR — нет. | **Инкрементальный Run**: `delta_absent_paths` содержит путь, `context.build` обходит `all_excluded` до обычного `coverage.technical_only`; при отсутствии других проверяемых хунков напрямую возвращает `NoReviewableText` → `NoModelAnswer` (исключение `outside_incremental_delta` не считается), без LLM. | Нового inline-комментария нет; старый тред закрывается после T14 по доказанному `RESOLVED_BY_FIX`. | `blocking` не удерживается; при coverage `none` вердикт `null`, Check Run `completed / neutral`, заголовок «AI-ревью: нет доступных для анализа изменений» (PS §7), не причина `all_changes_ignored`. | Scope digest содержит отсутствующий путь; находка базы не копируется как активная, а неоднозначная идентичность пути даёт `failed/snapshot_integrity_error` без публикации. |
+| **QA-INC-21** | **Неполная база и чистая дельта** | Run 1 имеет `coverage.status = partial` из-за `missing_patch`, активных находок нет. | Run 2 проверяет маленькую дельту полностью, новых находок нет. | **Инкрементальный Run** с `coverage.version = 2`, `base_coverage_status = partial`, `delta_coverage_status = complete`. | Итоговый `coverage.status = partial` с глобальной причиной `base_coverage_incomplete`; старый пробел покрытия не исчезает. | Вердикт `null`, не ложный `clean`; Check Run `completed / neutral` с неполным покрытием и текстом `REASON_TEXT['base_coverage_incomplete']`. | `valid_coverage_status` проверяет `delta_coverage_status` и partition (с `base_coverage_incomplete` в `global_reasons`), а итоговый `coverage.status` пересчитывается как `partial`. |
+| **QA-INC-22** | **Rename добавленного файла без compare patch не равен возврату к базе** | Run 1 добавил `src/old.py` и опубликовал critical находку. | Run 2 переименовал файл в `src/new.py` без изменения текста; compare даёт `new` с `previous_filename = old`, но без patch и без доказательства metadata-only; полный diff — `added new` с patch. | **Инкрементальный Run**: `new` сопоставлен с полным снимком, `old` — alias, `delta_absent_paths` пуст; scoped `missing_patch` ведёт в D-13 `no_reviewable_files` → `SummaryOnlyReview` → `NoModelAnswer`, coverage `partial`. | Находка переносится на `new` по §2.4 и остаётся активной; `RESOLVED_BY_FIX` не ставится, новых inline-комментариев нет. | Вердикт `blocking`, Check Run `completed / neutral`, заголовок «AI-ревью: только сводка», причина «нет проверяемых файлов» (PS §7). | Scope digest закрепляет пару путей; отсутствие `old` в полном diff не считается повреждением. `_restore_run_coverage` принимает scoped `missing_patch` по сохранённому доказательству отсутствия compare patch, даже если полный снимок имеет patch. |
+| **QA-INC-23** | **Неоднозначный путь compare** | Run 1 имеет активную находку; полный diff содержит две потенциальные строки для пары rename/copy. | Compare на `sha_2` не даёт однозначно сопоставить `filename` / `previous_filename`. | `context.build` до LLM поднимает `RunFailure("snapshot_integrity_error")`. | Run `failed`, новые находки не публикуются, старый тред не меняется. | Check Run `completed / neutral`, «AI-ревью не выполнено» с текстом PS §6; автоматического retry нет. | Ошибка не превращается в `RESOLVED_BY_FIX` или `classification_unavailable`. |
+| **QA-INC-24** | **Несовпадение сохранённого scope/digest текущего Run после LLM** | `context.build` сохранил корректный полный DiffMap и coverage v2. | Перед post-processing закреплённый scope или digest в `context_payloads.summary.coverage` не совпадает с сохранённым снимком текущего Run. | `get_post_processing_input` поднимает `SnapshotIntegrityError`; `StoreReviewOutput.execute` преобразует его в `RunFailure("snapshot_integrity_error")`. | Run `failed`, результат модели и новые находки не публикуются. | Check Run `completed / neutral`, «AI-ревью не выполнено» с текстом PS §6; автоматического retry нет. | `read_context_coverage_pins` и восстановление coverage не возвращают `None`/`classification_unavailable` при v2 mismatch. |
+| **QA-INC-25** | **База очищена по сроку хранения (`data_purged_at` #548)** | Run 1 на `sha_1` завершён (`succeeded`), но `purge_expired_runs` выставил `data_purged_at IS NOT NULL`, обнулил `patch`/`review_patch` и удалил non-summary `context_payloads`. | Автор пушит новый коммит `sha_2` после длительного простоя PR. | **Откат к полному ревью (Fallback)** (`is_incremental = false`), т.к. §6.5.1 Шаг 2b на T1-FULL отклоняет базу, либо воркер выполняет in-place fallback на стадии `policy.load` до `vcs.fetch_diff`. | Полное ревью всего PR по актуальному diff (без петли `failed/snapshot_integrity_error` на каждом пуше). | Verdict: по полному анализу. Check Run: `completed / neutral`. | Run 2: `is_incremental = false`, `diff_base_commit = NULL`, `incremental_fallback_reason = 'base_coverage_unavailable'`. |
+| **QA-INC-26** | **Старый базовый Run до внедрения coverage (#213)** | Run 1 завершён (`succeeded`) и имеет квитанции публикации, но создан до #213 (`run_actions` `context.build` не содержит `coverage`). | Автор пушит новый коммит `sha_2`. | **Откат к полному ревью (Fallback)** (`is_incremental = false`), Шаг 2b не находит `coverage` в `run_actions.context.build` базы. | Полное ревью всего PR по актуальному diff (последующий Run 2 сохранит валидный coverage и станет базой). | Verdict: по полному анализу. Check Run: `completed / neutral`. | Run 2: `is_incremental = false`, `diff_base_commit = NULL`, `incremental_fallback_reason = 'base_coverage_unavailable'`. |
+| **QA-INC-27** | **Очистка базы во время вызова модели** | `context.build` проверил coverage базы и закрепил `base_coverage_status` и `base_snapshot_digest` в v2 текущего Run. | После отправки модели retention очищает старый базовый Run, но текущие `code_change_diffs` и `context.build.response` сохранны. | Post-processing восстанавливает текущий v2 и scope без повторного чтения старого Run. | Текущий Run публикуется по закреплённому покрытию; он не получает `snapshot_integrity_error` только из-за поздней очистки базы. | Вердикт по итоговому `coverage.status`, Check Run `completed / neutral`. | Изменение закреплённых полей текущего Run по-прежнему даёт `failed/snapshot_integrity_error` (QA-INC-24). |
+| **QA-INC-28** | **Неполная база и дельта без проверяемого текста** | Run 1 имеет `coverage.status = partial` и активный critical дефект. | Run 2 получает пустой compare (`no_changes`), его `delta_coverage_status = none` без файловых причин. | Инкрементальный Run сохраняет итог `coverage.status = partial` и глобальную причину `base_coverage_incomplete` независимо от статуса дельты. | Находка базы сохраняется как `suppressed_duplicate`; Run не выдаёт ложный `clean` и не падает при восстановлении v2. | Вердикт `blocking`; Check Run по D-14: `completed / neutral`, заголовок «AI-ревью: только сводка», строка `no_changes`. | `_restore_run_coverage` допускает глобальную причину по проверенному `base_coverage_status != complete`, не сравнивает её с нулевой файловой ёмкостью `available.reason_counts`. |
+
+---
+
 
 ---
 

@@ -26,7 +26,7 @@ runtime-профиль требуют отдельной реализации; �
 | # | Решение | Причина |
 |---|---|---|
 | Р-1 | Транспорт задач — **RabbitMQ** (durable, persistent, ack после фиксации состояния). **Источник истины — PostgreSQL**: брокер доставляет указатель на задачу, состояние живёт в БД | Микросервисы → общая БД как очередь становится антипаттерном; RabbitMQ даёт ack/DLQ/приоритеты; отмена и схлопывание не выражаются в брокере — поэтому состояние в БД |
-| Р-2 | Один активный прогон на PR: ключ `(installation_id, repo_id, pr_number)`; новый пуш отменяет предыдущий прогон, побеждает последний `head_sha` | Иначе 10 пушей = 10 ревью и 10× цена. Разные PR, ветки, репозитории — параллельны |
+| Р-2 | Один активный прогон на PR: ключ `(installation_id, repo_id, pr_number)`; при новом пуше (`pull_request.synchronize`) прогон в очереди (`queued`) схлопывается по T6, а уже выполняющийся (`running`/`publishing`) доводится до публикации и фиксации квитанций, формируя базу для последующего инкрементального ревью коммит-дельты ([`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6, Ч.2 #306). Победивший последний `head_sha` запускается инкрементально или полным ревью по §6.6 | Иначе 10 пушей = 10 ревью и 10× цена. Разные PR, ветки, репозитории — параллельны; доведение до публикации предотвращает пустую трату инференса и гарантирует diff base для инкремента |
 | Р-3 | Два движка за одним контрактом `ReviewOutput` (§5): **DiffEngine** (без диска, ≤ 40 с) и **SandboxEngine** (контейнер, ≤ 10 мин). v1 = DiffEngine | Движок будет меняться; всё ниже контракта об этом не знает |
 | Р-4 | Сандбокс: `--network=none`, без токенов внутри, клон монтирует контроллер снаружи | Промпт-инъекция в диффе — штатная ситуация |
 | Р-5 | GitHub: **один** review batch на run для публикации новых замечаний и сводки (`POST /pulls/{n}/reviews`). Разрешение устаревших и исправленных замечаний выполняется best-effort фазой publisher после завершения T14 через GraphQL `resolveReviewThread` по правилам [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) (Ч.1). Идентичность включает run/head/diff/final result и digest точного payload; после неоднозначной отправки — recovery без слепого POST. В тело допускаются только подтверждённые находки с существующим показанным якорем (§8.4) | Повтор доставки не создаёт новое ревью и не присваивает результат другого run; `findings_hash` недостаточен; закрытие тредов не меняет тело опубликованных комментариев |
@@ -409,20 +409,27 @@ sequenceDiagram
   end
   opt результат требует публикации (все ветки, кроме skipped)
   W->>PG: final result, coverage, backend summary, точный publication plan
-  W->>PG: cancel_requested? head_sha актуален?
+  W->>PG: cancel_requested? коммит head_sha существует?
   W->>MQ: review.publish {run_id} с закреплённым планом
   W->>MQ: ack review.run
   MQ->>P: review.publish
   P->>PG: lease + сохранённый payload и operation key
-  P->>GH: свежие head/diff + recovery своих операций
+  P->>GH: проверка открытости PR + recovery своих операций
   P->>GH: POST /pulls/{n}/reviews (одно ревью) + check-run completed
-  P->>GH: проверить актуальность после POST
-  P->>PG: remote receipts#59; succeeded либо cancelled при гонке
+  P->>GH: проверить результат POST
+  P->>PG: remote receipts#59; succeeded (T14) либо cancelled при 422/PR закрыт
   P->>MQ: ack review.publish
   end
 ```
 
-### 6.3 Схлопывание (Р-2): пуш во время прогона
+### 6.3 Схлопывание и доведение до публикации (Р-2): пуш во время прогона
+
+При поступлении события `pull_request.synchronize` (новый `head_sha_2`) поведение системы дифференцируется по текущей фазе активного Run ([`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6.4, Ч.2 #306):
+1. **Прогон в очереди (`state = queued`):** Воркер ещё не начал активный инференс (для `attempt = 0` ресурсы и токены инференса ещё не тратились; для `attempt ≥ 1` отмена экономит ресурсы повторных попыток). Run отменяется немедленно через `RunGuard` / `cancel_for_pr` по переходу T6 (`error_code = superseded`) независимо от `attempt`; для `attempt ≥ 1` дополнительно отправляется сигнал отмены в очередь/воркер, а проверка RunGuard при claim служит страховкой от гонки со сдвигом головы. Если `attempt = 0`, Check Run для `sha_1` не создавался.
+2. **Прогон уже выполняется (`state = running` после сохранения diff или `publishing`):** Применяется дефолт лектора («доведение до публикации»). Новый push не выставляет `cancel_requested`. Run#1 на `sha_1` доводится до сохранения `FinalReviewResult` и публикации на `commit_id = sha_1` (если GitHub всё ещё принимает этот коммит в PR). При подтверждённом POST в БД фиксируются квитанции `comments` и обновляется Check Run `sha_1`. Квитанция доставки `sha_2` откладывается диспетчером (`status = deferred_run_trigger`, `detail = 'deferred (active_run)'`) с `retry_after = now() + 30s` (при наличии активного CI-гейта по Р-10 квитанция может сначала получить статус `waiting_for_ci`).
+3. **Инкрементальный запуск Run#2:** Переход T14 для Run#1 пробуждает `webhook-worker` через `retry_after` и уведомление `NOTIFY webhook_work_available`. Обработчик под advisory lock выбирает коммит Run#1 в качестве базы разницы (`diff_base_commit = sha_1`), проверяет `compare_commits(sha_1, sha_2)` до открытия транзакции БД и ставит Run#2 с флагом `is_incremental = true` (переход T1-INC). Воркер на стадии `context.build` получает файлы и хунки коммит-дельты `sha_1...sha_2` через `compare_commits` вне транзакции БД и анализирует только дельту, агрегируя сохраняющиеся дефекты Run#1.
+
+**Исключение до сохранения diff:** если push обнаружен после claim, но до сохранения diff, `running` отменяется как `superseded` по T11 до LLM: старый diff уже нельзя достоверно прочитать через `/pulls/{n}/files`. Для такого Run нет T14 и подтверждённых квитанций, поэтому следующий Run не выбирает его базой инкремента.
 
 ```mermaid
 sequenceDiagram
@@ -434,24 +441,29 @@ sequenceDiagram
   participant W as AI Worker
   participant P as Publisher
 
-  Note over W: выполняет run#1 (sha_1)
+  Note over W: выполняет run#1 (sha_1, state = running)
   GH->>WH: pull_request.synchronize (head = sha_2)
-  WH->>PG: webhook_events INSERT (квитанция)<br/>+ NOTIFY webhook_work_available (одна транзакция)
-  WH-->>GH: 202
+  WH->>PG: webhook_events INSERT (квитанция sha_2)<br/>+ NOTIFY webhook_work_available
+  WH-->>GH: 202 Accepted
   PG-->>WW: уведомление после commit
-  WW->>PG: claim квитанции (по уведомлению, резервно раз в 30 с)
-  WW->>GH: GET /pulls/{n} под advisory lock — текущий head_sha
-  WW->>PG: code_changes.head_sha = sha_2, сброс ci_status
-  WW->>PG: runs: run#1.cancel_requested = true
-  W->>PG: checkpoint: cancel_requested? → да
-  W->>PG: run#1.state → cancelled
-  W-->>W: ack review.run (run#1), без публикации
-  Note over P: если run#1 уже в review.publish — Publisher сверяет sha_1 ≠ head_sha и не постит
-  GH->>WH: check_suite.completed (sha_2, success)
-  WH->>PG: webhook_events INSERT (квитанция)<br/>+ NOTIFY webhook_work_available (одна транзакция)
-  WH-->>GH: 202
-  WW->>PG: try_enqueue → run#2 (sha_2)
-  Note over WW: try_enqueue из доставки реализован в #52
+  WW->>PG: claim квитанции sha_2 под advisory lock
+  Note over WW: run#1 уже в running — отмена НЕ выставляется!
+  WW->>PG: квитанция sha_2 → retry_after (deferred active_run / waiting_for_ci при ожидании CI)
+  Note over W: run#1 завершает анализ и Pass 6b
+  W->>PG: T8: state → publishing, payload готов
+  W->>P: review.publish/v1 (sha_1)
+  Note over P: Publisher проверяет sha_1: cancel_requested = false, PR открыт
+  P->>GH: POST /pulls/{n}/reviews (commit_id = sha_1)
+  GH-->>P: 200 OK (комментарии на sha_1 приняты)
+  P->>PG: T14: state → succeeded, запись квитанций в comments
+  P->>GH: Check Run sha_1 → completed / neutral
+  P->>PG: NOTIFY webhook_work_available / retry_after
+  PG-->>WW: пробуждение webhook-worker
+  WW->>PG: claim отложенной квитанции sha_2
+  WW->>GH: compare_commits(sha_1, sha_2) → ahead
+  WW->>PG: T1-INC: INSERT run#2 (is_incremental = true, diff_base_commit = sha_1)
+  WW->>W: review.run/v1 (run#2, дельта sha_1...sha_2)
+  Note over W: run#2 анализирует только дельту коммитов
 ```
 
 Сообщение run#1 в RabbitMQ удалить нельзя — поэтому решение всегда принимается по состоянию в БД (`RunGuard`), а брокер только доставляет.
@@ -469,7 +481,7 @@ stateDiagram-v2
   running --> failed: сбой без retry или attempt ≥ 3
   running --> queued: исключение, attempt < 3 (retry с задержкой)
   publishing --> succeeded: ревью опубликовано
-  publishing --> cancelled: head_sha устарел
+  publishing --> cancelled: commit не найден (422) · PR закрыт · cancel
   publishing --> failed: GitHub 5xx после повторов, 403
   queued --> skipped: правило отбора не прошло
   succeeded --> [*]
@@ -920,7 +932,7 @@ snapshot-путём, run на v3 или ниже остаётся на legacy-п
 - `POST /api/runs/{id}/rerun` допускает 422 с массивом `detail` при невалидном UUID и со строковым `detail` при отсутствии кандидата запуска (в частности, активной версии правил или промпта). Причины 409 и порядок решений — [PIPELINE_SPEC §6.1](PIPELINE_SPEC.md#61-http-отказы-rerun).
 - `GET /api/runs/{id}` отдаёт `RunDetail`; `author`, `headRef` и `baseRef` в `PullRequestRef` заполняются только в нём, список `GET /api/runs` отдаёт `RunSession` без них. Zod-схема UI допускает оба ответа: с ui#59 (`4369e02`) эти поля `nullable().optional()`; снимок Zod-схем ui (`tests/fixtures/ui_zod_contracts.json`) сверяется со спекой поле в поле, порядок перегенерации — PIPELINE_SPEC §16; коммит ui, с которого он снят, — в `provenance.commit` и `UI_CONTRACT_COMMIT`.
 - Worker собирает LLM Gateway (#33) один раз на процесс, а модели ревью и конвенций на каждую попытку с её `RunCallContext` (дедлайн, номер попытки, версии). AGENTS.md, дерево и файлы для конвенций читаются на `base_sha` (файлы — через blob) на обоих путях с #136, метаданные PR берутся у провайдера. Legacy-путь (run на `review.system` v3 или ниже): ключ кэша конвенций — (repository_id, agents_md_sha, prompt_version_id, policy_key = ignore key попытки; NULL у run без снимка), контекст стадии `context.build` попадает только в трассу, её бюджет считается по 4 символа на токен. Snapshot-путь (run на v4 или v5): тот же base-вход, `policy_key` — digest `repo-conventions-v2` (§10), блоки L2–L4 стадии идут в prompt как `<context_excerpts>`, стадия считает токены закреплённым в снимке counter (`counter/v2`, 3 символа на токен), после ревью работает verifier, а вызовы конвенций и ревью оставляют следующим стадиям резерв слотов и времени (CONTEXT_AND_VERIFICATION_SPEC §7.3–7.4). Без `LLM_MODEL` worker стартует с предупреждением, а Run завершается `failed` / `llm_unavailable` с сообщением о том, что шлюз не настроен (#52). `llm_unavailable` ретраится (`RETRYABLE_ERROR_CODES`), поэтому Run проходит все три попытки, и сообщение видно в `runs.error_message` только после третьей. Локальные модели: таймаут вызова fast фиксирован, 90 с (`GatewayPolicy.call_timeout_s`, из env не задаётся), и reasoning-модели на локальном железе в него обычно не укладываются; LM Studio с gpt-oss отвечает 400 на строгую схему (`json_schema`), ему нужны `LLM_STRUCTURED_OUTPUT=prompt_json` и `LLM_ALLOW_PROMPT_JSON=1` (README, «LLM gateway»).
-- Перед `POST /pulls/{n}/reviews` publisher сверяет голову PR в GitHub: push, который webhook-worker ещё не записал в PostgreSQL, превращает публикацию в `cancelled` / `superseded` (T15), а не в ревью на старый коммит (#52).
+- Перед `POST /pulls/{n}/reviews` publisher проверяет отмену и открытость PR. Подтверждение закреплённого `commit_id` и переходы T14/T15 — [INC §6.4.3](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#643-снятие-противоречия-с-t15-разрешение-публикации-на-устаревшей-голове).
 - `deep` (SandboxEngine) относится к фазе 3: `PATCH /api/repos/{id}` принимает только `fast`, реконсилер не публикует в `review.run.deep`, очередь только объявляется (#52).
 - **Лимит повторов AMQP и маршрутизация в DLQ при неожиданных ошибках (#54).** Очереди `review.run.*` объявлены как классические очереди RabbitMQ из-за несовместимости `x-max-priority` с кворум-очередями брокера. Classic-очереди RabbitMQ не выставляют заголовок `x-delivery-count`. Доменные повторы отслеживаются через `runs.attempt` в PostgreSQL и проявляются в AMQP через `x-death` после возвращения из exchange `reviews.retry` и очередей задержки `retry.{30s,2m,10m}.{fast,deep}` (§6.8, §7.2). Для защиты от необработанных исключений потребителя вводится второй, отдельный счётчик повторов через заголовок `x-attempt`: он считает любые исключения, вылетевшие из обработчика, в обеих очередях (`review.run.*` и `review.publish`); гибель процесса не считается. При возникновении исключения обработчик воркера выполняет confirmed-перепубликацию копии сообщения с инкрементированным заголовком `x-attempt: attempts` через exchange `reviews` с последующим подтверждением `ack()` исходной доставки. Если перепубликация завершается ошибкой (сбой соединения или брокера), воркер перехватывает исключение и выполняет fallback на `nack(requeue=True)`. Заголовок `x-death` отложенных очередей не расходует бюджет неожиданных сбоев. Некорректные или повреждённые заголовки попыток логируются с уровнем `WARNING` и fallback на 1. При достижении порога `MAX_UNEXPECTED_RETRIES = 3` сообщение маршрутизируется в `reviews.dlq` через `nack(requeue=False)`, в лог пишется `ERROR` с полным `exc_info=True`, а локальный кэш попыток процесса очищается. Локальное fallback-состояние ограничено 1024 записями (`MAX_LOCAL_RETRY_ENTRIES`) с TTL 300 с от последнего сохранения (`LOCAL_RETRY_TTL_SECONDS`); истёкшие записи удаляются лениво при следующем обращении retry к состоянию, при заполнении вытесняются старейшие. Успешная confirmed-перепубликация и ack оригинала очищают локальную запись; ошибка publish или ack сохраняет ограниченный fallback. Между процессами счётчик переносит заголовок `x-attempt`. Без `message_id` локальный ключ — стабильный SHA-256 routing key и тела сообщения. Остаточные риски: 1) внезапная гибель процесса (SIGKILL, OOM-killer) не считается счётчиком, так как обработчик не успевает выполнить перепубликацию до падения процесса; 2) если копия опубликована, а `ack` оригинала упал, в очереди окажутся и оригинал, и копия; это безопасно благодаря идемпотентности обработчиков (Р-5, §7.2).
 
@@ -1085,12 +1097,30 @@ class ComparisonFile:
     is_complete: bool = True
 
 @dataclass(frozen=True)
+class CommitInfo:
+    sha: str
+    parents: list[str]
+
+@dataclass(frozen=True)
 class ComparisonResult:
     base_sha: str
     head_sha: str
+    status: str  # 'ahead', 'behind', 'diverged', 'identical'
+    ahead_by: int
+    behind_by: int
     is_ancestor: bool
-    is_complete: bool
+    is_complete: bool  # False при усечении ответов compare у GitHub (> 300 файлов / 250 коммитов)
+    commits: list[CommitInfo]
     files: list[ComparisonFile]
+
+class VcsError(Exception):
+    """Базовое исключение сетевых и транспортных ошибок VCS."""
+
+class VcsNotFoundError(VcsError):
+    """Коммит или репозиторий не найден (HTTP 404 / 422)."""
+
+class VcsRateLimitError(VcsError):
+    """Превышение лимита запросов к API VCS (HTTP 403 / 429)."""
 
 @dataclass(frozen=True)
 class ReviewThread:
@@ -1178,7 +1208,7 @@ redelivery acceptance. Intake остаётся default-off; production rollout �
 
 | Событие | Действия | Что делаем |
 |---|---|---|
-| `pull_request` | `opened`, `reopened`, `synchronize`, `edited` | upsert `code_changes`; `synchronize` → сброс `ci_status`, `cancel_requested` активного Run |
+| `pull_request` | `opened`, `reopened`, `synchronize`, `edited` | upsert `code_changes`; `synchronize` → сброс `ci_status`; отмена только прогона в очереди `queued` (T6), активный `running`/`publishing` завершается до публикации (дефолт лектора, §6.3, [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6.4), новая голова ставится в отложенную очередь `deferred_run_trigger` для последующего инкрементального прогона |
 | `pull_request` | `labeled` / `unlabeled` | `ai_review_labeled = true/false`, только если `label.name == "ai-review"`; события самого бота отбрасывает Р-9 (§8.3); на `closed` и `reopened` флаг сверяется с текущими лейблами PR (PIPELINE_SPEC §8.2) |
 | `pull_request` | `closed` | отмена активного Run; при `merged = true` и `base.ref`, равном `repository.default_branch` из payload, — запрос обновления индекса до `merge_commit_sha` (без него — только маркер пробуждения, §7.4) до раннего выхода проекции, то есть и у репозитория с приостановленными ревью; статус доставки не меняется, в detail добавляется `index=requested`; сбой запроса пишется в лог и доставку не роняет — проекция уже закоммичена, индекс догонит сверка с HEAD (§11); вызова GitHub нет (#143) |
 | `check_suite`, `workflow_run` | `completed` | для открытых PR с этим `head_sha` `check_suite` пишет `ci_status = {"event": "check_suite"}` (кэш для sweep, PIPELINE_SPEC §8.3), `workflow_run` `ci_status` не пишет → `try_enqueue`; «зелёный» = все suites для sha, **кроме suite самого App** и чужих `queued` suites без check run, завершены с `success` / `neutral` / `skipped` — проверяется REST-запросом в `try_enqueue` (§6.1) |
@@ -1202,12 +1232,12 @@ redelivery acceptance. Intake остаётся default-off; production rollout �
 | Игнор собственных событий (Р-9) | Маршрут по `sender` не фильтрует: квитанция сохраняется, ответ — 202. `webhook-worker` пропускает событие лейбла `ai-review` (`labeled` / `unlabeled`), если `sender.type == "Bot"` ∧ `sender.login` совпадает с `GITHUB_APP_BOT_LOGIN` без учёта регистра, и помечает квитанцию разобранной (`projected_at`). Разбор событий тредов `pull_request_review_thread` (`resolved` / `unresolved`) планируется после MVP в рамках задачи сбора обратной связи FeedbackSignal с аналогичным фильтром по `sender` (в MVP приложение на эти события не подписано). В событиях бота `sender` — пользователь `<slug>[bot]`, и его id не равен App ID (staging: App ID `5111033`, `dmc268-t6-reviewer[bot]` — `335108304`, #37). App ID остаётся в `iss` App JWT и в исключении своего check suite по `app.id` (PIPELINE_SPEC §8.1) |
 | Installation-токен | живёт 1 ч; Redis `token:{installation_id}`, общий для `worker` и `webhook-worker`, TTL до `expires_at` минус 60 с; найденный в Redis токен имеет приоритет; ошибка чтения или отсутствие ключа (вытеснение, отклонённая запись) допускают локальную копию только до `expires_at` минус 60 с; без локальной копии или при достижении этой границы — cache miss; без `REDIS_URL` — в памяти процесса с той же границей срока; кэш создаёт `installation_token_cache` ([redis_installation_token_cache.py](../app/modules/integrations/webhooks/infrastructure/redis_installation_token_cache.py)): `RedisInstallationAccessTokenCache` с локальной копией или, без Redis, `InMemoryInstallationAccessTokenCache`; его вызывают `run_forever` ([webhook_worker.py](../app/webhook_worker.py)) и `github_adapters` ([worker.py](../app/worker.py)); индексатор держит свой кэш в памяти ([code_index_worker.py](../app/bootstrap/code_index_worker.py)): `snapshot_sources` — на задание, `index_consumer` → `reconcile_sources` — на прогон reconcile; private key App — только в env `webhook-worker`/`worker`/`publisher` |
 | Rate limit | 5000 req/ч на installation; `X-RateLimit-Remaining` в метрики; `403/429` + `Retry-After` — повторы по PIPELINE_SPEC §5.2; вторичные лимиты — не более 1 мутации/сек (не более 80 content-generating запросов в минуту и 500 в час); мутации `resolveReviewThread` квотируются до 30 на Run с паузой ≥ 1.2 с по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md); остаток переносится на последующие Run |
-| Дифф | `GET /pulls/{n}/files` с полной пагинацией и сверкой версии; для кандидатов empty_file (поддерживаемый канонический путь, added, previous_filename=None, нулевые additions/deletions/changes, точный empty blob SHA, size=None/0, исходный patch=None/пустая строка) — максимум один optional recursive tree read на fetched head_sha, cap 1 500 000 response bytes, unique exact path+SHA/type=blob/mode=100644\|100755/size None\|0 и nontruncated listing; без кандидатов ноль запросов, для доказанных кандидатов ноль добавленных blob-байт. Ошибка/cap/невалидный proof оставляют missing_patch/incomplete, отмена/дедлайн распространяются; отсутствие/усечение patch не считается нулевым diff. `DiffMap` различает complete/missing/truncated/malformed/binary/unsupported/metadata_only |
+| Дифф | `GET /pulls/{n}/files` с полной пагинацией и проверкой сохранности головы/базы до сохранения diff; для кандидатов empty_file (поддерживаемый канонический путь, added, previous_filename=None, нулевые additions/deletions/changes, точный empty blob SHA, size=None/0, исходный patch=None/пустая строка) — максимум один optional recursive tree read на fetched head_sha, cap 1 500 000 response bytes, unique exact path+SHA/type=blob/mode=100644\|100755/size None\|0 и nontruncated listing; без кандидатов ноль запросов, для доказанных кандидатов ноль добавленных blob-байт. Ошибка/cap/невалидный proof оставляют missing_patch/incomplete, отмена/дедлайн распространяются; отсутствие/усечение patch не считается нулевым diff. `DiffMap` различает complete/missing/truncated/malformed/binary/unsupported/metadata_only |
 | Файлы | Точный путь разрешается в дереве закреплённой ревизии, затем `GET /git/blobs/{sha}`; policy — base, RIGHT — head, LEFT — подтверждённый diff_old. Кэш 7 дней; текущая ветка не заменяет недоступный снимок |
 | Дерево | `GET /git/trees/{revision_sha}?recursive=1`; усечённый ответ не доказывает отсутствие пути. Требуется полный целевой обход; policy guard повторяется на каждом использовании |
 | Публикация (Р-5) | Один `POST /pulls/{n}/reviews` с сохранённым payload: `commit_id=head_sha`, `event`, `body`, `comments[{path,line,side:"RIGHT",start_line?,start_side?,body}]`. Диапазон должен целиком входить в один hunk одной стороны. В body — только supported general-only и находки сверх inline cap (настройка `Repository.max_comments`), без применяемой suggestion. Чистка устаревших и решённых тредов выполняется best-effort шагом publisher после атомарного перехода T14 через GraphQL `resolveReviewThread` по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) |
 | Check-run | `in_progress` при claim; `neutral` для succeeded/failed, `skipped` для исключённого scope, `cancelled` для отмены. `blocking`/`attention` определяются supported severity; `clean` допустим только при complete coverage. Partial/none без значимых findings и summary-only имеют `verdict=null` и явное сообщение о неполноте; API, review и check-run читают один сохранённый final result |
-| Сравнение дельты | `GET /repos/{owner}/{repo}/compare/{basehead}`: чтение дельты коммитов (список файлов возвращается только на первой странице ответа GitHub, не более 300 файлов; при `len(files) >= 300` дельта считается неполной `is_complete = False`) для сопоставления смещений строк и разрешения переименований (`compare_commits`, [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)); признак предка `is_ancestor` (`status ∈ {"ahead", "identical"}`) и полнота `is_complete` |
+| Сравнение дельты | `GET /repos/{owner}/{repo}/compare/{basehead}`: чтение дельты коммитов (список файлов возвращается только на первой странице ответа GitHub, не более 300 файлов; при `len(files) >= 300` или `len(commits) >= 250` дельта считается неполной `is_complete = False`) для сопоставления смещений строк и разрешения переименований (`compare_commits`, [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)); признак предка `is_ancestor` (`status ∈ {"ahead", "identical"}`) и полнота `is_complete` |
 | Треды и мутации GraphQL | `POST https://api.github.com/graphql`: пакетное чтение тредов PR (`GetPullRequestReviewThreads`, пагинация 100/стр) и мутация разрешения (`resolveReviewThread`, квота до 30 на Run с паузой ≥ 1.2 с, цель #321 по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)) |
 | Обратная связь | **после MVP** (`FeedbackSignal`): `pull_request_review_thread.resolved` — вебхук; реакции — poll `GET /pulls/comments/{id}/reactions` раз в час по комментариям бота за 7 дней |
 
@@ -1314,11 +1344,8 @@ run/head/op/payload. Recovery проверяет ожидаемого bot/app, P
 и точный payload с полной пагинацией; одного findings_hash или marker недостаточно.
 Новый run того же head получает новый ключ; повтор доставки не вызывает LLM снова.
 
-Перед каждым новым POST проверяются отмена, открытость PR/MR, актуальные head/diff
-и уже опубликованные операции. После POST сохраняются remote IDs и явное
-соответствие findings/comments, затем повторно читается актуальность. При гонке
-с push публикация остаётся связанной с исходным head, IDs не теряются, run становится
-cancelled; удаление/dismiss для сокрытия гонки не выполняется. HTTP находится вне
+Перед каждым новым POST проверяются отмена, открытость PR/MR и уже опубликованные операции; GitLab/Bitbucket дополнительно сверяют текущий head и diff. После POST сохраняются remote IDs и явное соответствие findings/comments. Правило закреплённого `commit_id`, нового GitHub head и переходов T14/T15 — [INC §6.4.3](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#643-снятие-противоречия-с-t15-разрешение-публикации-на-устаревшей-голове).
+Удаление/dismiss для сокрытия гонки не выполняется. HTTP находится вне
 транзакций, lease и фиксация результатов — в коротких транзакциях.
 
 Timeout или неоднозначный 5xx после возможной отправки означает `outcome_unknown`:
@@ -2169,20 +2196,17 @@ discovery имеет отдельную схему. Bitbucket-ошибки 422 �
 | Выход | ≤10 кандидатов v2 с evidence_refs, ≤10 inline по настройке; supported сверх inline cap — в body. На `main` (#170) тело review — summary, overview и supported general findings — укладывается в 4 000 Unicode-символов; исключение — сводка длиннее бюджета без general-only пунктов, тогда тело не усекается ([PIPELINE_SPEC §5.2](PIPELINE_SPEC.md#52-сбои-github)). Целевая модель #107 — компактная backend `summary_text` ≤4 000, general findings сверх сводки. До первого POST выбранного варианта все payload сверяются с лимитами закреплённого профиля VCS-адаптера (явные единица и предел); превышение → `failed/publication_payload_too_large`, без усечения findings. `suggestion_unrenderable` позволяет убрать лишь применяемый блок. v2/verifier schemas требуют отдельной реализации | Р-5, §5; CONTEXT_AND_VERIFICATION_SPEC §8.2, §9.3, §10.1 |
 | Пропускная способность v1 | 100 PR/день, 5 параллельных прогонов; масштаб — реплики `worker` | |
 | Надёжность | ни одна задача не теряется: persistent-сообщения + состояние в PG + реконсилер 5 мин; приёмник вебхуков — отдельный процесс (GitHub не ретраит) | |
-| Схлопывание | Перед каждым POST проверяются актуальные head/diff и отмена; при расхождении cancelled/superseded. После POST повторно проверяется актуальность, remote IDs сохраняются даже при cancelled. Окно GET–POST остаётся; нового head такое ревью не подтверждает | §8.4, TEST_PLAN §5 |
+| Схлопывание | При `synchronize` `queued` отменяется по T6, `running` до сохранения diff — по T11; закреплённый GitHub Run после сохранения diff или в `publishing` доводится до публикации и становится базой инкремента. Переход T15 и сохранение квитанций при push — [INC §6.4.3](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#643-снятие-противоречия-с-t15-разрешение-публикации-на-устаревшей-голове) | §6.3, §8.4, TEST_PLAN §5, [INC §6.4.3](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#643-снятие-противоречия-с-t15-разрешение-публикации-на-устаревшей-голове) |
 | Стоимость | fast $0.50, deep $3 на все попытки; до вызова учитываются usage + его оценка + резерв обязательных downstream стадий. Общие 4 вызова/попытку, 12/run, ≤3 попыток. Без завершённого verifier/final result публикация запрещена в обоих движках; verifier budget/deadline exhaustion → failed. Дневной бюджет Workspace → fast, затем skipped. Блоки RAG — обычный контекст prompt: входят в оценку входа до вызова, их токены и стоимость пишутся в `usage_events` своего run, дневной бюджет и лимит run считают их как прежде; доля RAG — `tokens_by_role` в `context.build` (роль `retrieved_excerpt`, #145) | Р-8, §5, PIPELINE_SPEC §4.5, [ADR 0001 §11](adr/0001-graph-rag-v1.md#11-учёт-расхода) |
 | Качество | Ориентиры Precision ≥85 %, Critical Recall ≥75 %, Hallucination <3 %. Raw review и final pipeline измеряются раздельно по независимой ручной разметке; verifier rejection/unsupported acceptance, insufficient/partial/failure и стоимость требуют собственного baseline | TEST_PLAN §3, §5 |
 | Безопасность | HMAC на вебхуках; секреты только через env из CI (роль 3); токены GitHub и LLM не попадают в сандбокс; сандбокс `--network=none`, non-root, read-only rootfs; PG/RabbitMQ/Redis — только внутренняя сеть | [TEST_PLAN 2.2](TEST_PLAN.md#22-webhook-и-триггер-р-9-р-10), [2.4](TEST_PLAN.md#24-sandboxengine-р-4-фаза-3), [2.6](TEST_PLAN.md#26-инфраструктура-и-безопасность) |
 | Данные клиента | блобы ≤ 7 дней в кэше; текст диффов и контексты завершённых прогонов — по умолчанию 90 дней с `finished_at` (`RUN_DATA_RETENTION_DAYS`, §10), тела ответов инструментов — до удаления Workspace, payload вебхуков — 30 дней после завершения квитанции; индекс RAG — производные метаданные кода без текста и сигнатур (ключ `repository_id`), 30 дней с `last_used_at` (чтение при ревью и постановка full продлевают TTL, incremental — нет; запись не чаще раза в час); после `installation_repositories.removed`, `installation.deleted` и выключения тумблера сразу нечитаем, физически удаляется сборкой мусора, цель — в пределах часа; архив дерева при индексации разбирается в памяти и не хранится сверх задачи; ни один прогон не логирует содержимое файлов в stdout | §10, [ADR 0001 §4](adr/0001-graph-rag-v1.md#4-хранение-очистка-и-изоляция) |
 | Наблюдаемость | структурированные логи (JSON) с `run_id` во всех контейнерах; метрики: глубина очередей, длительность по этапам, `X-RateLimit-Remaining`, стоимость; self-hosted стек — отдельная задача | |
 
-**Риск схлопывания.** Реализованная в #52 проверка head перед POST сохраняется;
-целевой #107 добавляет идентичность diff и проверку актуальности после POST (§8.4).
+**Риск схлопывания.** Проверка head отменяет Run в очереди `queued` (T6) и `running` до сохранения diff (T11); после сохранения diff доведение до публикации фиксирует базу инкремента (SD §6.3, [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6.4).
+Целевой #107 добавляет идентичность закреплённого diff и восстановление публикации по сохранённому payload (§8.4).
 GitHub не предоставляет атомарного сравнения head с созданием review: в окне GET–POST
-может произойти push. Поэтому post-check не удаляет и не dismiss-ит публикацию:
-он сохраняет remote IDs и отмечает run cancelled при устаревании, не объявляя
-новый head проверенным. Историческое решение 05.10.2026 не делать post-GET заменено
-этим правилом; запрет компенсирующего удаления/редактирования сохраняется.
+может произойти push. Сохранение remote IDs и последствия гонки GET–POST для T14/T15 — [INC §6.4.3](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#643-снятие-противоречия-с-t15-разрешение-публикации-на-устаревшей-голове). Запрет компенсирующего удаления/редактирования сохраняется.
 Закрытие устаревших и исправленных замечаний через GraphQL `resolveReviewThread` по
 [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) (Ч.1) не нарушает
 этот запрет: тело комментариев и квитанции остаются неизменными, мутация меняет только
