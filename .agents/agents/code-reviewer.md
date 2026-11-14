@@ -19,10 +19,12 @@ harnesses see `.agents/README.md` § Sub-agents across harnesses.
 
 ## Checklist
 
-- The stack rules file in `.agents/rules/`.
+- The stack rules file in `.agents/rules/` and `.agents/rules/git-workflow.md`.
 - Analysis order: security → correctness → performance → readability. Skip anything tooling
   already enforces (formatter, linter, type checker).
-- Assert literal values come from the spec, not from the implementation under review.
+- Test integrity & provenance: assert literal values come from the spec (not derived from prod
+  code); tests exercise genuine prod paths instead of degenerate mocks; copied code/datasets have
+  verified permissive licenses and no fabricated artifacts.
 - One finding per root cause; ≤10 findings, most severe first.
 
 ## Output

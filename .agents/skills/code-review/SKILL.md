@@ -55,7 +55,7 @@ For a pull request the spec is the issues its `Refs` lines name, with the criter
 
 ### 3. Identify the standards sources
 
-The stack rules file in `.agents/rules/` and `AGENTS.md`, plus anything else the repo documents, such as `CONTRIBUTING.md`. For a pull request, read them as of the base SHA it records: `git show <base-sha>:<path>`. Never `origin/<base-ref>`: it moves, and an older pull request would be held to rules written after it.
+The stack rules file in `.agents/rules/` and `AGENTS.md`, plus anything else the repo documents, such as `CONTRIBUTING.md` and `.agents/rules/git-workflow.md` (including PR hygiene, open PR overlap, and provenance rules). For a pull request, read them as of the base SHA it records: `git show <base-sha>:<path>`. Never `origin/<base-ref>`: it moves, and an older pull request would be held to rules written after it.
 
 On top of whatever the repo documents, the Standards axis always carries the **smell baseline** below — a fixed set of Fowler code smells (_Refactoring_, ch.3) that applies even when a repo documents nothing. Two rules bind it:
 
@@ -77,7 +77,7 @@ Each smell reads _what it is_ → _how to fix_; match it against the diff:
 - **Middle Man** — a class or function that mostly just delegates onward. → cut it, call the real target direct.
 - **Refused Bequest** — a subclass that ignores or overrides most of what it inherits. → drop the inheritance, use composition.
 - **Complex Logic** — excessive cyclomatic complexity. → break into smaller functions; use guard clauses; name the conditions.
-- **Missing Test Coverage** — new/modified logic without corresponding test updates. → add or update unit tests, cover edge and failure paths.
+- **Missing or Degenerate Test Coverage** — new/modified logic without tests exercising genuine production code paths, or tests that mock out the unit under test / compute expected values tautologically from prod helpers instead of spec literals, or skip required live/browser verification. → test through public seams against real prod code with spec-derived literals.
 
 ### 4. Spawn both sub-agents in parallel
 
