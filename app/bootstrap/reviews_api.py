@@ -8,6 +8,7 @@ from contextlib import AsyncExitStack, asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from functools import partial
 from typing import Annotated, cast
+from uuid import UUID
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -156,7 +157,11 @@ from app.modules.reviews.infrastructure.webhook_run_targets import (
     SqlAlchemyRunTriggerUnitOfWork,
 )
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
+from app.modules.workspaces.application.delete_workspace import DeleteWorkspace
 from app.modules.workspaces.application.link_github_installations import LinkGitHubInstallations
+from app.modules.workspaces.infrastructure.delete_workspace_store import (
+    SqlAlchemyDeleteWorkspaceUnitOfWork,
+)
 from app.modules.workspaces.infrastructure.github_installation_links import (
     SqlAlchemyGitHubInstallationLinkUnitOfWork,
 )
@@ -541,6 +546,33 @@ def get_repository_badge(request: Request) -> GetRepositoryBadge:
         return GetRepositoryBadge(_NoRepositoryBadgeQueries())
     session_factory = cast(ReviewsApiResources, resources).session_factory
     return GetRepositoryBadge(SqlAlchemyRepositoryBadgeQueries(session_factory))
+
+
+class _UnconfiguredPaymentGateway:
+    """Fail-loud stub until full Stripe PaymentGateway integration (#372, ADR 0003 §5) lands."""
+
+    async def cancel_subscription(
+        self,
+        workspace_id: UUID,
+        *,
+        idempotency_key: str,
+        at_period_end: bool = False,
+    ) -> None:
+        raise NotImplementedError(
+            "Stripe subscription cancellation is not configured yet (deferred to #372)"
+        )
+
+
+def get_delete_workspace(
+    request: Request,
+) -> DeleteWorkspace:
+    resources = getattr(request.app.state, "reviews_api_resources", None)
+    if not isinstance(resources, ReviewsApiResources):
+        raise HTTPException(status_code=503, detail="Database is not configured")
+    return DeleteWorkspace(
+        uow_factory=partial(SqlAlchemyDeleteWorkspaceUnitOfWork, resources.session_factory),
+        payment_gateway=_UnconfiguredPaymentGateway(),
+    )
 
 
 def get_run_publisher(request: Request) -> RunMessagePublisher | None:
