@@ -26,6 +26,7 @@ from app.modules.reviews.application.get_metrics_summary import (
 from app.modules.reviews.infrastructure.models import CodeChange, Finding, Run
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.modules.reviews.infrastructure.saved_review_results import load_review_results
+from app.modules.workspaces.domain.status import WorkspaceStatus
 from app.modules.workspaces.infrastructure.models import GitHubUserWorkspaceAccess, Workspace
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
@@ -290,7 +291,10 @@ class SqlAlchemyMetricsSummary:
                         UsageEvent.created_at >= today_start,
                     ),
                 )
-                .where(Workspace.id.in_(self._scope.workspace_ids))
+                .where(
+                    Workspace.id.in_(self._scope.workspace_ids),
+                    Workspace.status != WorkspaceStatus.DELETED,
+                )
                 .group_by(Workspace.id, Workspace.name, Workspace.daily_budget_usd)
                 .order_by(Workspace.name)
             )
