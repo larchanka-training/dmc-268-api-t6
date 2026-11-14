@@ -24,13 +24,9 @@ from app.modules.reviews.application.review_output import (
 from app.modules.reviews.application.run_failures import classify_failure
 from app.modules.reviews.application.store_review_output import NoModelAnswer, StoreReviewOutput
 from tests.review_publication_fakes import (
-    PublicationQueueFake as Queue,
-)
-from tests.review_publication_fakes import (
-    PublicationRepositoryFake as Repository,
-)
-from tests.review_publication_fakes import (
-    PublicationUowFake as Uow,
+    PublicationQueueFake,
+    PublicationRepositoryFake,
+    PublicationUowFake,
 )
 from tests.test_clean_without_text_result import answer
 from tests.test_coverage_none_classification import project, unsupported_path
@@ -39,15 +35,22 @@ _RUN = UUID(int=213)
 _TOO_LARGE = DiffSnapshot("large.txt", None, "d" * 40, omission_reason="too_large")
 
 
-def _store(repository: Repository, queue: Queue, committed: list[str]) -> StoreReviewOutput:
+def _store(
+    repository: PublicationRepositoryFake,
+    queue: PublicationQueueFake,
+    committed: list[str],
+) -> StoreReviewOutput:
     return StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: PublicationUowFake(repository, committed),
+        queue,
+        worker_id="worker",
+        run_url=lambda _: None,
     )
 
 
-def _technical(kind: str) -> Repository:
+def _technical(kind: str) -> PublicationRepositoryFake:
     files = [_TOO_LARGE] if kind == "too_large" else [unsupported_path()]
-    return Repository(files, project(files, snapshot_path=True))
+    return PublicationRepositoryFake(files, project(files, snapshot_path=True))
 
 
 @pytest.mark.parametrize(
@@ -69,7 +72,7 @@ def _technical(kind: str) -> Repository:
 def test_a_backend_result_is_stored_with_the_backend_summary_and_no_model_answer(
     kind: str, problem: str
 ) -> None:
-    repository, queue = _technical(kind), Queue()
+    repository, queue = _technical(kind), PublicationQueueFake()
     committed: list[str] = []
 
     assert asyncio.run(_store(repository, queue, committed).execute(_RUN, NoModelAnswer())) is True
@@ -92,7 +95,7 @@ def test_a_backend_result_is_stored_with_the_backend_summary_and_no_model_answer
 
 
 def test_a_backend_result_is_a_comment_even_where_the_repository_requests_changes() -> None:
-    repository, queue = _technical("unsupported_path"), Queue()
+    repository, queue = _technical("unsupported_path"), PublicationQueueFake()
     assert repository.review_event == "REQUEST_CHANGES"
 
     assert asyncio.run(_store(repository, queue, []).execute(_RUN, NoModelAnswer())) is True
@@ -103,7 +106,7 @@ def test_a_backend_result_is_a_comment_even_where_the_repository_requests_change
 
 
 def test_a_second_backend_result_is_refused_by_the_publishing_guard() -> None:
-    repository, queue = _technical("too_large"), Queue()
+    repository, queue = _technical("too_large"), PublicationQueueFake()
     store = _store(repository, queue, [])
     assert asyncio.run(store.execute(_RUN, NoModelAnswer())) is True
     response, body = repository.response.copy(), repository.body
@@ -118,7 +121,8 @@ def test_a_second_backend_result_is_refused_by_the_publishing_guard() -> None:
 def test_a_model_answer_is_still_given_to_the_repository_as_it_was() -> None:
     repository = _technical("too_large")
 
-    assert asyncio.run(_store(repository, Queue(), []).execute(_RUN, answer())) is True
+    queue = PublicationQueueFake()
+    assert asyncio.run(_store(repository, queue, []).execute(_RUN, answer())) is True
 
     assert repository.answers == [answer()]
     assert repository.response["coverage"]["status"] == "none"
@@ -132,7 +136,7 @@ def test_an_empty_model_answer_is_invalid_and_never_a_backend_result(
 ) -> None:
     # Only the marker type means "no model call". An empty answer of the model is an invalid
     # answer (llm_invalid_output), not published as a review with coverage none.
-    repository, queue = _technical("too_large"), Queue()
+    repository, queue = _technical("too_large"), PublicationQueueFake()
 
     with pytest.raises(InvalidReviewOutput, match="invalid review output") as raised:
         asyncio.run(_store(repository, queue, []).execute(_RUN, empty))
@@ -143,13 +147,46 @@ def test_an_empty_model_answer_is_invalid_and_never_a_backend_result(
     assert queue.pointers == []
 
 
-def test_the_inline_publisher_refuses_the_marker_as_an_invalid_answer() -> None:
-    # Not composed with the context stage in production: it never gets the marker, and a
-    # marker that reached it would not be published as an empty review.
-    publisher = PublishReviewOutput(cast(Any, None), cast(Any, None))
+def test_the_inline_publisher_accepts_and_publishes_the_marker() -> None:
+    class _FakeProvider:
+        def __init__(self) -> None:
+            self.published: list[tuple[str, str, Any, str]] = []
 
-    with pytest.raises(InvalidReviewOutput, match="invalid review output"):
-        asyncio.run(publisher.execute(_RUN, NoModelAnswer()))
+        async def publish_review(
+            self,
+            *,
+            commit_sha: str,
+            body: str,
+            findings: tuple[Any, ...],
+            idempotency_key: str,
+        ) -> None:
+            self.published.append((commit_sha, body, findings, idempotency_key))
+
+    files = [
+        DiffSnapshot(
+            "src/file.py",
+            "@@ -0,0 +1,2 @@\n+a = 1",
+            "a" * 40,
+            status="added",
+            additions=1,
+            changes=1,
+        )
+    ]
+    repository = PublicationRepositoryFake(
+        files, project(files, snapshot_path=True), review_event="REQUEST_CHANGES"
+    )
+    provider = _FakeProvider()
+    publisher = PublishReviewOutput(
+        lambda: PublicationUowFake(repository), cast(Any, provider)
+    )
+
+    result = asyncio.run(publisher.execute(_RUN, NoModelAnswer(incomplete_paths=("src/file.py",))))
+
+    assert result is True
+    assert repository.answers == [None]
+    assert len(provider.published) == 1
+    assert "src/file.py" in provider.published[0][1]
+    assert provider.published[0][2] == ()
 
 
 def test_the_marker_is_an_empty_mapping() -> None:
@@ -173,10 +210,10 @@ def test_no_model_answer_with_incomplete_paths_publishes_partial_bounded_list() 
         )
         for idx in range(1, 8)
     ]
-    repository = Repository(
+    repository = PublicationRepositoryFake(
         files, project(files, snapshot_path=True), review_event="REQUEST_CHANGES"
     )
-    queue = Queue()
+    queue = PublicationQueueFake()
     committed: list[str] = []
     omitted = tuple(item.filename for item in files)
 

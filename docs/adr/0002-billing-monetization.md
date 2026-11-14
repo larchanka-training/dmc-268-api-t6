@@ -179,7 +179,7 @@ deep: 5 цен единицы).
 | Итог run | Что списано |
 |---|---|
 | `succeeded` с хотя бы одним вызовом LLM | ровно `P` |
-| любой `failed`, с любым `error_code` (ошибка LLM, таймаут, баг, verifier, `github_forbidden`, `pr_base_changed`, `llm_context_overflow` и другие) | 0: каждое списание run сторнируется строкой `adjustment` в тот же грант (§5.1) |
+| любой `failed`, с любым `error_code` (ошибка LLM, таймаут, баг, verifier, `github_forbidden`, `pr_base_changed`, `llm_context_overflow` на `conventions` и другие; на стадии ревью `llm_context_overflow` деградирует в partial `succeeded`, Refs #461) | 0: каждое списание run сторнируется строкой `adjustment` в тот же грант (§5.1) |
 | `cancelled` (новый `head_sha`, PR закрыт, `POST /api/runs/{id}/cancel`) | уже списанное по §3.3, без доплаты; после деградации deep → fast не больше нового `P` |
 | `skipped` без вызовов LLM (гейт 1, гейт 2, `budget_paused`) | 0 |
 | `skipped` после вызовов LLM на прошлой попытке run | уже списанное, без доплаты, как `cancelled` |

@@ -96,8 +96,8 @@ class NoModelAnswer(Mapping[str, object]):
     partial, CVS §2.2), a summary-only stop (#365), or a review context overflow (Refs #461)
     is finished without the review model. It is stored as any result, but nothing is parsed,
     no ``llm.review_output`` is written, and the post-processor's backend summary is the only
-    one. Optional ``incomplete_paths`` mark unreviewed files in finalized coverage. Empty,
-    so the inline ``PublishReviewOutput`` refuses it as an invalid answer.
+    one. Optional ``incomplete_paths`` mark unreviewed files in finalized coverage. Empty
+    as a mapping so downstream parsers treat it as an explicit marker rather than an answer.
     """
 
     def __init__(self, *, incomplete_paths: tuple[str, ...] = ()) -> None:

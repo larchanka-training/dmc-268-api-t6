@@ -393,11 +393,14 @@ class ExecuteReviewRun:
         except (LlmCallFailed, RunFailure) as exc:
             if not _is_review_context_overflow(exc):
                 raise
+            error_code = getattr(exc, "error_code", "llm_context_overflow")
             _LOGGER.warning(
-                "Review context overflow run_id=%s; publishing incomplete coverage",
+                "Review context overflow run_id=%s code=%s; publishing incomplete coverage",
                 run_id,
+                error_code,
+                exc_info=exc,
             )
-            incomplete = tuple(sorted({file.path for file in changed_files}))
+            incomplete = incomplete_review_paths(changed_files, ())
             return await self._publisher.execute(run_id, NoModelAnswer(incomplete_paths=incomplete))
         reviewer_manifest: CallManifest | None = None
         model_output: Mapping[str, object] | str | bytes

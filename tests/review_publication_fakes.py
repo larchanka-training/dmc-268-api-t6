@@ -33,6 +33,7 @@ from app.modules.reviews.application.saved_review_result import (
     SavedReviewResult,
     read_saved_review_result,
 )
+from app.modules.reviews.application.store_review_output import PublishingGuard
 
 HEAD_SHA = "a" * 40
 BASE_SHA = "b" * 40
@@ -74,9 +75,7 @@ class PublicationRepositoryFake:
             coverage=self.coverage,
         )
 
-    async def lock_for_publishing(self, run_id: UUID) -> Any:
-        from app.modules.reviews.application.store_review_output import PublishingGuard
-
+    async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
         return PublishingGuard(self.state, "worker", False, HEAD_SHA, True, self.review_event)
 
     async def store_review_output(
@@ -107,7 +106,7 @@ class PublicationRepositoryFake:
         self.findings_hash = str(postprocess_response.get("findings_hash", ""))
 
     async def mark_review_published(self, run_id: UUID) -> None:
-        raise AssertionError("finalization only queues publication")
+        self.state = "succeeded"
 
     async def publish_context(self, run_id: UUID) -> PublishContext | None:
         return PublishContext(

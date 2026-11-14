@@ -417,15 +417,6 @@ def _guard_snapshot_budget(context: ReviewContext, counter: TokenCounter, max_to
                 actual=mandatory_tokens,
             ) from exc
         raise RunFailure(LlmErrorCode.CONTEXT_OVERFLOW.value, str(exc)) from exc
-    mandatory_tokens = _mandatory_policy_tokens(context, counter)
-    if mandatory_tokens > max_tokens:
-        raise PolicyError(
-            PolicyErrorCode.PROMPT_BUDGET_EXCEEDED,
-            f"Review mandatory policy and defaults are {mandatory_tokens} tokens, "
-            f"limit is {max_tokens}",
-            limit=max_tokens,
-            actual=mandatory_tokens,
-        )
 
 
 def _messages(prompt: ReviewPrompt) -> tuple[ChatMessage, ...]:

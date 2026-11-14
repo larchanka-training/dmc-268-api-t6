@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import httpx
@@ -156,19 +156,46 @@ class _PromptSource:
         )
 
 
+@dataclass
+class StoreBundle:
+    repo: PublicationRepositoryFake
+    queue: PublicationQueueFake
+    published_raw: list[Any]
+    review_gateway: CapturingReviewGateway
+    check_runs: CapturingCheckRunGateway
+    store: StoreReviewOutput
+    run_publisher: PublishRunReview
+
+
+@dataclass
+class ExecutionResult:
+    repo: PublicationRepositoryFake
+    queue: PublicationQueueFake
+    published_raw: list[Any]
+    review_gateway: CapturingReviewGateway
+    check_runs: CapturingCheckRunGateway
+    provider: ScriptedProvider
+    outcome: bool
+
+    def __iter__(self) -> Any:
+        return iter(
+            (
+                self.repo,
+                self.queue,
+                self.published_raw,
+                self.review_gateway,
+                self.check_runs,
+                self.provider,
+                self.outcome,
+            )
+        )
+
+
 def _make_store_bundle(
     snapshots: list[DiffSnapshot],
     *,
     snapshot_path: bool,
-) -> tuple[
-    PublicationRepositoryFake,
-    PublicationQueueFake,
-    list[Any],
-    CapturingReviewGateway,
-    CapturingCheckRunGateway,
-    StoreReviewOutput,
-    PublishRunReview,
-]:
+) -> StoreBundle:
     coverage = project_run_coverage(
         snapshots,
         diff_map_from_snapshots(
@@ -200,7 +227,7 @@ def _make_store_bundle(
         trace=RecordingRunTrace(),
         now=lambda: _NOW,
     )
-    return repo, queue, [], review_gateway, check_runs, store, run_publisher
+    return StoreBundle(repo, queue, [], review_gateway, check_runs, store, run_publisher)
 
 
 class _WindowVerifier(AbstainingVerifier):
@@ -222,27 +249,17 @@ def _execute_and_publish(
     pr_body: str | None = None,
     primary_window: int = 100_000,
     verifier_window: int | None = None,
-    bundle: tuple[
-        PublicationRepositoryFake,
-        PublicationQueueFake,
-        list[Any],
-        CapturingReviewGateway,
-        CapturingCheckRunGateway,
-        StoreReviewOutput,
-        PublishRunReview,
-    ]
-    | None = None,
-) -> tuple[
-    PublicationRepositoryFake,
-    PublicationQueueFake,
-    list[Any],
-    CapturingReviewGateway,
-    CapturingCheckRunGateway,
-    ScriptedProvider,
-    bool,
-]:
+    bundle: StoreBundle | None = None,
+) -> ExecutionResult:
+    b = bundle or _make_store_bundle(snapshots, snapshot_path=snapshot is not None)
     repo, queue, published_raw, review_gateway, check_runs, store, run_publisher = (
-        bundle or _make_store_bundle(snapshots, snapshot_path=snapshot is not None)
+        b.repo,
+        b.queue,
+        b.published_raw,
+        b.review_gateway,
+        b.check_runs,
+        b.store,
+        b.run_publisher,
     )
     provider = ScriptedProvider(list(replies))
     settings = _settings(primary_window=primary_window, verifier_window=verifier_window)
@@ -268,6 +285,16 @@ def _execute_and_publish(
         AbstainingVerifier() if verifier_max is None else _WindowVerifier(verifier_max)
     )
 
+    class _SpyChangeSummary:
+        def __init__(self) -> None:
+            self.calls: list[Any] = []
+
+        async def summarize_change(self, *, request: Any) -> Any:
+            self.calls.append(request)
+            return ()
+
+    spy_change_summary = _SpyChangeSummary()
+
     async def _exercise() -> bool:
         async with httpx.AsyncClient(transport=httpx.MockTransport(provider.handle)) as client:
             model = GatewayReviewModel(
@@ -282,6 +309,7 @@ def _execute_and_publish(
                 model,
                 _CapturingPublisher(),
                 reflection_pass=reflection,
+                change_summary=cast(Any, spy_change_summary),
             )
             stored = await pipeline.execute(_RUN_ID)
             for pointer in queue.pointers:
@@ -290,7 +318,16 @@ def _execute_and_publish(
 
     outcome = asyncio.run(_exercise())
     assert verifier.prompts == []
-    return repo, queue, published_raw, review_gateway, check_runs, provider, outcome
+    assert spy_change_summary.calls == []
+    return ExecutionResult(
+        repo,
+        queue,
+        published_raw,
+        review_gateway,
+        check_runs,
+        provider,
+        outcome,
+    )
 
 
 @pytest.mark.parametrize(
@@ -451,7 +488,11 @@ def test_execute_review_policy_budget_exceeded_never_publishes_review(
         )
     ]
     bundle = _make_store_bundle(snapshots, snapshot_path=True)
-    repo, queue, published_raw, reviews, check_runs, _, _ = bundle
+    repo = bundle.repo
+    queue = bundle.queue
+    published_raw = bundle.published_raw
+    reviews = bundle.review_gateway
+    check_runs = bundle.check_runs
     snapshot = _review_snapshot(
         max_input_tokens=max_input_tokens,
         max_policy_tokens=max_policy_tokens,
@@ -515,7 +556,54 @@ def test_execute_review_non_overflow_and_conventions_overflow_fail_without_publi
     )
     pipeline = ExecuteReviewRun(_Processor(), source, source, _Publisher())
 
-    with pytest.raises((LlmCallFailed, RunFailure)):
+    expected_exc = prepare_exc if prepare_exc is not None else draft_exc
+    assert expected_exc is not None
+    with pytest.raises((LlmCallFailed, RunFailure)) as exc_info:
         asyncio.run(pipeline.execute(_RUN_ID))
 
+    actual_exc = exc_info.value
+    expected_code = getattr(expected_exc, "error_code", None)
+    actual_code = getattr(actual_exc, "error_code", None)
+    assert actual_code == expected_code
     assert published_raw == []
+
+
+def test_execute_review_legacy_overflow_with_reviewable_files_publishes_partial_coverage() -> None:
+    snapshots = [
+        DiffSnapshot(
+            "app/main.py",
+            "@@ -0,0 +1,2 @@\n+x = 1\n+y = 2",
+            HEAD_SHA,
+            status="added",
+            additions=2,
+            changes=2,
+            review_patch="@@ -0,0 +1,2 @@\n+x = 1\n+y = 2",
+        )
+    ]
+    res = _execute_and_publish(
+        snapshots=snapshots,
+        changed_files=(
+            ChangedFile(
+                "app/main.py",
+                "added",
+                (DiffLine(1, "added", "x = 1"), DiffLine(2, "added", "y = 2")),
+            ),
+        ),
+        omitted_files=(),
+        snapshot=None,
+        replies=[httpx.Response(413, text="Request Entity Too Large")],
+    )
+
+    assert res.outcome is True
+    assert len(res.published_raw) == 1 and isinstance(res.published_raw[0], NoModelAnswer)
+    assert res.repo.state == "succeeded"
+    assert res.repo.error_code is None
+    assert res.repo.response["verdict"] is None
+    assert res.repo.response["coverage"]["status"] == "partial"
+    assert res.repo.response["coverage"]["reviewed_files"] == 0
+    assert res.repo.response["coverage"]["reason_counts"] == {"review_input_incomplete": 1}
+    assert [pointer.review_event for pointer in res.queue.pointers] == ["COMMENT"]
+    assert len(res.review_gateway.submissions) == 1
+    assert "app/main.py" in res.review_gateway.submissions[0].body
+    assert res.check_runs.views[0].conclusion == "neutral"
+    assert res.check_runs.views[0].title == "AI-ревью: проверка неполная"
