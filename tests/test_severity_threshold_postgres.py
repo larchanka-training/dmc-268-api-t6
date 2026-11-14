@@ -20,6 +20,7 @@ from app.modules.reviews.infrastructure.review_output_unit_of_work import (
 )
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
 from tests.portal_postgres import HEAD, PR_NEW, REPO_A, RUN_ATTEMPTED, Env, portal_schema
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 _PATH = "app/charge.py"
 # New-version lines 10–13 lie inside the hunk, so every finding below is anchorable inline.
@@ -135,6 +136,7 @@ def test_findings_below_the_repository_threshold_are_stored_and_counted_on_the_c
                 queue,
                 worker_id="worker",
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             ).execute(RUN_ATTEMPTED, _answer())
             assert stored is True
             async with SqlAlchemyReviewOutputUnitOfWork(factory) as uow:

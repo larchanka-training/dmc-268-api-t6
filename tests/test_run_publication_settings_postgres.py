@@ -36,6 +36,7 @@ from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRun
 from tests.portal_postgres import NOW, PR_NEW, REPO_A, RUN_ATTEMPTED, Env, portal_schema
 from tests.test_prepare_policy_snapshot import Source
 from tests.test_severity_threshold_postgres import RecordingQueue
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 _PATH = "app/charge.py"
 _PATCH = "@@ -10,4 +10,5 @@\n context\n+added\n context\n context\n context"
@@ -287,6 +288,7 @@ def test_created_run_and_retry_keep_pins_but_rerun_uses_current_pair(env: Env) -
                 queue,
                 worker_id="worker",
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             ).execute(run_id, _answer())
             assert len(queue.pointers) == 1 and queue.pointers[0].run_id == run_id
             async with factory() as session:

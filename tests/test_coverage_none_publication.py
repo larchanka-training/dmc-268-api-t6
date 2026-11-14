@@ -39,6 +39,7 @@ from app.modules.reviews.application.store_review_output import (
 )
 from tests.test_clean_without_text_result import answer
 from tests.test_coverage_none_classification import project, unsupported_path
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 _RUN = UUID(int=213)
 _TOO_LARGE = DiffSnapshot("large.txt", None, "d" * 40, omission_reason="too_large")
@@ -108,6 +109,7 @@ class Repository:
 class Uow:
     reviews: Repository
     committed: list[str]
+    blob_cache: None = None
 
     async def __aenter__(self) -> Uow:
         return self
@@ -137,7 +139,11 @@ class Queue:
 
 def _store(repository: Repository, queue: Queue, committed: list[str]) -> StoreReviewOutput:
     return StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: Uow(repository, committed),
+        queue,
+        worker_id="worker",
+        run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
 
 
@@ -242,7 +248,7 @@ def test_an_empty_model_answer_is_invalid_and_never_a_backend_result(
 def test_the_inline_publisher_refuses_the_marker_as_an_invalid_answer() -> None:
     # Not composed with the context stage in production: it never gets the marker, and a
     # marker that reached it would not be published as an empty review.
-    publisher = PublishReviewOutput(cast(Any, None), cast(Any, None))
+    publisher = PublishReviewOutput(cast(Any, None), cast(Any, None), parser=NullSuggestionParser())
 
     with pytest.raises(InvalidReviewOutput, match="invalid review output"):
         asyncio.run(publisher.execute(_RUN, NoModelAnswer()))

@@ -40,6 +40,7 @@ from tests.verifier_pipeline_fakes import (
     FakeQueue,
     FakeRepository,
     FakeUnitOfWork,
+    NullSuggestionParser,
 )
 
 SIGNED = "**What changed** (автоописание, не замечание): "
@@ -108,6 +109,7 @@ def _pipeline(
         FakeQueue(),
         worker_id=WORKER_ID,
         run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
     pipeline = ExecuteReviewRun(
         processor or FakeProcessor(),

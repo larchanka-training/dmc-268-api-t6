@@ -24,6 +24,7 @@ from app.modules.reviews.application.run_coverage import RunCoverage
 from app.modules.reviews.application.store_review_output import PublishingGuard, StoreReviewOutput
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 from tests.test_run_coverage import code_snapshot, coverage, empty_snapshot
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 _RUN = UUID(int=213)
 
@@ -91,6 +92,7 @@ class Repository:
 class Uow:
     reviews: Repository
     committed: list[str]
+    blob_cache: None = None
 
     async def __aenter__(self) -> Uow:
         return self
@@ -136,7 +138,11 @@ def test_complete_empty_addition_result_and_body_agree_on_clean_after_commit() -
     committed: list[str] = []
     queue = Queue(committed)
     store = StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: Uow(repository, committed),
+        queue,
+        worker_id="worker",
+        run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
     assert asyncio.run(store.execute(_RUN, answer())) is True
 
@@ -161,6 +167,7 @@ def finalize(
                 queue,
                 worker_id="worker",
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             ).execute(_RUN, value)
         )
         is True
@@ -268,7 +275,11 @@ def test_repeated_finalization_does_not_replace_the_stored_result_or_publish_twi
     committed: list[str] = []
     queue = Queue(committed)
     store = StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: Uow(repository, committed),
+        queue,
+        worker_id="worker",
+        run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
     assert asyncio.run(store.execute(_RUN, answer())) is True
     response, body = repository.response.copy(), repository.body
@@ -288,6 +299,7 @@ def test_complete_public_summary_and_body_do_not_depend_on_raw_model_summary() -
                 Queue(committed),
                 worker_id="worker",
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             ).execute(_RUN, value)
         )
         return repository
@@ -369,6 +381,7 @@ def test_threshold_filtered_finding_and_raw_claims_do_not_survive_in_public_summ
             Queue(committed),
             worker_id="worker",
             run_url=lambda _: None,
+            parser=NullSuggestionParser(),
         ).execute(_RUN, value)
     )
     assert repository.response["summary"]["problem"] == "Подтверждённых замечаний нет."

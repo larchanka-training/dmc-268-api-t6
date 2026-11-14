@@ -73,6 +73,7 @@ from tests.policy_snapshot_fakes import (
     make_policy_document_present,
 )
 from tests.test_findings_post_processor import _added_file_diff_map
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 type Shape = tuple[str, tuple[tuple[str, str], ...], tuple[Shape, ...]]
 
@@ -432,6 +433,10 @@ class _UnitOfWork:
     async def commit(self) -> None:
         return None
 
+    @property
+    def blob_cache(self) -> None:
+        return None
+
     async def rollback(self) -> None:
         return None
 
@@ -747,7 +752,9 @@ def _publish_with_rules(
     pipeline = _pipeline(
         model=model,
         verifier=verifier,
-        publisher=PublishReviewOutput(lambda: _UnitOfWork(reviews), provider),
+        publisher=PublishReviewOutput(
+            lambda: _UnitOfWork(reviews), provider, parser=NullSuggestionParser()
+        ),
         rules_text=rules_text,
     )
     assert asyncio.run(pipeline.execute(RUN_ID)) is True

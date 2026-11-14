@@ -37,6 +37,7 @@ from app.modules.reviews.infrastructure.llm.models import GatewayReviewModel
 from tests.test_clean_without_text_result import Queue, Repository, Uow, answer
 from tests.test_execute_review import FakeVerifierModel, _make_test_snapshot, conventions
 from tests.test_gateway_review_model import RUN, Transport, _gateway
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 
 @pytest.mark.parametrize("fully_reviewable", [False, True])
@@ -104,7 +105,11 @@ def test_restore_bounded_classification_then_actual_fit_reduces_only_full_allowe
     committed: list[str] = []
     queue = Queue(committed)
     store = StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: Uow(repository, committed),
+        queue,
+        worker_id="worker",
+        run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
     changed, omitted = review_files_from_snapshots(snapshots)
 
@@ -206,6 +211,7 @@ def test_unknown_membership_withholds_counts_without_inventing_reviewed_files(
         Queue(committed),
         worker_id="worker",
         run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
     assert asyncio.run(
         store.execute(
