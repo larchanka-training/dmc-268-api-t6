@@ -24,7 +24,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.common.infrastructure.db.base import Base
-from app.common.infrastructure.db.columns import timestamp_column
+from app.common.infrastructure.db.columns import pg_enum, timestamp_column
+from app.modules.workspaces.domain.status import WorkspaceStatus
 
 
 class Workspace(Base):
@@ -33,6 +34,13 @@ class Workspace(Base):
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     daily_budget_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    status: Mapped[WorkspaceStatus] = mapped_column(
+        pg_enum(WorkspaceStatus, "workspace_status"),
+        nullable=False,
+        server_default=WorkspaceStatus.ACTIVE.value,
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_by: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
     created_at: Mapped[datetime] = timestamp_column()
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()

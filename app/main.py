@@ -29,6 +29,7 @@ from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import (
     ReviewsApiResources,
     get_cancel_run,
+    get_delete_workspace,
     get_file_blob_cache,
     get_github_webhook_receipt_uow_factory,
     get_pull_requests,
@@ -191,6 +192,13 @@ from app.modules.reviews.application.run_events import (
     utc_rfc3339,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
+from app.modules.workspaces.api.dtos import DeleteWorkspaceRequest
+from app.modules.workspaces.application.delete_workspace import (
+    DeleteWorkspace,
+    NotWorkspaceOwner,
+    WorkspaceNameMismatch,
+    WorkspaceNotFound,
+)
 
 api_router = APIRouter(
     prefix="/api", dependencies=[Depends(get_auth_scope)], route_class=StrictJsonRoute
@@ -1286,6 +1294,47 @@ async def list_repository_pulls(
         items=[to_pull_request_summary_dto(item) for item in page.items],
         next_cursor=page.next_cursor,
     )
+
+
+@api_router.delete(
+    "/workspaces/{workspace_id}",
+    status_code=204,
+    summary="Delete workspace",
+    description=(
+        "Permanently delete a workspace, cancel subscriptions, and forfeit balance (Owner only)."
+    ),
+    responses={
+        204: {"description": "Workspace deleted successfully"},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden - only workspace owner can delete workspace"},
+        404: {"description": "Workspace not found"},
+        422: {"description": "Validation error or workspace name mismatch"},
+        503: {"description": "Authentication is not configured"},
+    },
+)
+async def delete_workspace(
+    workspace_id: UUID,
+    payload: DeleteWorkspaceRequest,
+    scope: Annotated[AuthScope, Depends(get_auth_scope)],
+    use_case: Annotated[DeleteWorkspace, Depends(get_delete_workspace)],
+) -> Response:
+    if workspace_id not in scope.workspace_ids:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    try:
+        await use_case.execute(
+            workspace_id=workspace_id,
+            confirmation_name=payload.confirmation_name,
+            user_id=scope.user_id,
+        )
+    except WorkspaceNotFound:
+        raise HTTPException(status_code=404, detail="workspace not found") from None
+    except NotWorkspaceOwner:
+        raise HTTPException(
+            status_code=403, detail="only workspace owner can delete workspace"
+        ) from None
+    except WorkspaceNameMismatch as err:
+        raise HTTPException(status_code=422, detail="workspace_name_mismatch") from err
+    return Response(status_code=204)
 
 
 app.include_router(api_router)

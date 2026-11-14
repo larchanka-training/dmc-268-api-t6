@@ -472,6 +472,39 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "503":
           description: Authentication is not configured.
+  /api/workspaces/{workspace_id}:
+    parameters:
+      - name: workspace_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      operationId: deleteWorkspace
+      tags: [workspaces]
+      summary: Delete workspace
+      description: Permanently delete a workspace, cancel subscriptions, and forfeit balance (Owner only).
+      x-service: portal-api
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteWorkspaceRequest"
+      responses:
+        "204":
+          description: Workspace deleted successfully.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Forbidden - only workspace owner can delete workspace.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Authentication is not configured.
   /api/workspaces/{workspace_id}/bitbucket/discovery:
     parameters:
       - name: workspace_id
@@ -2770,3 +2803,13 @@ components:
         paused:
           type: boolean
       additionalProperties: false
+    DeleteWorkspaceRequest:
+      type: object
+      required: [confirmation_name]
+      additionalProperties: false
+      properties:
+        confirmation_name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Exact name of the workspace to confirm permanent deletion.

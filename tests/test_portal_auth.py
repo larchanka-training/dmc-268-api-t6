@@ -76,6 +76,7 @@ def _portal_routes() -> list[tuple[str, str]]:
         path = (
             route.path.replace("{run_id}", dummy_uuid)
             .replace("{repo_id}", dummy_uuid)
+            .replace("{workspace_id}", dummy_uuid)
             .replace("{index}", "0")
         )
         assert route.methods, (
