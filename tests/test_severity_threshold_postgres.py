@@ -134,6 +134,7 @@ def test_findings_below_the_repository_threshold_are_stored_and_counted_on_the_c
                 lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
                 queue,
                 worker_id="worker",
+                expected_attempt=1,
                 run_url=lambda _: None,
             ).execute(RUN_ATTEMPTED, _answer())
             assert stored is True

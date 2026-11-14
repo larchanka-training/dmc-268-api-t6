@@ -70,10 +70,11 @@ from app.modules.reviews.application.vcs_diff import (
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
 from app.worker import WorkerSettings
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
+from tests.run_coverage_fakes import empty_snapshot
 from tests.test_prepare_policy_snapshot import Store, Uow
 from tests.test_rag_context import BlobCacheUow, BlobStore, Graph, SharedBlobCache, _uses
 from tests.test_rag_readiness import FakeReviewIndexUow, StubReviewIndexAccess
-from tests.test_run_coverage import empty_snapshot
 
 _RUN = UUID("00000000-0000-0000-0000-000000000002")
 _HEAD = "a" * 40
@@ -1025,7 +1026,7 @@ def test_review_prompt_gets_neither_the_content_nor_the_name_of_an_ignored_file(
             seen.append(context)
             return {}
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, model_output: object) -> bool:
             return True
 
@@ -1147,7 +1148,7 @@ def test_prepare_snapshot_and_stage_begin_raise_on_unknown_profile_version() -> 
     from unittest.mock import AsyncMock
 
     from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
-    from tests.test_execute_review import _make_test_snapshot
+    from tests.execute_review_fakes import _make_test_snapshot
     from tests.test_prepare_policy_snapshot import _pins
 
     # 1. PreparePolicySnapshot.execute raises on unknown budget_profile_version in pins

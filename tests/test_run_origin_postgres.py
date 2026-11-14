@@ -568,6 +568,7 @@ def test_fresh_oauth_cancels_source_work_before_rebind_and_late_finalization_can
                 lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
                 NoPublication(),
                 worker_id="old-worker",
+                expected_attempt=1,
                 run_url=lambda _: None,
             )
             assert (

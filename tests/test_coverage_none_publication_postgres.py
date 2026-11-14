@@ -1,7 +1,7 @@
 """The production repository stores a backend result without ``llm.review_output`` (#130 F5).
 
-DD6 on PostgreSQL: a technical-only change is finalized through the common publishing
-transaction; only a model answer is recorded as ``llm.review_output``.
+DD6 on PostgreSQL: a technical-only change is finalized while running, before the
+publishing transition; only a model answer is recorded as ``llm.review_output``.
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from app.modules.reviews.infrastructure.models import Run, RunAction
 from app.modules.reviews.infrastructure.review_output_unit_of_work import (
     SqlAlchemyReviewOutputUnitOfWork,
 )
+from tests.clean_without_text_fakes import answer
 from tests.portal_postgres import RUN_ATTEMPTED, Env
-from tests.test_clean_without_text_result import answer
 from tests.test_clean_without_text_result_postgres import prepare_result
 from tests.test_clean_without_text_result_postgres import result_env as result_env
 from tests.test_severity_threshold_postgres import RecordingQueue
@@ -50,6 +50,7 @@ def test_postgres_backend_result_enters_publishing_without_a_model_answer(
             lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
             queue,
             worker_id="worker",
+            expected_attempt=1,
             run_url=lambda _: None,
         )
         try:
@@ -57,16 +58,27 @@ def test_postgres_backend_result_enters_publishing_without_a_model_answer(
 
             assert await store.execute(RUN_ATTEMPTED, NoModelAnswer()) is True
 
-            assert await _tools(factory) == {"context.build": 1, "review.postprocess": 1}
+            assert await _tools(factory) == {
+                "context.build": 1,
+                "review.finalize": 1,
+                "review.publish_start": 1,
+            }
             async with factory() as session:
                 run = await session.get(Run, RUN_ATTEMPTED)
                 action = await session.scalar(
                     select(RunAction).where(
-                        RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.postprocess"
+                        RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.finalize"
                     )
                 )
-            assert run is not None and action is not None
+                marker = await session.scalar(
+                    select(RunAction).where(
+                        RunAction.run_id == RUN_ATTEMPTED,
+                        RunAction.tool == "review.publish_start",
+                    )
+                )
+            assert run is not None and action is not None and marker is not None
             assert run.state is RunState.PUBLISHING
+            assert action.index < marker.index
             assert run.review_body is not None
             assert "**Verdict:** нет доступных для анализа изменений" in run.review_body
             assert isinstance(action.response, dict)
@@ -77,7 +89,11 @@ def test_postgres_backend_result_enters_publishing_without_a_model_answer(
 
             # The T8 guard: the run is no longer running, nothing is added.
             assert await store.execute(RUN_ATTEMPTED, NoModelAnswer()) is False
-            assert await _tools(factory) == {"context.build": 1, "review.postprocess": 1}
+            assert await _tools(factory) == {
+                "context.build": 1,
+                "review.finalize": 1,
+                "review.publish_start": 1,
+            }
             assert len(queue.pointers) == 1
         finally:
             await engine.dispose()
@@ -97,13 +113,15 @@ def test_postgres_model_answer_is_still_recorded_as_llm_review_output(result_env
                 lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
                 RecordingQueue(),
                 worker_id="worker",
+                expected_attempt=1,
                 run_url=lambda _: None,
             ).execute(RUN_ATTEMPTED, answer())
 
             assert await _tools(factory) == {
                 "context.build": 1,
                 "llm.review_output": 1,
-                "review.postprocess": 1,
+                "review.finalize": 1,
+                "review.publish_start": 1,
             }
             async with factory() as session:
                 action = await session.scalar(

@@ -18,21 +18,21 @@ from app.modules.reviews.application.findings_post_processor import (
     finalize_stored_review_body,
     summary_from_result,
 )
-from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH
+from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH, CallManifest
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, ReviewPublishQueue
 from app.modules.reviews.application.review_output import (
+    FindingPostProcessingInput,
     InvalidReviewOutput,
     ReviewOutput,
-    ReviewOutputRepository,
-    ReviewPublication,
     RuleLineRef,
     VerifiedReviewOutput,
     _as_json_object,
     coerce_dropped_findings,
     parse_review_output,
+    parse_review_output_v2,
 )
 from app.modules.reviews.application.run_coverage import CoverageItem, CoverageStatus, RunCoverage
-from app.modules.reviews.application.run_failures import LEASE
+from app.modules.reviews.application.run_failures import LEASE, RunFailure
 from app.modules.reviews.application.verdict import (
     HashedFinding,
     SeverityThresholdValue,
@@ -55,38 +55,84 @@ class PublishingGuard:
     head_sha: str
     head_current: bool
     repository_review_event: str
+    attempt: int
 
 
-class PublishingRepository(ReviewOutputRepository, Protocol):
-    async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard | None: ...
+@dataclass(frozen=True)
+class AcceptedReviewCheckpoint:
+    output: dict[str, object]
+    accepted_call_id: UUID | None
+    manifest: CallManifest | None
+    incomplete_paths: tuple[str, ...]
+    source_attempt: int
+    fitted_context: dict[str, object]
 
-    async def store_review_output(
-        self,
-        run_id: UUID,
-        model_output: dict[str, object] | None,
-        parsed: ReviewOutput,
-        processed: ProcessedReviewOutput,
-    ) -> ReviewPublication | None:
-        """``model_output`` is None for a backend result without a model answer (#130 F5)."""
-        ...
 
-    async def enter_publishing(
+@dataclass(frozen=True)
+class FinalizedReviewPlan:
+    head_sha: str
+    findings_hash: str
+    review_event: str
+
+
+class PublishingRepository(Protocol):
+    async def get_post_processing_input(
+        self, run_id: UUID
+    ) -> FindingPostProcessingInput | None: ...
+
+    async def load_review_checkpoint(self, run_id: UUID) -> AcceptedReviewCheckpoint | None: ...
+
+    async def checkpoint_review_candidates(
         self,
         run_id: UUID,
         *,
-        lease_until: datetime,
-        postprocess_request: dict[str, Any],
-        postprocess_response: dict[str, Any],
+        model_output: dict[str, object],
+        candidates: list[dict[str, object]],
+        dropped: list[dict[str, object]],
+        accepted_call_id: UUID | None,
+        expected_attempt: int,
+        incomplete_paths: tuple[str, ...],
+        fitted_context: dict[str, object],
         started_at: datetime,
         duration_ms: int,
-        verify_request: dict[str, Any] | None = None,
-        verify_response: dict[str, Any] | None = None,
     ) -> None: ...
+
+    async def load_finalized_plan(self, run_id: UUID) -> FinalizedReviewPlan | None: ...
+
+    async def enter_publishing_from_final(self, run_id: UUID, *, lease_until: datetime) -> bool: ...
+
+    async def finalize_review(
+        self,
+        run_id: UUID,
+        *,
+        model_output: dict[str, object] | None,
+        processed: ProcessedReviewOutput,
+        result: dict[str, Any],
+        review_event: str,
+        findings_hash: str,
+        verify_request: dict[str, Any] | None,
+        verify_response: dict[str, Any] | None,
+        started_at: datetime,
+        duration_ms: int,
+    ) -> None: ...
+
+    async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard | None: ...
 
 
 class PublishingUnitOfWork(UnitOfWork, Protocol):
     @property
     def reviews(self) -> PublishingRepository: ...
+
+
+def _claimed(guard: PublishingGuard | None, worker_id: str, attempt: int) -> bool:
+    return (
+        guard is not None
+        and guard.state == "running"
+        and guard.worker_id == worker_id
+        and guard.attempt == attempt
+        and not guard.cancel_requested
+        and guard.head_current
+    )
 
 
 class NoModelAnswer(Mapping[str, object]):
@@ -191,7 +237,7 @@ def _with_rule_links(
 
 
 class StoreReviewOutput:
-    """``review.postprocess``, findings and ``publishing`` in one transaction, then publish."""
+    """Commit final analysis in running, then enter publishing and enqueue its pointer."""
 
     def __init__(
         self,
@@ -199,14 +245,80 @@ class StoreReviewOutput:
         queue: ReviewPublishQueue,
         *,
         worker_id: str,
+        expected_attempt: int,
         run_url: Callable[[UUID], str | None],
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._uow_factory = uow_factory
         self._queue = queue
         self._worker_id = worker_id
+        self._expected_attempt = expected_attempt
         self._run_url = run_url
         self._now = now
+
+    async def checkpoint_candidates(
+        self,
+        run_id: UUID,
+        raw_output: Mapping[str, object],
+        candidate_ids: tuple[str, ...],
+        *,
+        candidates: list[dict[str, object]],
+        dropped: list[dict[str, object]],
+        accepted_call_id: UUID | None,
+        incomplete_paths: tuple[str, ...],
+        fitted_context: dict[str, object],
+    ) -> bool:
+        """Commit accepted output and deterministic candidate filtering before verification."""
+        accepted = parse_review_output_v2(raw_output).model_dump(mode="json")
+        started_at = self._now()
+        started = time.monotonic()
+        async with self._uow_factory() as uow:
+            guard = await uow.reviews.lock_for_publishing(run_id)
+            if not _claimed(guard, self._worker_id, self._expected_attempt):
+                return False
+            await uow.reviews.checkpoint_review_candidates(
+                run_id,
+                model_output=accepted,
+                candidates=[
+                    {"candidate_id": candidate_id, "finding": finding}
+                    for candidate_id, finding in zip(candidate_ids, candidates, strict=True)
+                ],
+                dropped=dropped,
+                accepted_call_id=accepted_call_id,
+                expected_attempt=self._expected_attempt,
+                incomplete_paths=incomplete_paths,
+                fitted_context=fitted_context,
+                started_at=started_at,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            await uow.commit()
+        return True
+
+    async def load_accepted_output(self, run_id: UUID) -> AcceptedReviewCheckpoint | None:
+        async with self._uow_factory() as uow:
+            return await uow.reviews.load_review_checkpoint(run_id)
+
+    async def resume_finalized(self, run_id: UUID) -> bool | None:
+        """Resume T8 from a committed plan without replaying either model call."""
+        async with self._uow_factory() as uow:
+            plan = await uow.reviews.load_finalized_plan(run_id)
+            if plan is None:
+                return None
+            guard = await uow.reviews.lock_for_publishing(run_id)
+            if not _claimed(guard, self._worker_id, self._expected_attempt):
+                return False
+            if not await uow.reviews.enter_publishing_from_final(
+                run_id, lease_until=self._now() + LEASE
+            ):
+                return False
+            await uow.commit()
+        try:
+            await self._queue.publish_review(
+                ReviewPublishPointer(run_id, plan.head_sha, plan.findings_hash, plan.review_event)
+            )
+        except Exception:
+            _LOGGER.exception("review.publish/v1 remains unpublished for run %s", run_id)
+        return True
 
     async def execute(
         self,
@@ -315,54 +427,71 @@ class StoreReviewOutput:
         severities = [item.severity for item in findings]
         run_verdict = coverage_verdict(severities, coverage.status)
         hash_ = findings_hash(findings)
+        postprocess_response = {
+            "inline": len(processed.inline),
+            "body_only": len(processed.body_only),
+            "omitted_body_only_count": processed.omitted_body_only_count,
+            **(
+                {"review_body_budget_degraded": True}
+                if processed.review_body_budget_degraded
+                else {}
+            ),
+            "dropped": [
+                {"index": item.position, "drop_reason": item.drop_reason}
+                for item in processed.dropped
+            ],
+            "verdict": run_verdict,
+            "coverage": coverage.to_json(),
+            "severity_counts": severity_counts(severities),
+            "findings_hash": hash_,
+            # D1: keep the summary here when a large llm.review_output is truncated in run actions.
+            "summary": parsed.summary.model_dump(),
+            **_change_summary_trace(verified, processed),
+        }
+        final_result = {
+            **postprocess_response,
+            "severity_threshold": threshold_to_use,
+            "max_inline": context.repository_max_inline,
+            "findings": [
+                item.finding.model_dump(mode="json")
+                for item in (*processed.inline, *processed.body_only)
+            ],
+        }
 
         async with self._uow_factory() as uow:
             guard = await uow.reviews.lock_for_publishing(run_id)
-            if (
-                guard is None
-                or guard.state != "running"
-                or guard.worker_id != self._worker_id
-                or guard.cancel_requested
-                or not guard.head_current
-            ):
+            if not _claimed(guard, self._worker_id, self._expected_attempt):
                 return False
-            event = review_event(guard.repository_review_event, run_verdict)
-            if await uow.reviews.store_review_output(run_id, answer, parsed, processed) is None:
-                return False
-            await uow.reviews.enter_publishing(
+            assert guard is not None
+            await uow.reviews.finalize_review(
                 run_id,
-                lease_until=self._now() + LEASE,
-                postprocess_request={
-                    "min_confidence": processor.patterns.min_confidence,
-                    "max_inline": context.repository_max_inline,
-                    "severity_threshold": threshold_to_use,
-                },
-                postprocess_response={
-                    "inline": len(processed.inline),
-                    "body_only": len(processed.body_only),
-                    "omitted_body_only_count": processed.omitted_body_only_count,
-                    **(
-                        {"review_body_budget_degraded": True}
-                        if processed.review_body_budget_degraded
-                        else {}
-                    ),
-                    "dropped": [
-                        {"index": item.position, "drop_reason": item.drop_reason}
-                        for item in processed.dropped
-                    ],
-                    "verdict": run_verdict,
-                    "coverage": coverage.to_json(),
-                    "severity_counts": severity_counts(severities),
-                    "findings_hash": hash_,
-                    # Kept here as well: a huge llm.review_output may be truncated (D1).
-                    "summary": parsed.summary.model_dump(),
-                    **_change_summary_trace(verified, processed),
-                },
-                started_at=started_at,
-                duration_ms=int((time.monotonic() - started) * 1000),
+                model_output=answer,
+                processed=processed,
+                result=final_result,
+                review_event=review_event(guard.repository_review_event, run_verdict),
+                findings_hash=hash_,
                 verify_request=None if verified is None else verified.verify_request,
                 verify_response=None if verified is None else verified.verify_response,
+                started_at=started_at,
+                duration_ms=int((time.monotonic() - started) * 1000),
             )
+            await uow.commit()
+
+        async with self._uow_factory() as uow:
+            guard = await uow.reviews.lock_for_publishing(run_id)
+            if not _claimed(guard, self._worker_id, self._expected_attempt):
+                return False
+            assert guard is not None
+            plan = await uow.reviews.load_finalized_plan(run_id)
+            if plan is None:
+                raise RunFailure("internal_error", "Finalized review has no saved plan")
+            if plan.head_sha != guard.head_sha or plan.findings_hash != hash_:
+                return False
+            event = plan.review_event
+            if not await uow.reviews.enter_publishing_from_final(
+                run_id, lease_until=self._now() + LEASE
+            ):
+                return False
             await uow.commit()
 
         try:

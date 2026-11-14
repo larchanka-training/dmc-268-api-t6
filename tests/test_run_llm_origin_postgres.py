@@ -30,8 +30,8 @@ from app.modules.reviews.infrastructure.llm.settings import (
     ModelProfile,
 )
 from app.modules.reviews.infrastructure.llm.transport import ChatMessage, ResponseSchema
+from tests.llm_gateway_fakes import completion
 from tests.portal_postgres import INSTALL_A, REPO_A, RUN_ATTEMPTED, WS_A, Env, portal_schema
-from tests.test_llm_gateway import completion
 from tests.test_run_diff_origin_postgres import history
 from tests.test_run_origin_guard_postgres import prepare
 from tests.test_run_publication_origin_postgres import retire

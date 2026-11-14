@@ -15,18 +15,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.bootstrap.seed_prompts import PromptAsset, load_prompt_assets, seed_prompt_versions
 from app.modules.reviews.application.policy_snapshot import PINNED_PROMPT_CHECKSUMS
 from app.modules.reviews.infrastructure.models import PromptVersion
+from tests.prompt_assets_fakes import _up_to
 from tests.template_database import MigratedDatabase
 
 pytest_plugins = ("tests.migrated_postgres",)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 V3_SHA256 = "eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452"
-
-
-def _up_to(assets: tuple[PromptAsset, ...], version: int) -> tuple[PromptAsset, ...]:
-    return tuple(
-        asset for asset in assets if not (asset.key == "review.system" and asset.version > version)
-    )
 
 
 def test_load_prompt_assets_preserves_full_file_and_checksum() -> None:

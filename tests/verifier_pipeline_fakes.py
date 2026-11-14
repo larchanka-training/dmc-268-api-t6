@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
 from types import TracebackType
 from typing import Any
 from uuid import UUID
@@ -25,11 +26,13 @@ from app.modules.reviews.application.prompt_builder import (
 )
 from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
-    ReviewOutput,
-    ReviewPublication,
 )
 from app.modules.reviews.application.run_coverage import snapshot_vcs_file
-from app.modules.reviews.application.store_review_output import PublishingGuard
+from app.modules.reviews.application.store_review_output import (
+    AcceptedReviewCheckpoint,
+    FinalizedReviewPlan,
+    PublishingGuard,
+)
 from tests.findings_post_processor_fakes import _diff_map_from_vcs
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
@@ -164,7 +167,8 @@ class FakePublishingRepository:
 
     def __init__(self) -> None:
         self.stored: list[ProcessedReviewOutput] = []
-        self.entered: list[dict[str, Any]] = []
+        self.finalized: list[dict[str, Any]] = []
+        self._plan: FinalizedReviewPlan | None = None
 
     async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
         patch = "@@ -9,0 +10,2 @@\n+x = 1\n+y = 2"
@@ -180,21 +184,52 @@ class FakePublishingRepository:
         return PublishingGuard(
             state="running",
             worker_id=WORKER_ID,
+            attempt=1,
             cancel_requested=False,
             head_sha="c" * 40,
             head_current=True,
             repository_review_event="APPROVE",
         )
 
-    async def store_review_output(
+    async def load_review_checkpoint(self, run_id: UUID) -> AcceptedReviewCheckpoint | None:
+        return None
+
+    async def checkpoint_review_candidates(
         self,
         run_id: UUID,
-        answer: dict[str, Any] | None,
-        parsed: ReviewOutput,
-        processed: ProcessedReviewOutput,
-    ) -> ReviewPublication:
-        self.stored.append(processed)
-        return ReviewPublication(head_sha="c" * 40, findings=(), review_body=processed.review_body)
+        *,
+        model_output: dict[str, object],
+        candidates: list[dict[str, object]],
+        dropped: list[dict[str, object]],
+        accepted_call_id: UUID | None,
+        expected_attempt: int,
+        incomplete_paths: tuple[str, ...],
+        fitted_context: dict[str, object],
+        started_at: datetime,
+        duration_ms: int,
+    ) -> None:
+        pass
 
-    async def enter_publishing(self, run_id: UUID, **kwargs: Any) -> None:
-        self.entered.append(kwargs)
+    async def load_finalized_plan(self, run_id: UUID) -> FinalizedReviewPlan | None:
+        return self._plan
+
+    async def finalize_review(
+        self,
+        run_id: UUID,
+        *,
+        model_output: dict[str, object] | None,
+        processed: ProcessedReviewOutput,
+        result: dict[str, Any],
+        review_event: str,
+        findings_hash: str,
+        verify_request: dict[str, Any] | None,
+        verify_response: dict[str, Any] | None,
+        started_at: datetime,
+        duration_ms: int,
+    ) -> None:
+        self.stored.append(processed)
+        self.finalized.append(result)
+        self._plan = FinalizedReviewPlan("c" * 40, findings_hash, review_event)
+
+    async def enter_publishing_from_final(self, run_id: UUID, *, lease_until: datetime) -> bool:
+        return True

@@ -1321,15 +1321,17 @@ components:
     RunStatus:
       type: string
       description: >-
-        Run lifecycle state. Terminal: succeeded, failed, cancelled, skipped. The steps recorded
-        as run actions inside `running` are `policy.load`, `vcs.fetch_diff`, `context.build`,
-        `context.rag`, `llm.repo_conventions`, `llm.call` and `llm.result_cache`; `llm.review_output` and
-        `review.postprocess` are written in the transaction that moves the run to `publishing`,
-        and so is `llm.verify`, before `review.postprocess`, but only on the snapshot path (a run
-        bound to a snapshot-contract review prompt), including Bitbucket Cloud runs; on that path
-        `context.manifest` precedes each `llm.call` that is not a retry (conventions, review and
-        verifier calls alike), inside `running`; `github.publish_review` or
-        `gitlab.publish_review` and `bitbucket.publish_review` run in `publishing`
+        Run lifecycle state. Terminal: succeeded, failed, cancelled, skipped. Current worker
+        actions in `running` include `policy.load`, `vcs.fetch_diff`, `context.build`,
+        `context.rag`, `llm.repo_conventions`, `llm.call`, `llm.result_cache`, and
+        `llm.review_output`. Snapshot runs also write `context.manifest` before each new provider
+        call, then candidate `review.postprocess` before verifier `llm.verify`; empty candidates
+        omit the verifier. `review.finalize` commits the immutable result and publication plan
+        while the run is `running`. T8 atomically writes `review.publish_start`, changes the state
+        to `publishing`, renews the lease, and notifies subscribers; the queue publish follows
+        commit. `github.publish_review`, `gitlab.publish_review`, or `bitbucket.publish_review`
+        follows in `publishing`. Historical traces can have `llm.verify` and final
+        `review.postprocess` at T8 without `review.finalize` or `review.publish_start`
         (docs/PIPELINE_SPEC.md §2).
       enum: [queued, running, publishing, succeeded, failed, cancelled, skipped]
     RunTrigger:
@@ -1796,18 +1798,26 @@ components:
             Step name written to run_actions; free text, not an enum. The code writes
             `policy.load`, `vcs.fetch_diff`, `context.build`, `context.rag`,
             `llm.repo_conventions`, `llm.call`, `llm.result_cache`, `llm.review_output`,
-            `review.postprocess`, `github.publish_review`, `gitlab.publish_review`, and
-            `bitbucket.publish_review`. It writes `llm.verify` and
-            `context.manifest` only on the snapshot path (a run bound to a snapshot-contract
-            review prompt), including Bitbucket Cloud runs. A `context.manifest` step precedes each
-            provider call of that path (conventions, review and verifier) that is not a retry;
-            its response is `{manifest_id, digest, block_count, input_tokens, tokens_by_role}`,
-            where `tokens_by_role` maps a source role to the tokens of the call's blocks of that
-            role. The per-attempt order and the planned steps that are not written yet are in
-            docs/PIPELINE_SPEC.md §2.
+            `review.finalize`, `review.publish_start`, `github.publish_review`,
+            `gitlab.publish_review`, and `bitbucket.publish_review`. Snapshot runs also write
+            `review.postprocess`, `llm.verify`, and `context.manifest`. The candidate
+            `review.postprocess` precedes verifier `llm.verify`; `review.finalize` precedes T8,
+            and `review.publish_start` is the T8 marker. A `context.manifest` step precedes each
+            new provider call of the snapshot path (conventions, review, verifier); its response
+            is `{manifest_id, digest, block_count, input_tokens, tokens_by_role}`. Historical
+            runs can contain final `review.postprocess` at T8 without the new marker. The
+            per-attempt order and request/response metadata are in docs/PIPELINE_SPEC.md §2.
         request:
           type: object
-          description: Request metadata of the step.
+          description: >-
+            Request metadata of the step. For a snapshot-path `review.postprocess`,
+            `request.phase` is `candidate`: this records candidate filtering before the
+            verifier, not the final result. Historical final `review.postprocess` rows at
+            T8 have no `phase`; use this discriminator when reading old and new runs.
+            A retry resumed from verifier does not repeat `llm.review_output` or candidate
+            `review.postprocess`; a retry resumed after `review.finalize` writes only the
+            `review.publish_start` marker before provider publication. For `llm.call`, use
+            `request.operation` to distinguish conventions, review, and verification.
         response:
           description: >-
             Response body, any JSON value, inline when it is at most 64 KB; null when it is

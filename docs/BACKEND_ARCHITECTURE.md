@@ -420,8 +420,11 @@ Consumer `review.run.deep` не запускается, очередь толь�
 Транзакции попытки: claim (`queued` → `running`, `attempt + 1`, lease 5 мин,
 `NOTIFY run_updated`) идёт одной короткой транзакцией; diff, конвенции и вызов модели идут
 вне транзакций; heartbeat раз в 60 с продлевает lease только до дедлайна попытки
-(8 мин для fast); T8 (`llm.review_output`, `review.postprocess`, находки, `publishing`) идёт
-одной транзакцией, после commit публикуется `review.publish/v1` с publisher confirms; ack
+(8 мин для fast); принятый `llm.review_output` с candidate `review.postprocess`, а затем
+`llm.verify` с итоговым `review.finalize` и планом публикации сохраняются в `running`
+короткими транзакциями. T8 атомарно пишет `review.publish_start`, переводит Run в
+`publishing`, продлевает lease и шлёт `NOTIFY run_updated`; после commit публикуется
+`review.publish/v1` с publisher confirms; ack
 входящего сообщения отправляется после commit. Каждая смена `state` отправляет
 `NOTIFY run_updated` в той же транзакции. Каждая вставка `run_actions` шлёт `NOTIFY run_step`
 в той же транзакции; portal-api слушает канал (`run_step_listener`), парсит payload в

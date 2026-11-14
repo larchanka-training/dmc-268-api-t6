@@ -67,6 +67,7 @@ class PublishContext:
     workspace_id: UUID | None = None
     vcs_input: RunVcsInput | None = None
     publication_identity: PublicationIdentity | None = None
+    review_event: str | None = None
 
 
 class ObsoletePublication(Exception):
@@ -124,6 +125,7 @@ def publication_matches(expected: PublishContext, current: PublishContext) -> bo
         and expected.run_id == current.run_id
         and expected.head_sha == current.head_sha
         and expected.findings_hash == current.findings_hash
+        and expected.review_event == current.review_event
         and expected.review_body == current.review_body
         and expected.findings == current.findings
         # An inactive origin deliberately hides its VCS route. Availability is
@@ -358,6 +360,9 @@ class PublishRunReview:
             context = await uow.runs.publish_context(pointer.run_id)
         if context is None or context.state != "publishing":
             return
+        if context.review_event is not None and context.review_event != pointer.review_event:
+            _LOGGER.warning("Stale review.publish/v1 event for run %s is ignored", pointer.run_id)
+            return
         persisted_provider = (
             context.publication_identity.origin_provider
             if context.publication_identity is not None
@@ -483,7 +488,9 @@ class PublishRunReview:
             repository_full_name=context.repository_full_name,
             pr_number=context.pr_number,
             commit_sha=context.head_sha,
-            event=pointer.review_event,
+            event=context.review_event
+            if context.review_event is not None
+            else pointer.review_event,
             body=context.review_body,
             findings=context.findings,
             findings_hash=context.findings_hash,

@@ -36,8 +36,8 @@ from app.modules.reviews.infrastructure.amqp import (
 )
 from app.modules.reviews.infrastructure.run_delivery import SqlAlchemyRunDeliveryReader
 from app.worker import WorkerSettings, run_worker
-from tests import test_gitlab_projection_postgres as projection
-from tests.test_gitlab_projection_postgres import rig
+from tests import gitlab_projection_support as projection
+from tests.gitlab_projection_support import rig
 from tests.test_run_delivery_postgres import seeded
 from tests.worker_queue_postgres import (
     BASE,

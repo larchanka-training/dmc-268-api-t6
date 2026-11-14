@@ -10,8 +10,8 @@ from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.post_processing_diff_map import diff_map_from_snapshots
 from app.modules.reviews.application.run_coverage import restore_run_coverage
 from app.modules.reviews.application.saved_review_result import read_saved_review_result
-from tests.test_clean_without_text_result import finalize
-from tests.test_run_coverage import code_snapshot, coverage
+from tests.clean_without_text_fakes import finalize
+from tests.run_coverage_fakes import code_snapshot, coverage
 
 _EXPECTED_COVERAGE = {
     "version": 1,

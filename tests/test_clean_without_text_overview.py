@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -17,9 +18,9 @@ from app.modules.reviews.application.review_output import (
 )
 from app.modules.reviews.application.run_coverage import RunCoverage
 from app.modules.reviews.application.store_review_output import StoreReviewOutput
-from tests.test_clean_without_text_result import Queue, Repository, Uow, answer
-from tests.test_review_output import RecordingFactory, RecordingProvider, RecordingRepository
-from tests.test_run_coverage import code_snapshot, coverage
+from tests.clean_without_text_fakes import Queue, Repository, Uow, answer
+from tests.review_output_fakes import RecordingFactory, RecordingProvider, RecordingRepository
+from tests.run_coverage_fakes import code_snapshot, coverage
 
 _RUN = UUID(int=213)
 
@@ -79,22 +80,20 @@ def test_body_budget_preserves_partial_backend_result_and_accounts_for_all_findi
     else:
 
         class QueueRepository(Repository):
-            async def store_review_output(
-                self,
-                run_id: UUID,
-                model_output: dict[str, object] | None,
-                parsed: ReviewOutput,
-                processed: ProcessedReviewOutput,
-            ) -> ReviewPublication:
+            async def finalize_review(self, run_id: UUID, **kwargs: Any) -> None:
+                processed: ProcessedReviewOutput = kwargs["processed"]
                 stored.append(processed)
-                assert parsed.summary == processed.summary
-                return await super().store_review_output(run_id, model_output, parsed, processed)
+                await super().finalize_review(run_id, **kwargs)
 
         queued = QueueRepository(trusted)
         commits: list[str] = []
         queue = Queue(commits)
         store = StoreReviewOutput(
-            lambda: Uow(queued, commits), queue, worker_id="worker", run_url=lambda _: run_url
+            lambda: Uow(queued, commits),
+            queue,
+            worker_id="worker",
+            expected_attempt=1,
+            run_url=lambda _: run_url,
         )
         assert asyncio.run(store.execute(_RUN, raw))
         result = stored[0]

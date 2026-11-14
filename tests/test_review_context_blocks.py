@@ -61,6 +61,7 @@ from app.modules.reviews.application.review_context import (
 )
 from app.modules.reviews.application.review_output import EvidenceRef
 from app.modules.reviews.application.review_path import ReviewBinding
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
     make_complete_prompt_bindings,
@@ -529,7 +530,7 @@ class _Verifier:
         return {"decisions": []}
 
 
-class _Pipeline:
+class _Pipeline(_AcceptingCheckpointPublisher):
     def __init__(self, version: str) -> None:
         self.version = version
         self.contexts: list[ReviewContext] = []

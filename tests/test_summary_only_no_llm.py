@@ -62,6 +62,7 @@ from app.modules.reviews.application.run_coverage import CoverageItem, CoverageS
 from app.modules.reviews.application.run_failures import RunSkipped
 from app.modules.reviews.application.store_review_output import NoModelAnswer
 from app.modules.reviews.application.vcs_diff import OmissionReason, VcsFile, VcsPullRequest
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
 from tests.test_prepare_policy_snapshot import Store, Uow
 from tests.test_review_context_stage import (
     _BASE,
@@ -338,7 +339,7 @@ class DiffFlag:
 
 
 @dataclass
-class Publisher:
+class Publisher(_AcceptingCheckpointPublisher):
     published: list[object] = field(default_factory=list)
 
     async def execute(self, run_id: UUID, model_output: object) -> bool:

@@ -19,10 +19,10 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from tests import test_snapshot_path_e2e_postgres as e2e
+from tests import snapshot_path_e2e_support as e2e
+from tests.github_vcs_payload_fakes import _pull_payload
 from tests.portal_postgres import Env
-from tests.test_github_vcs_provider import _pull_payload
-from tests.test_snapshot_path_e2e_postgres import env as env
+from tests.snapshot_path_e2e_support import env as env
 
 _NAME = "a\\b.txt"
 _SHA = "7" * 40
@@ -93,7 +93,8 @@ def test_a_technical_only_v4_run_is_published_without_any_model_call(
         "policy.load",
         "vcs.fetch_diff",
         "context.build",
-        "review.postprocess",
+        "review.finalize",
+        "review.publish_start",
     ]
     assert observed.manifests == []
     assert observed.bodies == []
@@ -106,7 +107,7 @@ def test_a_technical_only_v4_run_is_published_without_any_model_call(
     assert build["coverage"]["reason_counts"] == {"unsupported_path": 1}
     # The attempt's one context.build is also its context_payloads row (schema 2).
     assert observed.payloads == [(2, build)]
-    [(_, postprocess)] = observed.actions["review.postprocess"]
+    [(_, postprocess)] = observed.actions["review.finalize"]
     # Restored from the context.build row, not the classification_unavailable fallback.
     assert postprocess["coverage"] == build["coverage"]
     assert postprocess["verdict"] is None

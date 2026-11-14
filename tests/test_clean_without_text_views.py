@@ -18,8 +18,8 @@ from app.modules.reviews.application.get_run import GetRunDetail
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.list_pulls import run_verdict
 from app.modules.reviews.application.saved_review_result import read_saved_review_result
-from tests.test_clean_without_text_result import finalize
-from tests.test_run_coverage import code_snapshot, coverage, empty_snapshot
+from tests.clean_without_text_fakes import finalize
+from tests.run_coverage_fakes import code_snapshot, coverage, empty_snapshot
 from tests.test_run_detail import Detail, review, run_item
 
 

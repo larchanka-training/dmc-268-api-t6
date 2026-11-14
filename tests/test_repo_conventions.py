@@ -1007,10 +1007,11 @@ def test_draft_conventions_counter_v1_matches_transport() -> None:
         PromptBindings,
     )
     from app.modules.reviews.infrastructure.llm.models import GatewayConventionsModel
+    from tests.llm_gateway_fakes import completion
     from tests.policy_snapshot_fakes import (
         make_policy_document_missing,
     )
-    from tests.test_llm_gateway import Harness, completion
+    from tests.test_llm_gateway import Harness
 
     snapshot = PolicySnapshot(
         schema_version=1,
@@ -1073,7 +1074,8 @@ def test_legacy_conventions_fit_on_the_gateway_prompt_budget() -> None:
     import httpx
 
     from app.modules.reviews.infrastructure.llm.models import GatewayConventionsModel
-    from tests.test_llm_gateway import Harness, completion
+    from tests.llm_gateway_fakes import completion
+    from tests.test_llm_gateway import Harness
 
     request = ConventionsRequest(
         system="SYS",

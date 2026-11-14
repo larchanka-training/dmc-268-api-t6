@@ -270,11 +270,11 @@ def test_full_path_queued_running_publishing_succeeded_is_readable_over_rest(env
     assert run == (1, "worker-it", True)
     names = [action[0] for action in actions]
     assert "context.build" not in names
-    for tool in ("vcs.fetch_diff", "review.postprocess", "github.publish_review"):
+    for tool in ("vcs.fetch_diff", "review.finalize", "github.publish_review"):
         assert names.count(tool) == 1, names
         assert all(action[1] >= 0 for action in actions if action[0] == tool)
     assert names.count("llm.review_output") == 1
-    assert names.index("review.postprocess") < names.index("github.publish_review")
+    assert names.index("review.finalize") < names.index("github.publish_review")
     assert github.reviews[0].commit_sha == HEAD
     assert [(status, conclusion) for _, status, conclusion in github.check_runs] == [
         ("in_progress", None),

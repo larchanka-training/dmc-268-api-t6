@@ -43,8 +43,8 @@ from tests.portal_postgres import (
     Env,
     portal_schema,
 )
+from tests.retired_installation_fakes import DiscardTokenCache
 from tests.test_app_reinstall_postgres import FreshGitHub, apply, seed_archive
-from tests.test_retired_installation_postgres import DiscardTokenCache
 
 _NOW = datetime.now(UTC)
 

@@ -51,35 +51,10 @@ from app.modules.reviews.application.vcs_diff import (
     _is_generated,
 )
 from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
+from tests.rag_review_context_fakes import _GREET_PATCH, _MODELS, _SERVICE
 
 _HEAD = "a" * 40
 _REPOSITORY = UUID(int=1)
-
-_SERVICE = '''from .models import User
-from .secret import token
-
-
-def unrelated():
-    return 0
-
-
-def greet(user_id):
-    """Greet a user."""
-    user = User(user_id)
-    extra = 1
-    return "hi " + user.name
-'''
-_MODELS = '''class User:
-    """A user of the system."""
-
-    def __init__(self, user_id):
-        self.name = str(user_id)
-'''
-_GREET_PATCH = (
-    "@@ -9,4 +9,5 @@\n def greet(user_id):\n"
-    '     """Greet a user."""\n     user = User(user_id)\n+    extra = 1\n'
-    '     return "hi " + user.name'
-)
 
 
 class Words:
