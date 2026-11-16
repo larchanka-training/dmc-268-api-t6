@@ -76,4 +76,11 @@ def repository_access_predicate(scope: AuthScope) -> ColumnElement[bool]:
         .correlate(Repository)
         .exists()
     )
-    return or_(github_access, bitbucket_access)
+    access = or_(github_access, bitbucket_access)
+    if scope.agent_repository_id is not None:
+        return and_(
+            Repository.id == scope.agent_repository_id,
+            Repository.installation_available.is_(True),
+            access,
+        )
+    return access

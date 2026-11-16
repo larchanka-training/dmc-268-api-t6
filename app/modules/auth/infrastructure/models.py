@@ -56,3 +56,33 @@ class AuthRefreshSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AuthAgentToken(Base):
+    __tablename__ = "auth_agent_tokens"
+    __table_args__ = (
+        Index("ix_auth_agent_tokens_user_id", "github_user_id"),
+        Index("ix_auth_agent_tokens_repository_id", "repository_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(CHAR(64), unique=True, nullable=False)
+    github_user_id: Mapped[int] = mapped_column(BIGINT, nullable=False)
+    repository_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("repositories.id"), nullable=False)
+    workspace_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("workspaces.id"), nullable=False)
+    created_at: Mapped[datetime] = timestamp_column()
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AuthAgentDeviceFlow(Base):
+    __tablename__ = "auth_agent_device_flows"
+    __table_args__ = (Index("ix_auth_agent_device_flows_expires_at", "expires_at"),)
+
+    code_hash: Mapped[str] = mapped_column(CHAR(64), primary_key=True)
+    repository: Mapped[str] = mapped_column(String(512), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    interval: Mapped[int] = mapped_column(nullable=False)
+    next_poll_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = timestamp_column()
