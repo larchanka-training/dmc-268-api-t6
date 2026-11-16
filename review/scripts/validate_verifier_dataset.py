@@ -25,6 +25,14 @@ ATTACK_LOCATIONS = frozenset(
     }
 )
 
+STATUS_BY_CLASS: dict[str, set[str | None]] = {
+    "proven": {"supported"},
+    "invented": {"contradicted"},
+    "inapplicable_rule": {"contradicted", "insufficient_context"},
+    "insufficient_context": {"insufficient_context"},
+    "empty_candidates": {None},
+}
+
 
 def _require_keys(value: Any, keys: set[str], label: str) -> None:
     if not isinstance(value, dict) or value.keys() != keys:
@@ -78,6 +86,128 @@ def _validate_expected_refs(case: dict[str, Any]) -> None:
             raise ValueError("expected reference is outside shown policy")
 
 
+def _validate_case(case: dict[str, Any]) -> None:
+    if case["class"] not in CLASSES:
+        raise ValueError("unknown case class")
+    _require_keys(case["input"], {"code", "candidate", "policy"}, "input")
+    code = case["input"]["code"]
+    _require_keys(code, {"path", "change_type", "lines"}, "input code")
+    if not isinstance(code["lines"], list) or not code["lines"]:
+        raise ValueError("input code needs shown lines")
+    for line in code["lines"]:
+        _require_keys(line, {"number", "kind", "text"}, "input code line")
+        if line["kind"] not in {"added", "removed", "context"}:
+            raise ValueError("unknown line kind")
+    _require_keys(case["input"]["policy"], {".review/rules.md", "AGENTS.md"}, "input policy")
+    candidate = case["input"]["candidate"]
+    if case["class"] == "empty_candidates":
+        if candidate is not None:
+            raise ValueError("empty_candidates must have null candidate")
+    else:
+        _require_keys(
+            candidate,
+            {
+                "candidate_id",
+                "path",
+                "line",
+                "start_line",
+                "severity",
+                "category",
+                "title",
+                "body",
+                "suggestion",
+                "confidence",
+                "rule_name",
+                "evidence_refs",
+            },
+            "input candidate",
+        )
+        finding = ReviewFindingV2.model_validate(
+            {key: value for key, value in candidate.items() if key != "candidate_id"}
+        )
+        if candidate["candidate_id"] != verifier_candidate_id(0, finding):
+            raise ValueError("candidate_id must match the production finding digest")
+        shown = {line["number"] for line in code["lines"] if line["kind"] != "removed"}
+        code_block = file_block_id(code["path"])
+        if (
+            finding.path != code["path"]
+            or finding.line not in shown
+            or (
+                finding.start_line is not None
+                and not set(range(finding.start_line, finding.line + 1)) <= shown
+            )
+            or any(
+                ref.block_id != code_block
+                or not set(range(ref.start_line, ref.end_line + 1)) <= shown
+                for ref in finding.evidence_refs
+            )
+        ):
+            raise ValueError("candidate anchor is outside shown code")
+    _require_keys(case["expected"], {"status", "evidence_refs", "requirement_refs"}, "expected")
+    status = case["expected"]["status"]
+    if status not in {"supported", "contradicted", "insufficient_context", None}:
+        raise ValueError("unknown expected status")
+    if (status is None) != (candidate is None):
+        raise ValueError("expected status must match candidate presence")
+    if status not in STATUS_BY_CLASS[case["class"]]:
+        raise ValueError("case class and status must agree")
+    if not isinstance(case["expected"]["evidence_refs"], list) or not isinstance(
+        case["expected"]["requirement_refs"], list
+    ):
+        raise ValueError("expected references must be lists")
+    evidence_refs = case["expected"]["evidence_refs"]
+    requirement_refs = case["expected"]["requirement_refs"]
+    if status in {"supported", "contradicted"}:
+        if not evidence_refs:
+            raise ValueError("decisive status requires evidence references")
+        if candidate["rule_name"] is not None and not requirement_refs:
+            raise ValueError("policy-linked status requires requirement references")
+    elif evidence_refs or requirement_refs:
+        raise ValueError("nondecisive status must have no references")
+    _validate_expected_refs(case)
+
+
+def _validate_pair(
+    case: dict[str, Any],
+    cases: dict[str, dict[str, Any]],
+    locations: set[str],
+    goals: set[str],
+) -> None:
+    attack = case["attack"]
+    if attack is None:
+        if case["base_case_id"] is not None:
+            raise ValueError("base case cannot name another case")
+        return
+    _require_keys(attack, {"location", "goal"}, "attack")
+    location = attack["location"]
+    if location not in ATTACK_LOCATIONS:
+        raise ValueError("unknown attack location")
+    goal = attack["goal"]
+    if goal not in {"false_acceptance", "false_rejection"}:
+        raise ValueError("unknown attack goal")
+    base = cases.get(case["base_case_id"])
+    if base is None or base["attack"] is not None:
+        raise ValueError("attack must name an unmodified base case")
+    if case["expected"] != base["expected"] or case["class"] != base["class"]:
+        raise ValueError("attack pair must keep the same oracle")
+    if goal == "false_acceptance" and case["expected"]["status"] != "contradicted":
+        raise ValueError("false acceptance needs a contradicted oracle")
+    if goal == "false_rejection" and case["expected"]["status"] != "supported":
+        raise ValueError("false rejection needs a supported oracle")
+    if _attack_value(case, location) == _attack_value(base, location):
+        raise ValueError("attack must change its declared location")
+    normalized = deepcopy(case)
+    _replace_attack_value(normalized, location, _attack_value(base, location))
+    if location.startswith("candidate_"):
+        normalized["input"]["candidate"]["candidate_id"] = base["input"]["candidate"][
+            "candidate_id"
+        ]
+    if normalized["input"] != base["input"]:
+        raise ValueError("attack changed an input outside its declared location")
+    locations.add(location)
+    goals.add(goal)
+
+
 def validate_dataset(dataset: dict[str, Any]) -> None:
     """Reject incomplete or unpaired cases before they influence measured rates."""
     _require_keys(dataset, {"schema_version", "source", "cases"}, "dataset")
@@ -95,91 +225,10 @@ def validate_dataset(dataset: dict[str, Any]) -> None:
         _require_keys(case, {"id", "class", "base_case_id", "attack", "input", "expected"}, "case")
         if not isinstance(case["id"], str) or not case["id"] or case["id"] in cases:
             raise ValueError("case id must be unique and nonempty")
-        if case["class"] not in CLASSES:
-            raise ValueError("unknown case class")
-        _require_keys(case["input"], {"code", "candidate", "policy"}, "input")
-        code = case["input"]["code"]
-        _require_keys(code, {"path", "change_type", "lines"}, "input code")
-        if not isinstance(code["lines"], list) or not code["lines"]:
-            raise ValueError("input code needs shown lines")
-        for line in code["lines"]:
-            _require_keys(line, {"number", "kind", "text"}, "input code line")
-            if line["kind"] not in {"added", "removed", "context"}:
-                raise ValueError("unknown line kind")
-        _require_keys(case["input"]["policy"], {".review/rules.md", "AGENTS.md"}, "input policy")
-        candidate = case["input"]["candidate"]
-        if case["class"] == "empty_candidates":
-            if candidate is not None:
-                raise ValueError("empty_candidates must have null candidate")
-        else:
-            _require_keys(
-                candidate,
-                {
-                    "candidate_id",
-                    "path",
-                    "line",
-                    "start_line",
-                    "severity",
-                    "category",
-                    "title",
-                    "body",
-                    "suggestion",
-                    "confidence",
-                    "rule_name",
-                    "evidence_refs",
-                },
-                "input candidate",
-            )
-            finding = ReviewFindingV2.model_validate(
-                {key: value for key, value in candidate.items() if key != "candidate_id"}
-            )
-            if candidate["candidate_id"] != verifier_candidate_id(0, finding):
-                raise ValueError("candidate_id must match the production finding digest")
-            shown = {line["number"] for line in code["lines"] if line["kind"] != "removed"}
-            code_block = file_block_id(code["path"])
-            if (
-                finding.path != code["path"]
-                or finding.line not in shown
-                or (
-                    finding.start_line is not None
-                    and not set(range(finding.start_line, finding.line + 1)) <= shown
-                )
-                or any(
-                    ref.block_id != code_block
-                    or not set(range(ref.start_line, ref.end_line + 1)) <= shown
-                    for ref in finding.evidence_refs
-                )
-            ):
-                raise ValueError("candidate anchor is outside shown code")
-        _require_keys(case["expected"], {"status", "evidence_refs", "requirement_refs"}, "expected")
-        status = case["expected"]["status"]
-        if status not in {"supported", "contradicted", "insufficient_context", None}:
-            raise ValueError("unknown expected status")
-        if (status is None) != (candidate is None):
-            raise ValueError("expected status must match candidate presence")
-        statuses_by_class: dict[str, set[str | None]] = {
-            "proven": {"supported"},
-            "invented": {"contradicted"},
-            "inapplicable_rule": {"contradicted", "insufficient_context"},
-            "insufficient_context": {"insufficient_context"},
-            "empty_candidates": {None},
-        }
-        if status not in statuses_by_class[case["class"]]:
-            raise ValueError("case class and status must agree")
-        if not isinstance(case["expected"]["evidence_refs"], list) or not isinstance(
-            case["expected"]["requirement_refs"], list
-        ):
-            raise ValueError("expected references must be lists")
-        evidence_refs = case["expected"]["evidence_refs"]
-        requirement_refs = case["expected"]["requirement_refs"]
-        if status in {"supported", "contradicted"}:
-            if not evidence_refs:
-                raise ValueError("decisive status requires evidence references")
-            if candidate["rule_name"] is not None and not requirement_refs:
-                raise ValueError("policy-linked status requires requirement references")
-        elif evidence_refs or requirement_refs:
-            raise ValueError("nondecisive status must have no references")
-        _validate_expected_refs(case)
+        try:
+            _validate_case(case)
+        except ValueError as exc:
+            raise ValueError(f"{case['id']}: {exc}") from exc
         classes.add(case["class"])
         cases[case["id"]] = case
 
@@ -187,39 +236,10 @@ def validate_dataset(dataset: dict[str, Any]) -> None:
         raise ValueError("missing case class")
 
     for case in cases.values():
-        attack = case["attack"]
-        if attack is None:
-            if case["base_case_id"] is not None:
-                raise ValueError("base case cannot name another case")
-            continue
-        _require_keys(attack, {"location", "goal"}, "attack")
-        location = attack["location"]
-        if location not in ATTACK_LOCATIONS:
-            raise ValueError("unknown attack location")
-        goal = attack["goal"]
-        if goal not in {"false_acceptance", "false_rejection"}:
-            raise ValueError("unknown attack goal")
-        base = cases.get(case["base_case_id"])
-        if base is None or base["attack"] is not None:
-            raise ValueError("attack must name an unmodified base case")
-        if case["expected"] != base["expected"] or case["class"] != base["class"]:
-            raise ValueError("attack pair must keep the same oracle")
-        if goal == "false_acceptance" and case["expected"]["status"] != "contradicted":
-            raise ValueError("false acceptance needs a contradicted oracle")
-        if goal == "false_rejection" and case["expected"]["status"] != "supported":
-            raise ValueError("false rejection needs a supported oracle")
-        if _attack_value(case, location) == _attack_value(base, location):
-            raise ValueError("attack must change its declared location")
-        normalized = deepcopy(case)
-        _replace_attack_value(normalized, location, _attack_value(base, location))
-        if location.startswith("candidate_"):
-            normalized["input"]["candidate"]["candidate_id"] = base["input"]["candidate"][
-                "candidate_id"
-            ]
-        if normalized["input"] != base["input"]:
-            raise ValueError("attack changed an input outside its declared location")
-        locations.add(location)
-        goals.add(goal)
+        try:
+            _validate_pair(case, cases, locations, goals)
+        except ValueError as exc:
+            raise ValueError(f"{case['id']}: {exc}") from exc
 
     if locations != ATTACK_LOCATIONS or goals != {"false_acceptance", "false_rejection"}:
         raise ValueError("missing attack location or goal")

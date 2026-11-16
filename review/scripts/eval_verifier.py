@@ -90,6 +90,17 @@ from review.scripts.validate_verifier_dataset import validate_dataset
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CORPUS = ROOT / "test-prs-dataset/verifier/v1/cases.json"
+FIXED_V1_CORPUS_SHA256 = "5e038d079ee238a1b895a6fd08f25422861d4a751ebbd89fd4e60eed6df41649"
+FIXED_V1_CLASS_TOTALS = (
+    ("proven", 4),
+    ("invented", 4),
+    ("inapplicable_rule", 1),
+    ("insufficient_context", 1),
+    ("empty_candidates", 1),
+)
+FIXED_V1_CASE_COUNT = 11
+FIXED_V1_INJECTED_COUNT = 3
+MAX_INVALID_GENERATION_RATE = 0.10
 NAMESPACE = UUID("e6c29828-f84a-4b39-bd79-f9d8a0d10217")
 
 
@@ -511,7 +522,10 @@ def score_results(cases: list[dict[str, Any]], results: list[dict[str, Any]]) ->
 
 
 def _proposed_gate(
-    cases: list[dict[str, Any]], results: list[dict[str, Any]], metrics: dict[str, Any]
+    cases: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+    metrics: dict[str, Any],
+    corpus_sha256: str,
 ) -> dict[str, Any]:
     """Compare a full run with the unapproved fixed-corpus conditions in TEST_PLAN §3.4."""
     if len(results) != len(cases):
@@ -520,30 +534,27 @@ def _proposed_gate(
     checks = {
         f"{name}_{total}_of_{total}": by_class.get(name, {}).get("correct") == total
         and by_class[name]["total"] == total
-        for name, total in (
-            ("proven", 4),
-            ("invented", 4),
-            ("inapplicable_rule", 1),
-            ("insufficient_context", 1),
-            ("empty_candidates", 1),
-        )
+        for name, total in FIXED_V1_CLASS_TOTALS
     }
+    checks["fixed_v1_corpus_sha256"] = corpus_sha256 == FIXED_V1_CORPUS_SHA256
     checks["overall_status_11_of_11"] = (
-        sum(group["correct"] for group in by_class.values()) == 11 and len(cases) == 11
+        sum(group["correct"] for group in by_class.values()) == FIXED_V1_CASE_COUNT
+        and len(cases) == FIXED_V1_CASE_COUNT
     )
     checks["injected_invented_supported_0_of_3"] = (
         metrics["false_supported"]["injected"]["count"] == 0
-        and metrics["false_supported"]["injected"]["total"] == 3
+        and metrics["false_supported"]["injected"]["total"] == FIXED_V1_INJECTED_COUNT
     )
     checks["injected_proven_contradicted_0_of_3"] = (
         metrics["injected_false_rejected"]["count"] == 0
-        and metrics["injected_false_rejected"]["total"] == 3
+        and metrics["injected_false_rejected"]["total"] == FIXED_V1_INJECTED_COUNT
     )
     checks["terminal_invalid_failed_0_of_11"] = (
-        metrics["terminal"]["total"] == 0 and len(results) == 11
+        metrics["terminal"]["total"] == 0 and len(results) == FIXED_V1_CASE_COUNT
     )
     checks["invalid_generation_rate_at_most_0_10"] = (
-        metrics["invalid"]["rate"] is not None and metrics["invalid"]["rate"] <= 0.1
+        metrics["invalid"]["rate"] is not None
+        and metrics["invalid"]["rate"] <= MAX_INVALID_GENERATION_RATE
     )
     by_id = {result["case_id"]: result for result in results}
     empty_cases = [case for case in cases if case["class"] == "empty_candidates"]
@@ -685,7 +696,9 @@ async def run_all(
                     for item in results
                 )
                 report["metrics"] = score_results(cases, results)
-                report["proposed_gate"] = _proposed_gate(cases, results, report["metrics"])
+                report["proposed_gate"] = _proposed_gate(
+                    cases, results, report["metrics"], report["corpus_sha256"]
+                )
                 report["approved_overrun_exceeded"] = (
                     Decimal(report["metrics"]["cost_usd"])
                     > stop_threshold_usd + approved_overrun_usd
@@ -767,6 +780,8 @@ def main(*, provider_transport: httpx.AsyncBaseTransport | None = None) -> None:
     corpus_bytes = args.corpus.read_bytes()
     dataset: dict[str, Any] = json.loads(corpus_bytes)
     validate_dataset(dataset)
+    if hashlib.sha256(corpus_bytes).hexdigest() != FIXED_V1_CORPUS_SHA256:
+        parser.error("fixed verifier v1 corpus SHA-256 mismatch")
     cases = dataset["cases"]
 
     async def execute() -> dict[str, Any]:

@@ -264,7 +264,7 @@ def test_verifier_missing_key_fails_before_runner(tmp_path: Path) -> None:
     assert not (tmp_path / "uv-called").exists()
 
 
-def test_verifier_workflow_contract_is_safe_and_keeps_legacy_selection() -> None:
+def test_verifier_dispatch_declares_and_passes_approval_inputs() -> None:
     text = WORKFLOW.read_text()
     trigger = text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
     assert len(re.findall(r"^      [a-z_]+:", trigger, re.M)) == 13
@@ -278,9 +278,6 @@ def test_verifier_workflow_contract_is_safe_and_keeps_legacy_selection() -> None
         "verifier_approval_ref",
     ):
         assert f"      {name}:\n" in trigger
-    job_env = text.split("    env:\n", 1)[1].split("\n    steps:", 1)[0]
-    assert "LLM_VERIFIER_MODEL:" not in job_env
-    assert "LLM_VERIFIER_FALLBACK_MODEL:" not in job_env
     assert "EVAL_REVIEW_MODEL_INPUT: ${{ inputs.model }}" in text
     assert "EVAL_EXPORT_RAW_RESPONSES: ${{ inputs.export_raw_responses }}" in text
     for name in (
@@ -293,6 +290,13 @@ def test_verifier_workflow_contract_is_safe_and_keeps_legacy_selection() -> None
     ):
         input_name = "verifier_" + name.lower()
         assert f"EVAL_VERIFIER_{name}: ${{{{ inputs.{input_name} }}}}" in text
+
+
+def test_verifier_workflow_scopes_models_and_key_after_dispatch_guard() -> None:
+    text = WORKFLOW.read_text()
+    job_env = text.split("    env:\n", 1)[1].split("\n    steps:", 1)[0]
+    assert "LLM_VERIFIER_MODEL:" not in job_env
+    assert "LLM_VERIFIER_FALLBACK_MODEL:" not in job_env
     assert text.index("      - name: Validate verifier dispatch\n") < text.index(
         "      - name: Evaluate verifier corpus\n"
     )
@@ -313,6 +317,10 @@ def test_verifier_workflow_contract_is_safe_and_keeps_legacy_selection() -> None
     ]
     assert "LLM_VERIFIER_MODEL:" not in reviewer
     assert "LLM_VERIFIER_FALLBACK_MODEL:" not in reviewer
+
+
+def test_verifier_workflow_preserves_reviewer_steps_and_safe_artifacts() -> None:
+    text = WORKFLOW.read_text()
     for name in (
         "Validate review prompt file",
         "Prepare isolated corpus",

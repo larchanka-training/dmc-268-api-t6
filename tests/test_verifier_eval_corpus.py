@@ -62,7 +62,7 @@ def test_rejects_oracle_reference_outside_shown_context() -> None:
     dataset = deepcopy(load_dataset(CORPUS))
     dataset["cases"][2]["expected"]["evidence_refs"][0]["start_line"] = 999
 
-    with pytest.raises(ValueError, match="expected reference"):
+    with pytest.raises(ValueError, match="VFY-03: expected reference"):
         validate_dataset(dataset)
 
 
@@ -87,7 +87,9 @@ def test_rejects_attack_that_changes_another_input_field() -> None:
     dataset = deepcopy(load_dataset(CORPUS))
     dataset["cases"][5]["input"]["policy"]["AGENTS.md"] += "Unexpected extra policy.\n"
 
-    with pytest.raises(ValueError, match="outside its declared location"):
+    with pytest.raises(
+        ValueError, match="VFY-06: attack changed an input outside its declared location"
+    ):
         validate_dataset(dataset)
 
 

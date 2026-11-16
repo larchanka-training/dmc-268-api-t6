@@ -69,6 +69,33 @@ def _cli_args(output: Path) -> list[str]:
     ]
 
 
+async def _run_all(
+    cases: list[dict[str, Any]],
+    settings: LlmSettings,
+    transport: OpenAICompatibleTransport,
+    output: Path,
+    *,
+    stop_threshold_usd: Decimal = Decimal("0.5"),
+    corpus_bytes: bytes | None = None,
+    approved_overrun_usd: Decimal = Decimal(0),
+    window_end: datetime | None = None,
+    approval_ref: str = "approved-test-run",
+    fx_transport: httpx.AsyncBaseTransport | None = None,
+) -> dict[str, Any]:
+    return await run_all(
+        cases,
+        settings,
+        transport,
+        output,
+        corpus_bytes=CORPUS.read_bytes() if corpus_bytes is None else corpus_bytes,
+        stop_threshold_usd=stop_threshold_usd,
+        approved_overrun_usd=approved_overrun_usd,
+        window_end=window_end or datetime.now(UTC) + timedelta(minutes=3),
+        approval_ref=approval_ref,
+        fx_transport=fx_transport,
+    )
+
+
 def _expected_reply(case: dict[str, Any], reason: str) -> httpx.Response:
     candidate = case["input"]["candidate"]
     assert candidate is not None
@@ -266,21 +293,18 @@ def test_cli_accepts_approved_route_and_sends_first_provider_request(
     assert report["stop_reason"] == "threshold_reached"
 
 
-def test_cli_report_binds_full_corpus_bytes_and_git_state_without_raw_data(
+def _provenance_cli_runner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+) -> tuple[Path, str, list[httpx.Request], Callable[[Path], dict[str, Any]]]:
     repo = tmp_path / "repo"
     repo.mkdir()
     corpus = repo / "cases.json"
-    original = CORPUS.read_bytes()
-    corpus.write_bytes(original)
-    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
-    subprocess.run(["git", "-C", str(repo), "add", "cases.json"], check=True)
+    corpus.write_bytes(CORPUS.read_bytes())
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "cases.json"], cwd=repo, check=True)
     subprocess.run(
         [
             "git",
-            "-C",
-            str(repo),
             "-c",
             "user.name=Test",
             "-c",
@@ -289,14 +313,10 @@ def test_cli_report_binds_full_corpus_bytes_and_git_state_without_raw_data(
             "-qm",
             "baseline",
         ],
+        cwd=repo,
         check=True,
     )
-    git_sha = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     monkeypatch.setattr(eval_verifier, "ROOT", repo)
     monkeypatch.setattr(LlmSettings, "from_env", lambda _env: _settings())
     monkeypatch.setenv("LLM_PRIVATE_TOKEN", "ENV_SECRET_MARKER")
@@ -313,55 +333,124 @@ def test_cli_report_binds_full_corpus_bytes_and_git_state_without_raw_data(
         report: dict[str, Any] = json.loads(output.read_text())
         return report
 
-    clean = run_cli(tmp_path / "clean-report.json")
+    return corpus, git_sha, requests, run_cli
+
+
+def _changed_oracle_bytes(original: bytes) -> bytes:
     start = original.index(b'"id": "VFY-03"')
     end = original.index(b'"id": "VFY-04"', start)
     segment = original[start:end]
     assert segment.count(b'"status": "contradicted"') == 1
-    mutated = (
+    return (
         original[:start]
         + segment.replace(b'"status": "contradicted"', b'"status": "supported"', 1)
         + original[end:]
     )
-    corpus.write_bytes(mutated)
-    with pytest.raises(ValueError, match="case class and status must agree"):
-        run_cli(tmp_path / "rejected-report.json")
 
-    async def run_unvalidated_bytes() -> dict[str, Any]:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await run_all(
+
+def test_report_corpus_digest_includes_oracle_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus, _git_sha, requests, run_cli = _provenance_cli_runner(tmp_path, monkeypatch)
+    original = corpus.read_bytes()
+    clean = run_cli(tmp_path / "clean-report.json")
+    first_case = load_dataset(CORPUS)["cases"][0]
+    mutated = _changed_oracle_bytes(original)
+
+    async def exercise() -> dict[str, Any]:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _request: _expected_reply(first_case, "RAW_SECRET_MARKER")
+            )
+        ) as client:
+            return await _run_all(
                 [first_case],
                 _settings(),
                 OpenAICompatibleTransport(client),
-                tmp_path / "dirty-report.json",
+                tmp_path / "changed-report.json",
                 corpus_bytes=mutated,
                 stop_threshold_usd=Decimal("0.1"),
-                approved_overrun_usd=Decimal("0"),
-                window_end=datetime.now(UTC) + timedelta(minutes=3),
-                approval_ref="test approval",
             )
 
-    dirty = asyncio.run(run_unvalidated_bytes())
+    changed = asyncio.run(exercise())
+    assert len(requests) == 1
+    assert clean["corpus_sha256"] == hashlib.sha256(original).hexdigest()
+    assert changed["corpus_sha256"] == hashlib.sha256(mutated).hexdigest()
+    assert changed["corpus_sha256"] != clean["corpus_sha256"]
+    assert clean["cases"][0]["input_sha256"] == changed["cases"][0]["input_sha256"]
+
+
+def test_cli_rejects_changed_oracle_before_report_or_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus, _git_sha, requests, run_cli = _provenance_cli_runner(tmp_path, monkeypatch)
+    corpus.write_bytes(_changed_oracle_bytes(corpus.read_bytes()))
+    output = tmp_path / "rejected-report.json"
+
+    with pytest.raises(ValueError, match="case class and status must agree"):
+        run_cli(output)
+
+    assert requests == []
+    assert not output.exists()
+
+
+def test_cli_rejects_changed_v1_corpus_before_provider_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    corpus, _git_sha, calls, run_cli = _provenance_cli_runner(tmp_path, monkeypatch)
+    corpus.write_bytes(corpus.read_bytes() + b"\n")
+    output = tmp_path / "report.json"
+
+    with pytest.raises(SystemExit) as error:
+        run_cli(output)
+
+    assert error.value.code == 2
+    assert "fixed verifier v1 corpus SHA-256 mismatch" in capsys.readouterr().err
+    assert calls == []
+    assert not output.exists()
+
+
+def _clean_and_dirty_provenance_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[str, list[httpx.Request], dict[str, Any], dict[str, Any]]:
+    corpus, git_sha, requests, run_cli = _provenance_cli_runner(tmp_path, monkeypatch)
+    clean = run_cli(tmp_path / "clean-report.json")
+    (corpus.parent / "dirty-marker").write_text("modified")
+    dirty = run_cli(tmp_path / "dirty-report.json")
+    return git_sha, requests, clean, dirty
+
+
+def test_cli_report_records_git_sha_and_dirty_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    git_sha, requests, clean, dirty = _clean_and_dirty_provenance_reports(tmp_path, monkeypatch)
 
     assert len(requests) == 2
-    assert clean["corpus_sha256"] == hashlib.sha256(original).hexdigest()
-    assert dirty["corpus_sha256"] == hashlib.sha256(mutated).hexdigest()
-    assert dirty["corpus_sha256"] != clean["corpus_sha256"]
-    assert clean["cases"][0]["input_sha256"] == dirty["cases"][0]["input_sha256"]
     assert clean["git_sha"] == dirty["git_sha"] == git_sha
     assert clean["git_dirty"] is False
     assert dirty["git_dirty"] is True
+
+
+def test_cli_report_records_utc_start_and_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _git_sha, _requests, clean, dirty = _clean_and_dirty_provenance_reports(tmp_path, monkeypatch)
     for report in (clean, dirty):
         started = datetime.fromisoformat(report["started_at_utc"])
         finished = datetime.fromisoformat(report["finished_at_utc"])
         assert started.utcoffset() == timedelta(0)
         assert finished.utcoffset() == timedelta(0)
         assert started <= finished
+
+
+def test_cli_report_redacts_sensitive_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _git_sha, _requests, clean, dirty = _clean_and_dirty_provenance_reports(tmp_path, monkeypatch)
+    for report in (clean, dirty):
         serialized = json.dumps(report)
         assert "RAW_SECRET_MARKER" not in serialized
         assert "ENV_SECRET_MARKER" not in serialized
         assert "sk-test" not in serialized
-        assert first_case["input"]["candidate"]["body"] not in serialized
+        assert load_dataset(CORPUS)["cases"][0]["input"]["candidate"]["body"] not in serialized
 
 
 def test_real_gateway_route_records_decision_usage_and_empty_case_skips_call() -> None:
@@ -598,16 +687,12 @@ def test_eurouter_route_uses_shared_ecb_quote_and_accounts_eur_cost(tmp_path: Pa
 
     async def exercise() -> dict[str, Any]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(model_reply)) as client:
-            return await run_all(
+            return await _run_all(
                 cases,
                 settings,
                 OpenAICompatibleTransport(client),
                 tmp_path / "eurouter-report.json",
-                corpus_bytes=CORPUS.read_bytes(),
                 stop_threshold_usd=Decimal("0.1"),
-                approved_overrun_usd=Decimal("0"),
-                window_end=datetime.now(UTC) + timedelta(minutes=3),
-                approval_ref="test approval",
                 fx_transport=httpx.MockTransport(fx_reply),
             )
 
@@ -666,16 +751,12 @@ def test_eurouter_fx_failure_has_safe_reason_before_model_request(
 
     async def exercise() -> dict[str, Any]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(model_reply)) as client:
-            return await run_all(
+            return await _run_all(
                 [case],
                 settings,
                 OpenAICompatibleTransport(client),
                 tmp_path / "fx-failure-report.json",
-                corpus_bytes=CORPUS.read_bytes(),
                 stop_threshold_usd=Decimal("0.1"),
-                approved_overrun_usd=Decimal("0"),
-                window_end=datetime.now(UTC) + timedelta(minutes=3),
-                approval_ref="test approval",
                 fx_transport=httpx.MockTransport(lambda _: httpx.Response(503)),
             )
 
@@ -753,16 +834,11 @@ def test_injected_invented_supported_is_counted_and_fails_proposed_gate(tmp_path
 
     async def exercise() -> dict[str, Any]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await run_all(
+            return await _run_all(
                 cases,
                 _settings(),
                 OpenAICompatibleTransport(client),
                 tmp_path / "report.json",
-                corpus_bytes=CORPUS.read_bytes(),
-                stop_threshold_usd=Decimal("0.5"),
-                approved_overrun_usd=Decimal("0"),
-                window_end=datetime.now(UTC) + timedelta(minutes=3),
-                approval_ref="approved-test-run",
             )
 
     report = asyncio.run(exercise())
@@ -809,16 +885,11 @@ def test_repaired_invalid_generation_rate_controls_proposed_gate(
 
     async def exercise() -> dict[str, Any]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await run_all(
+            return await _run_all(
                 cases,
                 _settings(),
                 OpenAICompatibleTransport(client),
                 tmp_path / "report.json",
-                corpus_bytes=CORPUS.read_bytes(),
-                stop_threshold_usd=Decimal("0.5"),
-                approved_overrun_usd=Decimal("0"),
-                window_end=datetime.now(UTC) + timedelta(minutes=3),
-                approval_ref="approved-test-run",
             )
 
     report = asyncio.run(exercise())
@@ -854,16 +925,11 @@ def _full_report(
 
     async def exercise() -> dict[str, Any]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await run_all(
+            return await _run_all(
                 cases,
                 settings,
                 OpenAICompatibleTransport(client),
                 tmp_path / "report.json",
-                corpus_bytes=CORPUS.read_bytes(),
-                stop_threshold_usd=Decimal("0.5"),
-                approved_overrun_usd=Decimal("0"),
-                window_end=datetime.now(UTC) + timedelta(minutes=3),
-                approval_ref="approved-test-run",
                 fx_transport=fx_transport,
             )
 
@@ -909,6 +975,42 @@ def test_full_success_reports_provisional_gate(tmp_path: Path) -> None:
     assert report["proposed_gate"]["status"] == "passed"
     assert all(report["proposed_gate"]["checks"].values())
     assert report["stop_reason"] == "complete"
+
+
+def test_changed_v1_corpus_cannot_pass_the_fixed_gate(tmp_path: Path) -> None:
+    original = CORPUS.read_bytes()
+    line = load_dataset(CORPUS)["cases"][0]["input"]["code"]["lines"][0]["text"]
+    corpus_bytes = original.replace(
+        json.dumps(line).encode(), json.dumps(line + " # changed").encode(), 1
+    )
+    assert corpus_bytes != original
+    dataset = json.loads(corpus_bytes)
+    cases = dataset["cases"]
+    answers = [case for case in cases if case["input"]["candidate"] is not None]
+    calls = 0
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        case = answers[calls]
+        calls += 1
+        return _expected_reply(case, "Checked against shown code and policy")
+
+    async def exercise() -> dict[str, Any]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await _run_all(
+                cases,
+                _settings(),
+                OpenAICompatibleTransport(client),
+                tmp_path / "changed-report.json",
+                corpus_bytes=corpus_bytes,
+            )
+
+    report = asyncio.run(exercise())
+    assert calls == 10
+    assert report["metrics"]["by_class"]["proven"]["correct"] == 4
+    assert report["proposed_gate"]["checks"]["fixed_v1_corpus_sha256"] is False
+    assert report["proposed_gate"]["status"] == "failed"
+    assert report["stop_reason"] == "quality_failed"
 
 
 def test_full_invalid_run_reports_terminal_quality(tmp_path: Path) -> None:
@@ -982,16 +1084,12 @@ def test_partial_report_before_first_case_preserves_planned_denominators(
 
     async def exercise() -> dict[str, Any]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await run_all(
+            return await _run_all(
                 cases,
                 _settings(),
                 OpenAICompatibleTransport(client),
                 tmp_path / "report.json",
-                corpus_bytes=CORPUS.read_bytes(),
-                stop_threshold_usd=Decimal("0.5"),
-                approved_overrun_usd=Decimal("0"),
                 window_end=datetime(2999, 1, 2, tzinfo=UTC),
-                approval_ref="approved-test-run",
             )
 
     report = asyncio.run(exercise())
@@ -1047,16 +1145,13 @@ def test_partial_report_after_six_cases_preserves_planned_denominators(tmp_path:
 
     async def exercise() -> dict[str, Any]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await run_all(
+            return await _run_all(
                 cases,
                 _settings(),
                 OpenAICompatibleTransport(client),
                 tmp_path / "report.json",
-                corpus_bytes=CORPUS.read_bytes(),
                 stop_threshold_usd=Decimal("0.000100"),
                 approved_overrun_usd=Decimal("0.1"),
-                window_end=datetime.now(UTC) + timedelta(minutes=3),
-                approval_ref="approved-test-run",
             )
 
     report = asyncio.run(exercise())
@@ -1251,28 +1346,22 @@ def test_run_all_persists_progress_and_preflights_output(tmp_path: Path) -> None
     async def exercise() -> dict[str, Any]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             transport = OpenAICompatibleTransport(client)
-            report = await run_all(
+            report = await _run_all(
                 cases,
                 _settings(),
                 transport,
                 output,
-                corpus_bytes=CORPUS.read_bytes(),
                 stop_threshold_usd=Decimal("0.000001"),
                 approved_overrun_usd=Decimal("0.01"),
-                window_end=datetime.now(UTC) + timedelta(minutes=3),
-                approval_ref="test approval",
             )
             with pytest.raises(FileExistsError):
-                await run_all(
+                await _run_all(
                     cases,
                     _settings(),
                     transport,
                     output,
-                    corpus_bytes=CORPUS.read_bytes(),
                     stop_threshold_usd=Decimal("1"),
                     approved_overrun_usd=Decimal("0.01"),
-                    window_end=datetime.now(UTC) + timedelta(minutes=3),
-                    approval_ref="test approval",
                 )
             return report
 
@@ -1298,16 +1387,12 @@ def test_interrupt_after_charged_call_persists_safe_partial_report(tmp_path: Pat
 
     async def exercise() -> dict[str, Any]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await run_all(
+            return await _run_all(
                 cases,
                 _settings(),
                 OpenAICompatibleTransport(client),
                 tmp_path / "report.json",
-                corpus_bytes=CORPUS.read_bytes(),
                 stop_threshold_usd=Decimal("0.1"),
-                approved_overrun_usd=Decimal("0"),
-                window_end=datetime.now(UTC) + timedelta(minutes=3),
-                approval_ref="test approval",
             )
 
     report = asyncio.run(exercise())
@@ -1386,16 +1471,12 @@ def test_cancellation_during_run_all_cleanup_finalizes_charged_report(tmp_path: 
                 lambda _request: _expected_reply(case, "Visible interpolation")
             )
         ) as client:
-            return await run_all(
+            return await _run_all(
                 [case],
                 _settings(),
                 OpenAICompatibleTransport(client),
                 tmp_path / "report.json",
-                corpus_bytes=CORPUS.read_bytes(),
                 stop_threshold_usd=Decimal("0.1"),
-                approved_overrun_usd=Decimal("0"),
-                window_end=datetime.now(UTC) + timedelta(minutes=3),
-                approval_ref="test approval",
                 fx_transport=CancelOnClose(lambda _request: httpx.Response(500)),
             )
 
@@ -1425,16 +1506,12 @@ def test_zero_allowance_blocks_first_call_when_estimate_exceeds_remaining(
 
     async def exercise() -> dict[str, Any]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await run_all(
+            return await _run_all(
                 [case],
                 _settings(),
                 OpenAICompatibleTransport(client),
                 tmp_path / "report.json",
-                corpus_bytes=CORPUS.read_bytes(),
                 stop_threshold_usd=Decimal("0.000001"),
-                approved_overrun_usd=Decimal("0"),
-                window_end=datetime.now(UTC) + timedelta(minutes=3),
-                approval_ref="test approval",
             )
 
     report = asyncio.run(exercise())
@@ -1477,16 +1554,12 @@ def test_remaining_budget_blocks_repair_and_fallback_before_request(
 
     async def exercise() -> dict[str, Any]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await run_all(
+            return await _run_all(
                 [case],
                 settings,
                 OpenAICompatibleTransport(client),
                 tmp_path / "report.json",
-                corpus_bytes=CORPUS.read_bytes(),
                 stop_threshold_usd=Decimal("0.01"),
-                approved_overrun_usd=Decimal("0"),
-                window_end=datetime.now(UTC) + timedelta(minutes=3),
-                approval_ref="test approval",
             )
 
     report = asyncio.run(exercise())
