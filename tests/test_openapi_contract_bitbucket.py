@@ -24,6 +24,7 @@ from app.modules.auth.application.scope import AuthScope
 from app.modules.integrations.bitbucket.api.connections import ConnectionItem, ConnectResponse
 from app.modules.integrations.bitbucket.application.manage_connection import (
     BitbucketManagementError,
+    ConnectionPage,
     ConnectResult,
     RepositoryBinding,
 )
@@ -175,10 +176,11 @@ def test_bitbucket_error_contract_accepts_safe_application_and_request_validatio
 _BITBUCKET_WORKSPACE = UUID(int=333)
 
 
-_BITBUCKET_INSTALLATION = UUID(int=334)
+# Zod 4 validates these response IDs as version-4 UUIDs.
+_BITBUCKET_INSTALLATION = UUID("00000000-0000-4000-8000-00000000014e")
 
 
-_BITBUCKET_REPOSITORY = UUID(int=335)
+_BITBUCKET_REPOSITORY = UUID("00000000-0000-4000-8000-00000000014f")
 
 
 _BITBUCKET_PREFIX = f"/api/workspaces/{_BITBUCKET_WORKSPACE}/bitbucket"
@@ -214,18 +216,21 @@ class _BitbucketContractManager:
             next_cursor=None,
         )
 
-    async def list_connections(self, **_kwargs: object) -> tuple[RepositoryBinding, ...]:
-        return (
-            RepositoryBinding(
-                installation_id=_BITBUCKET_INSTALLATION,
-                repository_id=_BITBUCKET_REPOSITORY,
-                repository_uuid=_BITBUCKET_REPOSITORY,
-                full_name="team/repo",
-                web_url="https://bitbucket.org/team/repo",
-                credential_generation=1,
-                binding_generation=1,
-                confirmed_at=datetime(2026, 10, 1, tzinfo=UTC),
+    async def list_connections_page(self, **_kwargs: object) -> ConnectionPage:
+        return ConnectionPage(
+            (
+                RepositoryBinding(
+                    installation_id=_BITBUCKET_INSTALLATION,
+                    repository_id=_BITBUCKET_REPOSITORY,
+                    repository_uuid=_BITBUCKET_REPOSITORY,
+                    full_name="team/repo",
+                    web_url="https://bitbucket.org/team/repo",
+                    credential_generation=1,
+                    binding_generation=1,
+                    confirmed_at=datetime(2026, 10, 1, tzinfo=UTC),
+                ),
             ),
+            "next-page",
         )
 
     async def connect(self, **_kwargs: object) -> ConnectResult:
@@ -338,6 +343,59 @@ def test_bitbucket_operation_response_matches_spec(
             )
         with pytest.raises(ValidationError):
             _validator_for(method, spec_path, status).validate({**payload, "status": "bogus"})
+
+
+def test_bitbucket_connection_page_contract_declares_cursor_query() -> None:
+    operation = _spec()["paths"][_BITBUCKET_CONNECTIONS]["get"]
+    cursor = next(
+        parameter for parameter in operation["parameters"] if parameter["name"] == "cursor"
+    )
+    assert cursor["in"] == "query"
+    assert cursor["required"] is False
+    assert cursor["schema"] == {"type": "string", "minLength": 1, "maxLength": 1024}
+
+
+@pytest.mark.parametrize(
+    ("status", "reference"),
+    [
+        ("400", "BadRequest"),
+        ("409", "BitbucketConflict"),
+        ("422", "BitbucketValidationFailed"),
+    ],
+)
+def test_bitbucket_connection_page_contract_declares_cursor_error_responses(
+    status: str, reference: str
+) -> None:
+    operation = _spec()["paths"][_BITBUCKET_CONNECTIONS]["get"]
+    assert operation["responses"][status] == {"$ref": f"#/components/responses/{reference}"}
+
+
+def test_bitbucket_connection_cursor_runtime_schema_matches_checked_contract() -> None:
+    runtime = app.openapi()["paths"][_BITBUCKET_CONNECTIONS]["get"]
+    cursor = next(parameter for parameter in runtime["parameters"] if parameter["name"] == "cursor")
+    checked = next(
+        parameter
+        for parameter in _spec()["paths"][_BITBUCKET_CONNECTIONS]["get"]["parameters"]
+        if parameter["name"] == "cursor"
+    )
+    assert (cursor["in"], cursor["required"]) == (checked["in"], checked["required"])
+    assert checked["schema"] in cursor["schema"]["anyOf"]
+
+
+def test_bitbucket_connection_page_string_cursor_matches_openapi_and_ui(
+    bitbucket_contract_client: TestClient,
+) -> None:
+    response = bitbucket_contract_client.get(f"{_BITBUCKET_PREFIX}/connections")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["nextCursor"] == "next-page"
+    checked_validator = _validator_for("get", _BITBUCKET_CONNECTIONS, "200")
+    ui_validator = Draft202012Validator(_generated_schemas()["bitbucketConnectionList"])
+    for validator in (checked_validator, ui_validator):
+        validator.validate(payload)
+        validator.validate({**payload, "nextCursor": None})
+        with pytest.raises(ValidationError):
+            validator.validate({**payload, "nextCursor": 42})
 
 
 def test_bitbucket_connect_and_secret_rotation_return_all_five_webhook_events(

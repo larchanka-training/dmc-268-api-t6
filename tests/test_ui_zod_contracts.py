@@ -23,7 +23,7 @@ from tests.portal_test_client import authenticated_test_client as TestClient
 
 CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_zod_contracts.json"
 RUN_ID = UUID("11111111-1111-4111-8111-111111111111")
-UI_CONTRACT_COMMIT = "5a90cce81efeb17a9f6a1dfa30236b09b65cfe55"
+UI_CONTRACT_COMMIT = "5f94a8e0725195dbdd022af498a2f21f8f9befed"
 
 
 # Where a Run came from, as the shared RunSession contract must carry it (#112).
