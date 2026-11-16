@@ -25,16 +25,19 @@ from app.modules.reviews.application.queue_messages import ReviewPublishPointer
 from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
     InvalidReviewOutput,
+    NoModelAnswer,
     PublishReviewOutput,
+    ReviewOutput,
+    ReviewPublication,
     VerifiedReviewOutput,
 )
 from app.modules.reviews.application.run_coverage import RunCoverage
 from app.modules.reviews.application.run_failures import classify_failure
 from app.modules.reviews.application.store_review_output import (
-    NoModelAnswer,
     PublishingGuard,
     StoreReviewOutput,
 )
+from app.modules.reviews.application.verdict import coverage_verdict
 from tests.clean_without_text_fakes import answer
 from tests.review_output_fakes import InMemoryFinalization
 from tests.test_coverage_none_classification import project, unsupported_path
@@ -116,8 +119,43 @@ class Repository(InMemoryFinalization):
         self.state = "publishing"
         return True
 
+    async def store_review_output(
+        self,
+        run_id: UUID,
+        model_output: Any,
+        parsed: ReviewOutput,
+        processed: ProcessedReviewOutput,
+    ) -> ReviewPublication:
+        self.answers.append(model_output)
+        self.body = processed.review_body
+        self.state = "publishing"
+        self.coverage = processed.coverage
+        status_val = (
+            processed.coverage.status.value
+            if hasattr(processed.coverage.status, "value")
+            else str(processed.coverage.status)
+        )
+        severities = tuple(
+            item.finding.severity for item in (*processed.inline, *processed.body_only)
+        )
+        self.response = {
+            "verdict": coverage_verdict(severities, processed.coverage.status),
+            "coverage": {
+                "status": status_val,
+                "reviewed_files": processed.coverage.reviewed_files,
+                "reason_counts": dict(processed.coverage.reason_counts)
+                if hasattr(processed.coverage, "reason_counts")
+                else {},
+            },
+        }
+        return ReviewPublication(
+            head_sha="a" * 40,
+            findings=(),
+            review_body=self.body,
+        )
+
     async def mark_review_published(self, run_id: UUID) -> None:
-        raise AssertionError("finalization only queues publication")
+        self.state = "succeeded"
 
 
 @dataclass
@@ -259,13 +297,60 @@ def test_an_empty_model_answer_is_invalid_and_never_a_backend_result(
     assert queue.pointers == []
 
 
-def test_the_inline_publisher_refuses_the_marker_as_an_invalid_answer() -> None:
-    # Not composed with the context stage in production: it never gets the marker, and a
-    # marker that reached it would not be published as an empty review.
-    publisher = PublishReviewOutput(cast(Any, None), cast(Any, None))
+def test_the_inline_publisher_accepts_and_publishes_the_marker() -> None:
+    class _FakeProvider:
+        def __init__(self) -> None:
+            self.published: list[tuple[str, str, Any, str]] = []
 
-    with pytest.raises(InvalidReviewOutput, match="invalid review output"):
-        asyncio.run(publisher.execute(_RUN, NoModelAnswer()))
+        async def publish_review(
+            self,
+            *,
+            commit_sha: str,
+            body: str,
+            findings: tuple[Any, ...],
+            idempotency_key: str,
+        ) -> None:
+            self.published.append((commit_sha, body, findings, idempotency_key))
+
+    files = [
+        DiffSnapshot(
+            "src/file.py",
+            "@@ -0,0 +1,1 @@\n+a = 1",
+            "a" * 40,
+            status="added",
+            additions=1,
+            changes=1,
+            review_patch="@@ -0,0 +1,1 @@\n+a = 1",
+        )
+    ]
+    repository = Repository(
+        files, project(files, snapshot_path=True), review_event="REQUEST_CHANGES"
+    )
+    provider = _FakeProvider()
+    publisher = PublishReviewOutput(lambda: Uow(repository, []), cast(Any, provider))
+
+    result = asyncio.run(publisher.execute(_RUN, NoModelAnswer(incomplete_paths=("src/file.py",))))
+
+    assert result is True
+    assert repository.answers == [None]
+    assert repository.response["verdict"] is None
+    assert repository.response["coverage"]["status"] == "partial"
+    assert repository.response["coverage"]["reason_counts"] == {"review_input_incomplete": 1}
+    assert len(provider.published) == 1
+    assert "src/file.py" in provider.published[0][1]
+    assert provider.published[0][2] == ()
+
+    # An empty marker without incomplete_paths (summary-only / coverage none) also publishes
+    empty_repo = _technical("too_large")
+    empty_provider = _FakeProvider()
+    empty_publisher = PublishReviewOutput(lambda: Uow(empty_repo, []), cast(Any, empty_provider))
+
+    assert asyncio.run(empty_publisher.execute(_RUN, NoModelAnswer())) is True
+    assert empty_repo.answers == [None]
+    assert empty_repo.response["verdict"] is None
+    assert empty_repo.response["coverage"]["status"] == "none"
+    assert len(empty_provider.published) == 1
+    assert empty_provider.published[0][2] == ()
 
 
 def test_the_marker_is_an_empty_mapping() -> None:
@@ -274,3 +359,43 @@ def test_the_marker_is_an_empty_mapping() -> None:
     assert dict(marker) == {}
     assert len(marker) == 0
     assert "summary" not in marker
+
+
+def test_no_model_answer_with_incomplete_paths_publishes_partial_bounded_list() -> None:
+    files = [
+        DiffSnapshot(
+            f"src/file_{idx}.py",
+            "@@ -0,0 +1,2 @@\n+a = 1\n+b = 2",
+            "a" * 40,
+            status="added",
+            additions=2,
+            changes=2,
+            review_patch="@@ -0,0 +1,2 @@\n+a = 1\n+b = 2",
+        )
+        for idx in range(1, 8)
+    ]
+    repository = Repository(
+        files, project(files, snapshot_path=True), review_event="REQUEST_CHANGES"
+    )
+    queue = Queue()
+    committed: list[str] = []
+    omitted = tuple(item.filename for item in files)
+
+    marker = NoModelAnswer(incomplete_paths=omitted)
+    assert dict(marker) == {}
+    assert len(marker) == 0
+
+    assert asyncio.run(_store(repository, queue, committed).execute(_RUN, marker)) is True
+
+    assert repository.answers == [None]
+    assert committed == ["commit", "commit"]
+    assert repository.response["verdict"] is None
+    assert repository.response["coverage"]["status"] == "partial"
+    assert repository.response["coverage"]["reviewed_files"] == 0
+    assert repository.response["coverage"]["reason_counts"] == {"review_input_incomplete": 7}
+    assert [pointer.review_event for pointer in queue.pointers] == ["COMMENT"]
+    assert "модель получила не весь patch" in repository.body
+    assert "`src/file_1.py`" in repository.body
+    assert "`src/file_6.py`" not in repository.body
+    assert "- Ещё причин: 2" in repository.body
+    assert "и ещё 2" in repository.body

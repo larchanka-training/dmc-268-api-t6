@@ -389,7 +389,7 @@ class _Reviews:
     async def store_review_output(
         self,
         run_id: uuid.UUID,
-        model_output: dict[str, object],
+        model_output: dict[str, object] | None,
         parsed: ReviewOutput,
         processed: ProcessedReviewOutput,
     ) -> ReviewPublication:
