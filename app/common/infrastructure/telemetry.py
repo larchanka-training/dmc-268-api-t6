@@ -8,7 +8,10 @@ attributes of ``ALLOWED_ATTRIBUTES``. Request and response bodies of ``run_actio
 review texts never reach a span, and the exporter drops any other attribute before export, so a
 library or a later span cannot widen the boundary by accident. An exception leaves the process
 as its type and its frames only (``safe_stack``), on spans and in logs alike: its message can
-quote a payload. Log records carry the formatted message, never their ``extra`` fields.
+quote a payload. Log records carry the formatted message (never their ``extra`` fields);
+``JsonFormatter`` scrubs GitHub tokens, JWTs, ``Authorization`` credentials (``Bearer``, ``Basic``,
+``token`` and quoted header values), and single-line configured process secret env values collected
+at init (multi-line PEM blocks are not scrubbed line-by-line).
 """
 
 from __future__ import annotations
@@ -105,6 +108,99 @@ def bind_run_id(run_id: UUID | str) -> Iterator[None]:
 
 # --- logs -----------------------------------------------------------------------------------
 
+_AUTH_QUOTED_PATTERN = re.compile(
+    r"""(?i)(["']?Authorization["']?\s*[:=]\s*)"""
+    r"""(?:(")((?:Bearer|Basic|token)\s+)?[^\r\n"\\]*(?:\\.[^\r\n"\\]*)*"|"""
+    r"""(')((?:Bearer|Basic|token)\s+)?[^\r\n'\\]*(?:\\.[^\r\n'\\]*)*')"""
+)
+_AUTH_TOKEN_PATTERN = re.compile(
+    r"""(?i)(\bAuthorization\s*[:=]\s*(?:Bearer|Basic|token)\s+)[^\s,;"'<>]+"""
+)
+_GITHUB_TOKEN_PATTERN = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,})\b"
+)
+_JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\b")
+
+_MIN_SECRET_LENGTH = 8
+_SECRET_ENV_NAMES = frozenset({"AI_DMC268_T6"})
+_SECRET_ENV_SUFFIXES = (
+    "_SECRET",
+    "_SECRETS",
+    "_SECRETS_B64",
+    "_TOKEN",
+    "_PASSWORD",
+    "_API_KEY",
+    "_API_KEYS",
+    "_PRIVATE_KEY",
+    "_CREDENTIAL_KEYS",
+    "_ACCESS_KEY",
+    "_SSH_KEY",
+)
+
+
+def _is_secret_env_name(name: str) -> bool:
+    upper = name.upper()
+    return upper in _SECRET_ENV_NAMES or upper.endswith(_SECRET_ENV_SUFFIXES)
+
+
+def _parse_json_dict_secrets(trimmed: str, env_name: str) -> tuple[str, ...]:
+    if not (trimmed.startswith("{") and trimmed.endswith("}")):
+        return ()
+    try:
+        data = json.loads(trimmed)
+    except json.JSONDecodeError:
+        # Malformed keyring JSON must not fail logger initialization; never log `trimmed`.
+        _LOGGER.warning("Skipping malformed JSON while collecting secret env var %s", env_name)
+        return ()
+    if not isinstance(data, dict):
+        return ()
+    return tuple(
+        cleaned
+        for val in data.values()
+        if isinstance(val, str) and len(cleaned := val.strip()) >= _MIN_SECRET_LENGTH
+    )
+
+
+def _collect_configured_secrets() -> tuple[str, ...]:
+    """Collect configured process secret values from the environment (#468)."""
+    secrets: set[str] = set()
+    for key, value in os.environ.items():
+        if not value or not _is_secret_env_name(key):
+            continue
+        trimmed = value.strip()
+        json_values = _parse_json_dict_secrets(trimmed, key)
+        if json_values:
+            secrets.update(json_values)
+            continue
+        cleaned_whole = trimmed.strip("'\" \t\r\n")
+        if len(cleaned_whole) >= _MIN_SECRET_LENGTH:
+            secrets.add(cleaned_whole)
+        for part in value.split(","):
+            cleaned = part.strip("'\" \t\r\n")
+            if len(cleaned) >= _MIN_SECRET_LENGTH:
+                secrets.add(cleaned)
+    return tuple(sorted(secrets, key=len, reverse=True))
+
+
+def _replace_quoted_auth(match: re.Match[str]) -> str:
+    quote = match.group(2) or match.group(4)
+    scheme = match.group(3) or match.group(5) or ""
+    return f"{match.group(1)}{quote}{scheme}***{quote}"
+
+
+def _scrub_text(text: str, secrets: tuple[str, ...]) -> str:
+    """Scrub tokens, JWTs, Authorization credentials, and cached process secrets (#468)."""
+    if not text:
+        return text
+    text = _AUTH_QUOTED_PATTERN.sub(_replace_quoted_auth, text)
+    text = _AUTH_TOKEN_PATTERN.sub(r"\1***", text)
+    text = _GITHUB_TOKEN_PATTERN.sub("***", text)
+    text = _JWT_PATTERN.sub("***", text)
+    for secret in secrets:
+        if secret in text:
+            text = text.replace(secret, "***")
+    return text
+
 
 class JsonFormatter(logging.Formatter):
     """One JSON object per line: time, level, logger, message, ``run_id``, trace ids, error."""
@@ -112,14 +208,16 @@ class JsonFormatter(logging.Formatter):
     def __init__(self, service: str) -> None:
         super().__init__()
         self._service = service
+        self._secrets = _collect_configured_secrets()
 
     def format(self, record: logging.LogRecord) -> str:
+        message = _scrub_text(record.getMessage(), self._secrets)
         entry: dict[str, Any] = {
             "ts": datetime.fromtimestamp(record.created, UTC).isoformat(timespec="milliseconds"),
             "level": record.levelname,
             "service": self._service,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": message,
         }
         # A delivery binds run_id; elsewhere a call site passes extra={"run_id": ...}. These two
         # extras are the only ones read: any other extra may hold a body and stays out.
