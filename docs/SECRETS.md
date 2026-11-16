@@ -32,8 +32,8 @@
 | `APP_DOMAIN` | да, для курсового VPS | `dmc268-t6.axyi.ru` — базовый домен маршрутов edge-прокси; `Deploy monitoring` строит из него адрес Grafana и цели проб |
 | `LLM_MODEL` | для ревью моделью | `mistral-small-4` (OQ-2, SD §15). Основная модель в repository variable; передаётся в `worker.env` (деплой) и читается ручным workflow `eval-live.yml` |
 | `LLM_FALLBACK_MODEL` | нет | `mistral-small-3.2-24b` (OQ-2, SD §15). Значение передаётся в `worker.env` и в ручной workflow `eval-live.yml`. Чтобы отключить fallback, удалите variable (и переопределение в Environment `staging`, если оно есть): незаданная variable не попадает в `worker.env` |
-| `LLM_VERIFIER_MODEL` | нет | Модель верификатора (#130); пусто — `LLM_MODEL`. Значение передаётся в `worker.env`; незаданная variable в `worker.env` не попадает, и верификатор идёт моделью ревью. Ручные `eval-live.yml` и `llm-live-run.yml` её не читают: у eval нет стадии верификатора |
-| `LLM_VERIFIER_FALLBACK_MODEL` | нет | Fallback верификатора (#130); пусто — `LLM_FALLBACK_MODEL`. Передаётся в `worker.env` так же: незаданная variable туда не попадает |
+| `LLM_VERIFIER_MODEL` | нет | Модель верификатора (#130); пусто — `LLM_MODEL`. Значение передаётся в `worker.env`; незаданная variable в `worker.env` не попадает, и верификатор идёт моделью ревью. Ручной `eval-live.yml` читает её для `corpus=verifier`; `llm-live-run.yml` не читает |
+| `LLM_VERIFIER_FALLBACK_MODEL` | нет | Fallback верификатора (#130); пусто — `LLM_FALLBACK_MODEL`. Передаётся в `worker.env` так же: незаданная variable туда не попадает. Ручной `eval-live.yml` читает её для `corpus=verifier` |
 | `LLM_MONTHLY_BUDGET_USD` | нет | см. § Мониторинг |
 
 Repository variable `LLM_EUR_TO_USD_RATE` удалена 06.10 после проверки нового пути на staging: worker и workflow `LLM live run` её не читают, в `worker.env` она не попадает; курс вручную обновлять не нужно.
@@ -121,8 +121,8 @@ rm jwt.pem jwt.pub
 | `BITBUCKET_WEBHOOK_BASE_URL` | для Bitbucket Cloud | Публичный HTTPS origin API, записывается только в `api.env`; не содержит path/query |
 | `LLM_MODEL` | нет, переопределение repository | `mistral-small-4` (OQ-2, SD §15). В контейнере только у `worker`; обычное значение задано на уровне repository |
 | `LLM_FALLBACK_MODEL` | нет, переопределение repository | `mistral-small-3.2-24b`. Только `worker`. Чтобы отключить fallback, удалите repository variable и это переопределение: значение Environment перекрывает repository, а незаданная variable приходит в `vars` пустой строкой, и `LLM_FALLBACK_MODEL` не попадает в `worker.env` |
-| `LLM_VERIFIER_MODEL` | нет, переопределение repository | Только `worker`; пусто — верификатор идёт моделью ревью (`LLM_MODEL`). Как у `LLM_FALLBACK_MODEL`: значение Environment перекрывает repository, незаданная variable не попадает в `worker.env` |
-| `LLM_VERIFIER_FALLBACK_MODEL` | нет, переопределение repository | Только `worker`; пусто — fallback ревью (`LLM_FALLBACK_MODEL`). Правила те же |
+| `LLM_VERIFIER_MODEL` | нет, переопределение repository | `worker` получает значение из Environment поверх repository; незаданная variable не попадает в `worker.env`, и верификатор идёт моделью ревью (`LLM_MODEL`). Ручной `eval-live.yml` при `corpus=verifier` читает repository variable без Environment-переопределения |
+| `LLM_VERIFIER_FALLBACK_MODEL` | нет, переопределение repository | `worker` получает значение из Environment поверх repository; пусто — fallback ревью (`LLM_FALLBACK_MODEL`). Ручной `eval-live.yml` при `corpus=verifier` читает repository variable без Environment-переопределения |
 | `GITLAB_ACTIVE_KEY_ID` | с GitLab runtime | ID активного ключа из secret `GITLAB_CREDENTIAL_KEYS`; только оба workers и operator |
 | `GITLAB_ALLOWED_ORIGINS` | с GitLab runtime | raw JSON, например `["https://gitlab.com"]`; те же получатели |
 | `GITLAB_PRIVATE_ORIGINS` | нет | raw JSON subset allowed; только для private-network origin, не для приватного проекта gitlab.com |

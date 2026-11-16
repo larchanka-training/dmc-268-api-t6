@@ -19,7 +19,7 @@ from review.scripts.eval_live import BACKEND_RULES, FRONTEND_RULES, REPO_ROOT, r
 from review.scripts.eval_rag_rehearsal import DEFAULT_MODEL, RehearsalTransport, rehearsal_settings
 from review.scripts.eval_replay import replay
 from review.scripts.validate_dataset import DEFAULT_ROOT
-from tests.test_eval_live_rag import rag_root, record_rag, valid_answers, window_without_rag
+from tests.eval_rag_fakes import rag_root, record_rag, valid_answers, window_without_rag
 
 SYSTEM_V3 = REPO_ROOT / "review/prompts/review.system.v3.md"
 SYSTEM_V5 = REPO_ROOT / "review/prompts/review.system.v5.md"

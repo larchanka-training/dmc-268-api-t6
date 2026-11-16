@@ -20,10 +20,11 @@ from tests.eval_live_fakes import (
     VALID,
     FakeTransport,
     answer,
+    fixture_root,
+    record,
     record_arm,
     rules_fixture_root,
 )
-from tests.test_eval_live import fixture_root, record
 
 _SYSTEM_V5 = REPO_ROOT / "review" / "prompts" / "review.system.v5.md"
 
