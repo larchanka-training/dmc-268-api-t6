@@ -11,6 +11,7 @@ from app.modules.reviews.application.store_review_output import StoreReviewOutpu
 from tests.clean_without_text_fakes import RUN_ID as _RUN
 from tests.clean_without_text_fakes import Queue, Repository, Uow, answer, finalize
 from tests.run_coverage_fakes import code_snapshot, coverage, empty_snapshot
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 
 def test_complete_empty_addition_result_and_body_agree_on_clean_after_commit() -> None:
@@ -23,6 +24,7 @@ def test_complete_empty_addition_result_and_body_agree_on_clean_after_commit() -
         worker_id="worker",
         expected_attempt=1,
         run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
     assert asyncio.run(store.execute(_RUN, answer())) is True
 
@@ -137,6 +139,7 @@ def test_repeated_finalization_does_not_replace_the_stored_result_or_publish_twi
         worker_id="worker",
         expected_attempt=1,
         run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
     assert asyncio.run(store.execute(_RUN, answer())) is True
     response, body = repository.response.copy(), repository.body
@@ -158,6 +161,7 @@ def test_complete_public_summary_and_body_do_not_depend_on_raw_model_summary() -
                 worker_id="worker",
                 expected_attempt=1,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             ).execute(_RUN, value)
         )
         return repository
@@ -240,6 +244,7 @@ def test_threshold_filtered_finding_and_raw_claims_do_not_survive_in_public_summ
             worker_id="worker",
             expected_attempt=1,
             run_url=lambda _: None,
+            parser=NullSuggestionParser(),
         ).execute(_RUN, value)
     )
     assert repository.response["summary"]["problem"] == "Подтверждённых замечаний нет."

@@ -34,6 +34,7 @@ from tests.review_publication_fakes import (
     PublicationUowFake,
 )
 from tests.test_coverage_none_classification import project, unsupported_path
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 _RUN = UUID(int=213)
 _TOO_LARGE = DiffSnapshot("large.txt", None, "d" * 40, omission_reason="too_large")
@@ -50,6 +51,7 @@ def _store(
         worker_id="worker",
         expected_attempt=1,
         run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
 
 
@@ -183,7 +185,11 @@ def test_the_inline_publisher_accepts_and_publishes_the_marker() -> None:
         files, project(files, snapshot_path=True), review_event="REQUEST_CHANGES"
     )
     provider = _FakeProvider()
-    publisher = PublishReviewOutput(lambda: PublicationUowFake(repository, []), cast(Any, provider))
+    publisher = PublishReviewOutput(
+        lambda: PublicationUowFake(repository, []),
+        cast(Any, provider),
+        parser=NullSuggestionParser(),
+    )
 
     result = asyncio.run(publisher.execute(_RUN, NoModelAnswer(incomplete_paths=("src/file.py",))))
 
@@ -202,7 +208,9 @@ def test_the_inline_publisher_accepts_and_publishes_the_marker() -> None:
     )
     empty_provider = _FakeProvider()
     empty_publisher = PublishReviewOutput(
-        lambda: PublicationUowFake(empty_repo, []), cast(Any, empty_provider)
+        lambda: PublicationUowFake(empty_repo, []),
+        cast(Any, empty_provider),
+        parser=NullSuggestionParser(),
     )
 
     assert asyncio.run(empty_publisher.execute(_RUN, NoModelAnswer())) is True

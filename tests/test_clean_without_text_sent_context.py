@@ -50,6 +50,7 @@ from tests.execute_review_fakes import (
 )
 from tests.run_coverage_fakes import code_snapshot, coverage
 from tests.test_gateway_review_model import RUN, Transport, _gateway
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 _RUN = UUID(int=213)
 
@@ -139,6 +140,7 @@ def _review_beside_withheld_files(anchor: str) -> Repository:
         worker_id="worker",
         expected_attempt=1,
         run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
 
     class Processor:
@@ -248,6 +250,7 @@ def test_actual_budget_fit_flows_through_reflection_early_return_and_finalizatio
         worker_id="worker",
         expected_attempt=1,
         run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
 
     class Processor:
@@ -373,6 +376,7 @@ def test_model_boundary_loss_survives_both_reflection_returns_without_outer_fit_
         worker_id="worker",
         expected_attempt=1,
         run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
 
     class Processor:
@@ -471,6 +475,7 @@ def test_outer_context_loss_survives_both_reflection_returns_without_carrier_los
         worker_id="worker",
         expected_attempt=1,
         run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
 
     class Processor:

@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from types import TracebackType
 from typing import Any
 from uuid import UUID
 
+from app.modules.reviews.application.ast_symbols import (
+    SuggestionValidationRequest,
+    SuggestionValidationResult,
+)
 from app.modules.reviews.application.conventions import CachedConventions, GeneratedConventions
 from app.modules.reviews.application.execute_review import ReviewPromptInput
 from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
@@ -33,6 +38,7 @@ from app.modules.reviews.application.store_review_output import (
     FinalizedReviewPlan,
     PublishingGuard,
 )
+from app.modules.reviews.infrastructure.suggestion_ast import validate_suggestion_tree
 from tests.findings_post_processor_fakes import _diff_map_from_vcs
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
@@ -134,9 +140,57 @@ class FakePublisher:
         return True
 
 
+class NullSuggestionParser:
+    """No-op ``SuggestionParser`` double for pipeline tests not asserting AST filtering."""
+
+    async def validate_suggestions(
+        self, requests: tuple[SuggestionValidationRequest, ...]
+    ) -> dict[str, SuggestionValidationResult]:
+        return {req.key: SuggestionValidationResult(is_valid=True) for req in requests}
+
+    async def aclose(self) -> None:
+        return None
+
+
+class InProcessSuggestionParser:
+    """In-process ``SuggestionParser`` evaluating suggestions with Tree-sitter and AST.
+
+    Accepts an optional hook ``on_validate(requests)`` called before parsing,
+    e.g. to assert UoW session closure or connection pool checkout state.
+    """
+
+    def __init__(
+        self,
+        on_validate: Callable[[tuple[SuggestionValidationRequest, ...]], None] | None = None,
+    ) -> None:
+        self._on_validate = on_validate
+        self.seen_requests: list[SuggestionValidationRequest] = []
+        self.closed = False
+
+    async def validate_suggestions(
+        self, requests: tuple[SuggestionValidationRequest, ...]
+    ) -> dict[str, SuggestionValidationResult]:
+        if self._on_validate is not None:
+            self._on_validate(requests)
+        self.seen_requests.extend(requests)
+        return {
+            req.key: validate_suggestion_tree(
+                req.language, req.source, req.start_line, req.line, req.suggestion
+            )
+            for req in requests
+        }
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 class FakeUnitOfWork:
     def __init__(self, reviews: Any) -> None:
         self.reviews = reviews
+
+    @property
+    def blob_cache(self) -> None:
+        return None
 
     async def __aenter__(self) -> FakeUnitOfWork:
         return self
@@ -157,8 +211,11 @@ class FakeUnitOfWork:
 
 
 class FakeQueue:
+    def __init__(self) -> None:
+        self.pointers: list[Any] = []
+
     async def publish_review(self, pointer: Any) -> None:
-        pass
+        self.pointers.append(pointer)
 
 
 class FakePublishingRepository:

@@ -11,6 +11,13 @@ model call, no network. The backend owns the implementation; this file owns the 
 
 - `ReviewOutput` as returned by the model and already parsed and schema-checked by the
   backend (`findings[]`, `summary`). A malformed answer never reaches this filter.
+  Before reaching `process()`, suggestions are validated against syntax errors and duplicate
+  conditions via `validate_review_suggestions()` (using cached HEAD blobs loaded within the open
+  UoW session and an injected `SuggestionParser`): invalid suggestions (`syntax_error`,
+  `duplicate_condition`, `application_failed`) have their `suggestion` field cleared to `null`
+  while retaining the finding and its comment body; uncheckable cases (`unsupported_language`,
+  `file_unavailable`, `non_utf8`, `file_too_large`, `ast_timeout`, `worker_error`) retain the
+  suggestion and emit an `INFO` log entry with `run_id`, `path`, `line`, and `reason`.
   Attribution consistency (a prefix that names no rule, or a `rule_name` the body does not
   quote) is not a schema error: it reaches step 7 and is repaired there.
   `scripts/validate_findings.py` rejects the same case deliberately — it is the strict gate
@@ -39,7 +46,9 @@ Three buckets that together contain every input finding exactly once:
   `duplicate`, `severity_threshold`, `unknown_path`.
 
 The filter never edits `title`, `severity`, `category`, `confidence` or `suggestion`, and
-edits `body` in one case only: step 7 strips a prefix that names no rule. Otherwise it may
+edits `body` in one case only: step 7 strips a prefix that names no rule. (Invalid suggestions
+with `syntax_error`, `duplicate_condition`, or `application_failed` are already stripped to
+`null` before `FindingsPostProcessor.process()` runs.) Otherwise it may
 only move a finding between buckets, set `drop_reason`, clear `rule_name` (step 7) and
 clear `start_line` (step 5).
 

@@ -12,6 +12,11 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.reviews.application.ast_symbols import SuggestionParser
+from app.modules.reviews.application.suggestion_validator import (
+    preload_suggestion_blobs,
+    validate_review_suggestions,
+)
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 if TYPE_CHECKING:
@@ -20,6 +25,7 @@ if TYPE_CHECKING:
         ProcessedFinding,
         ProcessedReviewOutput,
     )
+    from app.modules.reviews.application.get_run_file_lines import BlobCache
     from app.modules.reviews.application.policy_snapshot import CallManifest, PolicySnapshot
     from app.modules.reviews.application.prompt_builder import ChangedFile, PullRequestMeta
     from app.modules.reviews.application.run_coverage import RunCoverage
@@ -713,6 +719,9 @@ class ReviewOutputUnitOfWork(UnitOfWork, Protocol):
     @property
     def reviews(self) -> ReviewOutputRepository: ...
 
+    @property
+    def blob_cache(self) -> BlobCache | None: ...
+
 
 class ReviewOutputUnitOfWorkFactory(Protocol):
     """Create a fresh UoW after a provider crash or successful publication."""
@@ -755,9 +764,12 @@ class PublishReviewOutput:
         self,
         uow_factory: ReviewOutputUnitOfWorkFactory,
         provider: ReviewProvider,
+        *,
+        parser: SuggestionParser,
     ) -> None:
         self._uow_factory = uow_factory
         self._provider = provider
+        self._parser = parser
 
     async def execute(
         self,
@@ -803,23 +815,44 @@ class PublishReviewOutput:
         # Anchoring and custom-rule attribution are an immutable run boundary:
         # accepting caller data here would let a model response choose its own
         # hunk lines or valid rule names.
-        async with self._uow_factory() as uow:
-            context = await uow.reviews.get_post_processing_input(run_id)
-        if context is None:
-            return False
-        threshold_to_use = (
-            effective_threshold if effective_threshold is not None else context.severity_threshold
-        )
-        v2_rules_to_use = (
-            effective_v2_rules if effective_v2_rules is not None else context.allowed_v2_rules
-        )
-        coverage = context.coverage or RunCoverage(
-            CoverageStatus.PARTIAL,
-            0,
-            reasons=(CoverageItem(None, "classification_unavailable"),),
-        )
-        if parsed is None:
-            parsed = empty_review_output(context, coverage)
+        try:
+            async with self._uow_factory() as uow:
+                context = await uow.reviews.get_post_processing_input(run_id)
+                preloaded_blobs = (
+                    await preload_suggestion_blobs(
+                        parsed,
+                        diff_map=context.diff_map,
+                        blob_cache=uow.blob_cache,
+                    )
+                    if context is not None and parsed is not None
+                    else {}
+                )
+            if context is None:
+                return False
+            threshold_to_use = (
+                effective_threshold
+                if effective_threshold is not None
+                else context.severity_threshold
+            )
+            v2_rules_to_use = (
+                effective_v2_rules if effective_v2_rules is not None else context.allowed_v2_rules
+            )
+            coverage = context.coverage or RunCoverage(
+                CoverageStatus.PARTIAL,
+                0,
+                reasons=(CoverageItem(None, "classification_unavailable"),),
+            )
+            if parsed is None:
+                parsed = empty_review_output(context, coverage)
+            parsed = await validate_review_suggestions(
+                parsed,
+                diff_map=context.diff_map,
+                preloaded_blobs=preloaded_blobs,
+                parser=self._parser,
+                run_id=run_id,
+            )
+        finally:
+            await self._parser.aclose()
         processed = FindingsPostProcessor.from_default_patterns().process(
             parsed,
             diff_map=context.diff_map,

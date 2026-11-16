@@ -26,6 +26,7 @@ from app.modules.reviews.application.store_review_output import (
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 from tests.review_output_fakes import InMemoryFinalization
 from tests.run_coverage_fakes import code_snapshot
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 RUN_ID = UUID(int=213)
 
@@ -130,6 +131,7 @@ class Repository(InMemoryFinalization):
 class Uow:
     reviews: Repository
     committed: list[str]
+    blob_cache: None = None
 
     async def __aenter__(self) -> Uow:
         return self
@@ -186,6 +188,7 @@ def finalize(
                 worker_id="worker",
                 expected_attempt=1,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             ).execute(RUN_ID, value)
         )
         is True

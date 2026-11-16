@@ -11,12 +11,14 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.reviews.application.ast_symbols import SuggestionParser
 from app.modules.reviews.application.findings_post_processor import (
     FindingsPostProcessor,
     ProcessedFinding,
     ProcessedReviewOutput,
     finalize_stored_review_body,
 )
+from app.modules.reviews.application.get_run_file_lines import BlobCache
 from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH, CallManifest
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, ReviewPublishQueue
 from app.modules.reviews.application.review_output import (
@@ -33,6 +35,10 @@ from app.modules.reviews.application.review_output import (
 )
 from app.modules.reviews.application.run_coverage import CoverageItem, CoverageStatus, RunCoverage
 from app.modules.reviews.application.run_failures import LEASE, RunFailure
+from app.modules.reviews.application.suggestion_validator import (
+    preload_suggestion_blobs,
+    validate_review_suggestions,
+)
 from app.modules.reviews.application.verdict import (
     HashedFinding,
     SeverityThresholdValue,
@@ -122,6 +128,9 @@ class PublishingRepository(Protocol):
 class PublishingUnitOfWork(UnitOfWork, Protocol):
     @property
     def reviews(self) -> PublishingRepository: ...
+
+    @property
+    def blob_cache(self) -> BlobCache | None: ...
 
 
 def _claimed(guard: PublishingGuard | None, worker_id: str, attempt: int) -> bool:
@@ -228,6 +237,7 @@ class StoreReviewOutput:
         expected_attempt: int,
         run_url: Callable[[UUID], str | None],
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        parser: SuggestionParser,
     ) -> None:
         self._uow_factory = uow_factory
         self._queue = queue
@@ -235,6 +245,7 @@ class StoreReviewOutput:
         self._expected_attempt = expected_attempt
         self._run_url = run_url
         self._now = now
+        self._parser = parser
 
     async def checkpoint_candidates(
         self,
@@ -338,23 +349,46 @@ class StoreReviewOutput:
         answer = _as_json_object(raw_output) if model_answer else None
         started_at = self._now()
         started = time.monotonic()
-        async with self._uow_factory() as uow:
-            context = await uow.reviews.get_post_processing_input(run_id)
-        if context is None:
-            return False
-        coverage = context.coverage or RunCoverage(
-            CoverageStatus.PARTIAL, 0, reasons=(CoverageItem(None, "classification_unavailable"),)
-        )
-        if parsed is None:
-            # No findings to process. The post-processor replaces this summary with its own
-            # backend summary of the same result, the only one stored.
-            parsed = empty_review_output(context, coverage)
-        threshold_to_use = (
-            effective_threshold if effective_threshold is not None else context.severity_threshold
-        )
-        v2_rules_to_use = (
-            effective_v2_rules if effective_v2_rules is not None else context.allowed_v2_rules
-        )
+        try:
+            async with self._uow_factory() as uow:
+                context = await uow.reviews.get_post_processing_input(run_id)
+                preloaded_blobs = (
+                    await preload_suggestion_blobs(
+                        parsed,
+                        diff_map=context.diff_map,
+                        blob_cache=uow.blob_cache,
+                    )
+                    if context is not None and parsed is not None
+                    else {}
+                )
+            if context is None:
+                return False
+            coverage = context.coverage or RunCoverage(
+                CoverageStatus.PARTIAL,
+                0,
+                reasons=(CoverageItem(None, "classification_unavailable"),),
+            )
+            if parsed is None:
+                # No findings to process. The post-processor replaces this summary with its own
+                # backend summary of the same result, the only one stored.
+                parsed = empty_review_output(context, coverage)
+            threshold_to_use = (
+                effective_threshold
+                if effective_threshold is not None
+                else context.severity_threshold
+            )
+            v2_rules_to_use = (
+                effective_v2_rules if effective_v2_rules is not None else context.allowed_v2_rules
+            )
+            parsed = await validate_review_suggestions(
+                parsed,
+                diff_map=context.diff_map,
+                preloaded_blobs=preloaded_blobs,
+                parser=self._parser,
+                run_id=run_id,
+            )
+        finally:
+            await self._parser.aclose()
         processor = FindingsPostProcessor.from_default_patterns()
         processed = processor.process(
             parsed,
