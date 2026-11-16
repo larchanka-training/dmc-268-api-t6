@@ -178,8 +178,8 @@ deep: 5 цен единицы).
 
 | Итог run | Что списано |
 |---|---|
-| `succeeded` с хотя бы одним вызовом LLM | ровно `P` |
-| любой `failed`, с любым `error_code` (ошибка LLM, таймаут, баг, verifier, `github_forbidden`, `pr_base_changed`, `llm_context_overflow` и другие) | 0: каждое списание run сторнируется строкой `adjustment` в тот же грант (§5.1) |
+| `succeeded`, если у run есть хотя бы одна строка `usage_events` (включая деградированный `succeeded` при `llm_context_overflow`, Refs #461) | ровно `P` (доплата `run_settlement` до `P`, §3.3) |
+| любой `failed`, с любым `error_code` (ошибка LLM, таймаут, баг, verifier, `github_forbidden`, `pr_base_changed`, `llm_context_overflow` на `conventions` и другие) | 0: каждое списание run сторнируется строкой `adjustment` в тот же грант (§5.1) |
 | `cancelled` (новый `head_sha`, PR закрыт, `POST /api/runs/{id}/cancel`) | уже списанное по §3.3, без доплаты; после деградации deep → fast не больше нового `P` |
 | `skipped` без вызовов LLM (гейт 1, гейт 2, `budget_paused`) | 0 |
 | `skipped` после вызовов LLM на прошлой попытке run | уже списанное, без доплаты, как `cancelled` |

@@ -483,6 +483,50 @@ def incomplete_review_paths(
     return tuple(incomplete)
 
 
+class NoModelAnswer(Mapping[str, object]):
+    """The backend result of a run that made no model call: a marker, never an answer.
+
+    A snapshot-path change without analysable text (coverage none, #130 F5, or no-text
+    partial, CVS §2.2), a summary-only stop (#365), or a review context overflow (Refs #461)
+    is finished without the review model. It is stored as any result, but nothing is parsed,
+    no ``llm.review_output`` is written, and the post-processor's backend summary is the only
+    one. Optional ``incomplete_paths`` mark unreviewed files in finalized coverage. Empty
+    as a mapping so downstream parsers treat it as an explicit marker rather than an answer.
+    """
+
+    def __init__(self, *, incomplete_paths: tuple[str, ...] = ()) -> None:
+        self.incomplete_paths = incomplete_paths
+
+    def __getitem__(self, key: str) -> object:
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
+
+
+def empty_review_output(
+    context: FindingPostProcessingInput,
+    coverage: RunCoverage,
+) -> ReviewOutput:
+    """Construct an empty ReviewOutput for a run that produced no model answer."""
+    # Lazy import breaks circular dependency: review_output <-> findings_post_processor.py:17
+    from app.modules.reviews.application.findings_post_processor import summary_from_result
+
+    return ReviewOutput(
+        findings=[],
+        summary=summary_from_result(
+            (),
+            (),
+            coverage,
+            summary_reason=context.summary_reason if context.summary_only else None,
+            name_summary_only=context.summary_only,
+        ),
+    )
+
+
 def coerce_dropped_findings(
     run_id: UUID,
     raw_items: object,
@@ -655,7 +699,7 @@ class ReviewOutputRepository(Protocol):
     async def store_review_output(
         self,
         run_id: UUID,
-        model_output: dict[str, object],
+        model_output: dict[str, object] | None,
         parsed: ReviewOutput,
         processed: ProcessedReviewOutput,
     ) -> ReviewPublication | None: ...
@@ -752,8 +796,9 @@ class PublishReviewOutput:
             raw_output.allowed_v2_rules if isinstance(raw_output, VerifiedReviewOutput) else None
         )
         pre_dropped = coerce_dropped_findings(run_id, effective_dropped_input)
-        parsed = parse_review_output(raw_output)
-        answer = _as_json_object(raw_output)
+        model_answer = not isinstance(raw_output, NoModelAnswer)
+        parsed = parse_review_output(raw_output) if model_answer else None
+        answer = _as_json_object(raw_output) if model_answer else None
 
         # Anchoring and custom-rule attribution are an immutable run boundary:
         # accepting caller data here would let a model response choose its own
@@ -768,6 +813,13 @@ class PublishReviewOutput:
         v2_rules_to_use = (
             effective_v2_rules if effective_v2_rules is not None else context.allowed_v2_rules
         )
+        coverage = context.coverage or RunCoverage(
+            CoverageStatus.PARTIAL,
+            0,
+            reasons=(CoverageItem(None, "classification_unavailable"),),
+        )
+        if parsed is None:
+            parsed = empty_review_output(context, coverage)
         processed = FindingsPostProcessor.from_default_patterns().process(
             parsed,
             diff_map=context.diff_map,
@@ -778,15 +830,12 @@ class PublishReviewOutput:
             allowed_v2_rules=v2_rules_to_use,
             pre_dropped=pre_dropped,
             apply_severity_threshold=effective_threshold is None,
-            coverage=context.coverage
-            or RunCoverage(
-                CoverageStatus.PARTIAL,
-                0,
-                reasons=(CoverageItem(None, "classification_unavailable"),),
-            ),
+            coverage=coverage,
             summary_only=context.summary_only,
             incomplete_paths=(
-                raw_output.incomplete_paths if isinstance(raw_output, VerifiedReviewOutput) else ()
+                raw_output.incomplete_paths
+                if isinstance(raw_output, (VerifiedReviewOutput, NoModelAnswer))
+                else ()
             ),
         )
         parsed = parsed.model_copy(update={"summary": processed.summary})

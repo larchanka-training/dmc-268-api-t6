@@ -85,7 +85,7 @@ class InMemoryFinalization:
 class RecordingRepository:
     context: FindingPostProcessingInput | None
     publication: ReviewPublication | None
-    raw_objects: list[dict[str, object]] = field(default_factory=list)
+    raw_objects: list[dict[str, object] | None] = field(default_factory=list)
     marked: int = 0
 
     async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput | None:
@@ -95,7 +95,7 @@ class RecordingRepository:
     async def store_review_output(
         self,
         run_id: UUID,
-        model_output: dict[str, object],
+        model_output: dict[str, object] | None,
         parsed: ReviewOutput,
         processed: ProcessedReviewOutput,
     ) -> ReviewPublication | None:
