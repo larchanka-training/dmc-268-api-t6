@@ -22,6 +22,7 @@ pytest.register_assert_rewrite(
     "tests.portal_postgres",
     "tests.code_index_indexer_support",
     "tests.gitlab_projection_support",
+    "tests.telemetry_fakes",
 )
 
 # ``configure_logging`` (the app lifespan, worker mains) changes these process-wide.
