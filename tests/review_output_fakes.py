@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
+from app.modules.reviews.application.get_run_file_lines import BlobCache
 from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
     PublishedFinding,
@@ -114,6 +115,7 @@ class RecordingUnitOfWork:
     reviews: RecordingRepository
     commits: int = 0
     active: bool = False
+    blob_cache: BlobCache | None = None
 
     async def __aenter__(self) -> RecordingUnitOfWork:
         self.active = True

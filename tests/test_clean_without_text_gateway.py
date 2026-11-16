@@ -40,6 +40,7 @@ from tests.llm_gateway_fakes import PRIMARY, completion
 from tests.run_coverage_fakes import code_snapshot, coverage
 from tests.test_gateway_review_model import RUN, Transport, _gateway, _snapshot
 from tests.test_llm_gateway import Harness
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 
 def test_gateway_hidden_fit_marks_legacy_unverified_output_and_persisted_result_partial() -> None:
@@ -58,6 +59,7 @@ def test_gateway_hidden_fit_marks_legacy_unverified_output_and_persisted_result_
             worker_id="worker",
             expected_attempt=1,
             run_url=lambda _: None,
+            parser=NullSuggestionParser(),
         )
         lines = tuple(DiffLine(i + 1, "added", f"line_{i} = '{'x' * 70}'") for i in range(400))
 
@@ -157,6 +159,7 @@ def test_snapshot_reply_fit_and_reflection_keep_the_final_coverage(
         worker_id="worker",
         expected_attempt=1,
         run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
     output = answer()
     if candidates != "empty":

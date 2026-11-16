@@ -32,6 +32,7 @@ from tests.portal_postgres import NOW, PR_NEW, REPO_A, RUN_ATTEMPTED, Env, porta
 from tests.publication_settings_postgres import _insert, _ready
 from tests.test_prepare_policy_snapshot import Source
 from tests.test_severity_threshold_postgres import RecordingQueue
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 _PATH = "app/charge.py"
 _PATCH = "@@ -10,4 +10,5 @@\n context\n+added\n context\n context\n context"
@@ -264,6 +265,7 @@ def test_created_run_and_retry_keep_pins_but_rerun_uses_current_pair(env: Env) -
                 worker_id="worker",
                 expected_attempt=2,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             ).execute(run_id, _answer())
             assert len(queue.pointers) == 1 and queue.pointers[0].run_id == run_id
             async with factory() as session:

@@ -74,6 +74,7 @@ from tests.policy_snapshot_fakes import (
     make_policy_document_present,
 )
 from tests.test_findings_post_processor import _added_file_diff_map
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 type Shape = tuple[str, tuple[tuple[str, str], ...], tuple[Shape, ...]]
 
@@ -423,6 +424,10 @@ class _UnitOfWork:
     def reviews(self) -> _Reviews:
         return self._reviews
 
+    @property
+    def blob_cache(self) -> None:
+        return None
+
     async def __aenter__(self) -> Self:
         return self
 
@@ -752,7 +757,9 @@ def _publish_with_rules(
     pipeline = _pipeline(
         model=model,
         verifier=verifier,
-        publisher=_CheckpointedPublishReviewOutput(lambda: _UnitOfWork(reviews), provider),
+        publisher=_CheckpointedPublishReviewOutput(
+            lambda: _UnitOfWork(reviews), provider, parser=NullSuggestionParser()
+        ),
         rules_text=rules_text,
     )
     assert asyncio.run(pipeline.execute(RUN_ID)) is True
