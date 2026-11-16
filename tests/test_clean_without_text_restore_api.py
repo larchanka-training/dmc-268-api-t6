@@ -130,8 +130,11 @@ def test_corrupt_context_warns_with_run_id_while_absent_context_is_quiet(
             run_id=UUID(int=213),
         )
     assert result.status.value == "partial"
-    assert "Invalid saved context coverage" in caplog.text
-    assert "run_id=00000000-0000-0000-0000-0000000000d5" in caplog.text
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_records) == 1
+    assert warning_records[0].name == "app.modules.reviews.application.run_coverage"
+    assert "Invalid saved context coverage" in warning_records[0].getMessage()
+    assert "run_id=00000000-0000-0000-0000-0000000000d5" in warning_records[0].getMessage()
     assert "private-token" not in caplog.text
     caplog.clear()
     run_coverage.restore_context_coverage(
