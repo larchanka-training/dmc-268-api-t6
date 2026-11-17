@@ -15,6 +15,7 @@ tests/
 docs
 terraform
 deploy
+review_bot
 *.md
 !app/modules/auth/api/agent_instructions.md
 !review/

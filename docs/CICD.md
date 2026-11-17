@@ -983,6 +983,80 @@ Caddy (compose project `dmc-268-edge`, `/opt/dmc-268-edge`) принимает 8
 
 HSTS: `max-age=31536000` без `includeSubDomains` и `preload`. ACME email не задан.
 
+## 9. Бот ревью (#601)
+
+Сервис описан в [INFRASTRUCTURE.md](INFRASTRUCTURE.md#9-бот-ревью-601). Код в `review_bot/`, свой uv-проект: корневые гейты его не проверяют (`mypy .` исключает `review_bot/`), для него есть job **Review bot lint / type / test** (`review-bot-checks`, на каждом PR и push). Локально:
+
+```bash
+cd review_bot
+uv sync --locked
+uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pytest
+```
+
+### 9.1. Деплой
+
+Job **Deploy review bot** (`deploy-review-bot`) в `.github/workflows/ci-cd.yml` устроен как деплой мониторинга: идёт после успешного `deploy-staging` на тот же хост и тем же входом (`appleboy/scp-action` и `appleboy/ssh-action`), в Environment `staging`, в своей concurrency-группе `review-bot-deploy` (lock `staging-deploy` он не берёт). Шаги:
+
+1. **Decide whether to deploy**: на push в `main` деплой идёт, только если в push изменился `review_bot/`; ручной запуск (`workflow_dispatch` на `main`) деплоит всегда. Если в Environment нет хотя бы одного секрета из §9.3, job завершается зелёным с notice `deploy skipped, Environment staging lacks: ...` и имена недостающих секретов.
+2. **Bundle review bot secrets**: секреты собираются в один base64-бандл формата `deploy/scripts/env-file.sh` (строки `NAME=<base64 значения>`), значение маскируется.
+3. **Upload review bot files**: `Dockerfile`, `compose.yml`, `deploy.sh`, `pyproject.toml`, `uv.lock`, `src/` в `/opt/dmc-268-review-bot`.
+4. **Deploy review bot**: `review_bot/deploy.sh` на хосте проверяет бандл (только имена из allowlist, все пять на месте), пишет `review-bot.env` (mode 600) и запускает `docker compose -p dmc-268-review-bot -f compose.yml up -d --build --wait`. Job красный, если контейнер не стал healthy за 4 минуты, например при ошибке конфигурации: в логе контейнера имя переменной, без значения.
+
+Первый деплой после того, как секреты заведены: **Actions → CI/CD → Run workflow** на `main`. Остановить бота: `docker compose -p dmc-268-review-bot -f /opt/dmc-268-review-bot/compose.yml stop`; данные остаются в volume.
+
+### 9.2. Состав команды и пороги
+
+Состав команды в репозитории не хранится (он публичный): это secret `REVIEW_BOT_TEAM` в Environment `staging`, JSON-список `{"github": "<логин>", "telegram": "<ник без @>"}`. Пример с выдуманными именами: `review_bot/team.example.json`.
+
+Добавить или убрать человека:
+
+1. Взять текущий JSON у того, кто ведёт secret (GitHub не показывает значение secret), добавить или убрать запись.
+2. **Settings → Environments → staging → Secrets → `REVIEW_BOT_TEAM` → Update**.
+3. Запустить **CI/CD → Run workflow** на `main`: бот перезапустится с новым составом.
+
+Новый участник должен быть collaborator в обоих репозиториях, иначе GitHub не даст запросить у него ревью (бот пропустит его и возьмёт следующего, в логе `GitHub refused reviewer`).
+
+Пороги заданы в `environment:` сервиса `bot` в `review_bot/compose.yml`; меняются PR-ом в этот файл, после merge job деплоит бота сам:
+
+| Переменная | По умолчанию | Смысл |
+|---|---|---|
+| `REVIEW_BOT_BATCH_MIN_PRS` | `2` | столько PR в копилке нужно для отправки по тишине |
+| `REVIEW_BOT_QUIET_MINUTES` | `30` | минут без новых PR в копилке |
+| `REVIEW_BOT_MAX_WAIT_MINUTES` | `120` | самый старый PR в копилке ждёт не дольше |
+| `REVIEW_BOT_DIGEST_TIME` | `18:00` | время вечернего дайджеста |
+| `REVIEW_BOT_DIGEST_TIMEZONE` | `Europe/Berlin` | часовой пояс дайджеста |
+| `REVIEW_BOT_AGE_HOURS` | `10` | возраст в дайджесте и `/mine` показывается, если PR ждёт дольше |
+| `REVIEW_BOT_URGENT_LABEL` | `urgent` | метка срочного PR |
+| `REVIEW_BOT_POLL_SECONDS` | `60` | интервал опроса GitHub |
+| `REVIEW_BOT_REPOS` | оба репо команды | пары `owner/name=alias`, alias виден в сообщении (`api#562`) |
+
+### 9.3. Secrets и как их получить
+
+Все в Environment `staging` (Settings → Environments → staging):
+
+| Secret | Что это |
+|---|---|
+| `REVIEW_BOT_APP_ID` | App ID GitHub App бота (можно variable с тем же именем) |
+| `REVIEW_BOT_APP_PRIVATE_KEY` | private key App, PEM целиком |
+| `REVIEW_BOT_TELEGRAM_BOT_TOKEN` | токен Telegram-бота от @BotFather |
+| `REVIEW_BOT_TELEGRAM_CHAT_ID` | id чата команды (для группы отрицательное число, `-100...`) |
+| `REVIEW_BOT_TEAM` | состав команды, §9.2 |
+
+Доступ к хосту и fingerprint берутся те же, что у `deploy-staging` (§6).
+
+GitHub App (отдельный от основного App сервиса):
+
+1. Организация `larchanka-training` → **Settings → Developer settings → GitHub Apps → New GitHub App**. Имя, например `dmc-268-review-bot`; Homepage URL: ссылка на этот репозиторий; **Webhook: Active** снять (бот опрашивает API сам).
+2. **Repository permissions**: Pull requests: **Read and write**, Metadata: **Read-only**. Остальное: No access. Where can this GitHub App be installed: Only on this account.
+3. **Create GitHub App**, записать App ID → `REVIEW_BOT_APP_ID`. **Generate a private key**, содержимое скачанного `.pem` → `REVIEW_BOT_APP_PRIVATE_KEY`, сам файл удалить.
+4. **Install App** → Only select repositories: `dmc-268-api-t6` и `dmc-268-ui-t6`.
+
+Telegram-бот:
+
+1. В Telegram у @BotFather: `/newbot`, имя и username бота; токен → `REVIEW_BOT_TELEGRAM_BOT_TOKEN`. `/setcommands`: `mine - твои PR сейчас`. `/setprivacy` → **Disable**: с включённым privacy mode Telegram гарантирует боту в группе только команды с его именем (`/mine@<username бота>`), а простой `/mine` может не дойти.
+2. Добавить бота в чат команды.
+3. id чата: написать в чат любое сообщение, затем открыть `https://api.telegram.org/bot<токен>/getUpdates` и взять `message.chat.id` → `REVIEW_BOT_TELEGRAM_CHAT_ID`. Делать это до первого деплоя: работающий бот сам читает обновления, и в `getUpdates` их уже не будет.
+
 ## Bitbucket Cloud staging (#333)
 
 Deployment передаёт keyring `BITBUCKET_CREDENTIAL_KEYS` (Environment secret) и `BITBUCKET_ACTIVE_KEY_ID` (Environment variable) в общий `bitbucket.env` для API, review worker и webhook worker. `BITBUCKET_WEBHOOK_BASE_URL` (Environment variable) попадает только в `api.env`. Для курсового VPS это публичный HTTPS origin `https://staging-api.<APP_DOMAIN>`; `staging-webhook` остаётся зарезервированной 503-заглушкой. Значения проходят CI bundle → `deploy/scripts/env-file.sh` → role-specific 0600 files; сам API token Bitbucket хранится на connection в БД и через CI не передаётся. Локальный Compose получает переменные из защищённого process env / локального `.env` по [SECRETS](SECRETS.md), без записи секретов в Git.

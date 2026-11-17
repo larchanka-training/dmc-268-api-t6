@@ -59,8 +59,9 @@ files = ["app", "tests"]
 # Directories `mypy .` must not walk: the git-ignored report mirror duplicates modules of `app`,
 # and the #146 RAG corpus holds one repository per case, so every case has its own `pkg/`
 # (mypy stops with "Duplicate module named"). With mypy 2.3.1 a command-line `--exclude` does
-# not switch this list off.
-exclude = ["^docs/reports/", "^test-prs-dataset/rag/"]
+# not switch this list off. `review_bot/` is its own project (#601) with its own strict mypy run
+# in the CI job "Review bot lint / type / test".
+exclude = ["^docs/reports/", "^test-prs-dataset/rag/", "^review_bot/"]
 
 # The #146 eval test fixtures (tests/fixtures/rag_eval, the Task 1 spike) are repositories
 # under review: a case's defect is real code, so type errors in them are the point, not a

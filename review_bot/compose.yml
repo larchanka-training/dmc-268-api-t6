@@ -1,0 +1,41 @@
+# Review bot of #601: its own compose project on the course VPS, next to staging and prod and
+# independent of them (docs/INFRASTRUCTURE.md, section "Review bot"). Deployed by deploy.sh:
+#   docker compose -p dmc-268-review-bot -f compose.yml up -d --build
+# Secrets come from review-bot.env (written by deploy.sh from the CI bundle, mode 600); the
+# thresholds below are the bot's config: change them here, in a pull request.
+services:
+  bot:
+    build: .
+    image: dmc-268-review-bot:local
+    env_file:
+      - review-bot.env
+    environment:
+      REVIEW_BOT_REPOS: larchanka-training/dmc-268-api-t6=api,larchanka-training/dmc-268-ui-t6=ui
+      REVIEW_BOT_POLL_SECONDS: "60"
+      REVIEW_BOT_BATCH_MIN_PRS: "2"
+      REVIEW_BOT_QUIET_MINUTES: "30"
+      REVIEW_BOT_MAX_WAIT_MINUTES: "120"
+      REVIEW_BOT_DIGEST_TIME: "18:00"
+      REVIEW_BOT_DIGEST_TIMEZONE: Europe/Berlin
+      REVIEW_BOT_AGE_HOURS: "10"
+      REVIEW_BOT_URGENT_LABEL: urgent
+      REVIEW_BOT_DB_PATH: /data/review-bot.sqlite3
+    volumes:
+      - review-bot-data:/data
+    restart: unless-stopped
+    # The VPS is shared with staging and prod: a small fixed budget.
+    mem_limit: 128m
+    cpus: 0.25
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  review-bot-data:
