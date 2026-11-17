@@ -1053,7 +1053,7 @@ GitHub App (отдельный от основного App сервиса):
 
 Telegram-бот:
 
-1. В Telegram у @BotFather: `/newbot`, имя и username бота; токен → `REVIEW_BOT_TELEGRAM_BOT_TOKEN`. `/setcommands`: `mine - твои PR сейчас`. Privacy mode можно оставить включённым: команды бот получает и с ним.
+1. В Telegram у @BotFather: `/newbot`, имя и username бота; токен → `REVIEW_BOT_TELEGRAM_BOT_TOKEN`. `/setcommands`: `mine - твои PR сейчас`. `/setprivacy` → **Disable**: с включённым privacy mode Telegram гарантирует боту в группе только команды с его именем (`/mine@<username бота>`), а простой `/mine` может не дойти.
 2. Добавить бота в чат команды.
 3. id чата: написать в чат любое сообщение, затем открыть `https://api.telegram.org/bot<токен>/getUpdates` и взять `message.chat.id` → `REVIEW_BOT_TELEGRAM_CHAT_ID`. Делать это до первого деплоя: работающий бот сам читает обновления, и в `getUpdates` их уже не будет.
 
