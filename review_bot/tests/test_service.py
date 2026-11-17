@@ -301,7 +301,7 @@ def test_the_message_matches_the_example_format(h: Harness) -> None:
             "@carol_tg",
             f"• {link.format('api', 566, 'api#566 Skylos quality job')} · nik",
             "",
-            "/mine — твои PR сейчас",
+            "/mine: твои PR сейчас",
         ]
     )
 

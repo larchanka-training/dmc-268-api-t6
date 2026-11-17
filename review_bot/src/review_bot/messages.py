@@ -11,7 +11,7 @@ from review_bot.models import Item
 
 BATCH_HEADER = "🔎 Ревью ждут {count} PR"
 DIGEST_HEADER = "🌙 Висит без ревью к {time}"
-FOOTER = "/mine — твои PR сейчас"
+FOOTER = "/mine: твои PR сейчас"
 
 
 def _line(
