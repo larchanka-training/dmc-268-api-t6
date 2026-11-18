@@ -4,8 +4,9 @@
 
 - Always use uv for dependencies and running tools (never pip/poetry).
 - Never `--no-verify`.
-- Run the gates before claiming done: `uv run ruff check .`, `uv run ruff format --check .`,
-  `uv run mypy .`, `uv run pytest`.
+- Run the gates before claiming done without errors or new warnings: `uv run ruff check .`,
+  `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest` (criteria for
+  zero warnings and `ruff` rule rationale: see §4).
 - No new dependency without a line in the PR body (`uv add`, commit `uv.lock`).
 - Never edit files owned by another open PR without a comment there.
 - User docs (the UI repo `docs-site/content/docs/`) follow `docs/CONTRIBUTING.md` §8: a PR that
@@ -106,7 +107,49 @@ from a missing scope.
 - No business logic in routers — routers decode the transport contract and call a
   use case.
 - Enums are `StrEnum`.
-- Ruff: `select = ["E", "F", "I", "UP", "B", "SIM"]`, line length 100.
+- Ruff: `select = ["E", "F", "I", "UP", "B", "SIM", "W", "FA", "G", "PIE", "T10", "TID", "PLE",`
+  `"YTT", "ANN", "D"]`, line length 100, `[tool.ruff.lint.pydocstyle] convention = "google"`,
+  `ignore` in `pyproject.toml` (no directory `per-file-ignores`, no package-wide `# noqa`).
+  - Baseline measurements on `main` (`ruff 0.16.6`, entire repository `.` including `.agents/`):
+    - Clean expanded families (0 hits on `main`): `W`, `FA`, `G`, `T10`, `TID`, `PLE`, `YTT`;
+      `PIE` (5 hits on `main` from `PIE810`, resolved in this PR).
+    - `D` (13,605 total hits):
+      - Presence rules `D100`–`D107` (12,229 hits: 7,724 `D103`, 2,527 `D102`, 1,186 `D101`,
+        540 `D107`, 184 `D105`, 42 `D100`, 26 `D104`) omitted to avoid boilerplate on helpers/tests.
+      - `D401` (647 hits, English imperative mood false positives on Russian docstrings) disabled by
+        `convention = "google"` alongside `D203`/`D213`.
+      - Formatting backlog (729 hits, including 333 inside `.agents/` SYNC copies from UI):
+        `D205` (365 hits: 203 outside, 162 in `.agents/`), `D209` (327 hits: 168 outside, 159 in
+        `.agents/`), `D301` (15 hits: 14 outside, 1 in `.agents/`), `D403` (13 hits: 3 outside,
+        10 in `.agents/`), `D202` (8 hits: 4 in `app/`, 4 in `tests/`),
+        `D210` (1 hit in `.agents/`).
+      - All other Google-convention rules (`D200`, `D201`, `D206`–`D208`, `D211`, `D212`, `D214`,
+        `D300`, `D402`, `D405`, `D410`–`D412`, `D414`–`D419`) have 0 hits and are strictly enforced.
+    - `ANN` (714 total hits): `ANN401` (707 `Any` usages: 29 `app/`, 537 `tests/`, 17 `scripts/`,
+      2 `review/`, 122 `.agents/`) ignored because `mypy --strict` verifies types; remaining 7
+      hits in `tests/` typed directly.
+    - Deferred families:
+      - `ERA001` (3 hits: 2 in `tests/` addressed by #458 Part 1, 1 in `.agents/` SYNC copy;
+        deferred to #458 Part 1 merge).
+      - `RUF` (401 total homoglyph hits: 366 `RUF001` ambiguous characters in strings, 18 `RUF002`
+        in docstrings, 17 `RUF003` in comments; deferred because Cyrillic characters in Russian
+        test fixtures and docstrings trigger false-positive ambiguous unicode warnings).
+- Zero warnings (gate pass criteria; baseline warnings are pinned, new warnings are not allowed):
+  - `uv run ruff check .`: exit code `0`, `All checks passed!`, 0 configuration warnings.
+  - `uv run ruff format --check .`: exit code `0`, all files formatted, 0 warnings.
+  - `uv run mypy .` (on Linux; `uv run mypy --platform linux .` on macOS/Windows): exit code `0`,
+    `Success: no issues found in <N> source files` (`strict = true` on `app/` and `tests/`),
+    0 warnings/errors.
+  - Local test run `uv run pytest`: exit code `0`, 0 failed; `-m integration` tests are skipped
+    when `TEST_DATABASE_URL` / `TEST_RABBITMQ_URL` are unset; platform skips are acceptable;
+    0 new warnings emitted by repository code.
+  - CI test step `Unit tests (zero skips)` in `ci-cd.yml` (`uv run pytest -m "not integration"`
+    `-n auto -rs --strict-markers ...`): exit code `0`, 0 skipped, 0 warnings from repository code
+    (`app/`, `tests/`, `scripts/`, `review/`).
+    The external warning baseline consists of 2 external warnings emitted on testclient import
+    (`StarletteDeprecationWarning` in `fastapi.testclient` and `DeprecationWarning` for
+    `anyio.abc.BlockingPortal` in `starlette.testclient`); this is a policy expectation of
+    cleanliness from repository code (CI enforces fail-on-warning strictly for `CoverageWarning`).
 
 ## 5. Testing
 
@@ -144,8 +187,9 @@ from a missing scope.
   `tests.worker_queue_postgres`, `tests.webhook_notifications_postgres`,
   `tests.rules_md_e2e`, `tests.deploy_host_fakes`,
   `tests.deploy_prod_workflow_fakes`, `tests.monitoring_deploy_host`,
-  `tests.code_index_postgres`, `tests.portal_postgres` and
-  `tests.code_index_indexer_support`).
+  `tests.code_index_postgres`, `tests.portal_postgres`,
+  `tests.code_index_indexer_support`, `tests.gitlab_projection_support`,
+  `tests.github_webhook_fakes` and `tests.bitbucket_connection_postgres_support`).
 - Assert literal values taken from the spec — never derive an expected value from
   the implementation under test.
 - One test per behavior. Before adding a test, grep the feature's file prefix for the

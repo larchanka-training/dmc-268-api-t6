@@ -68,10 +68,7 @@ def test_host_gitlab_preflight_rejects_candidate_before_any_live_mutation(
     assert "PROBE_SECRET_CANARY" not in result.stdout + result.stderr
     assert host.files() == before
     assert {path.name: _mode(path) for path in host.app_dir.iterdir()} == modes
-    assert not any(
-        call.startswith("compose ") or call.startswith("rm ")
-        for call in host.calls()[calls_before:]
-    )
+    assert not any(call.startswith(("compose ", "rm ")) for call in host.calls()[calls_before:])
     assert list(host.tmp.iterdir()) == []
 
 
@@ -403,7 +400,7 @@ def test_host_refuses_gitlab_io_failures_before_validation_or_live_changes(
     assert host.files() == before
     assert {path.name: _mode(path) for path in host.app_dir.iterdir()} == modes
     assert not any(
-        call == "run" or call.startswith("run ") or " up " in call or call.startswith("rm ")
+        call == "run" or call.startswith(("run ", "rm ")) or " up " in call
         for call in host.calls()[calls_before:]
     )
     outside = Path(environment["STUB_OUTSIDE_DIR"])
@@ -610,7 +607,7 @@ def test_retained_role_files_report_only_static_basename_and_category(
     assert host.files() == before
     assert {path.name: _mode(path) for path in host.app_dir.iterdir()} == modes
     assert not any(
-        call == "run" or call.startswith("run ") or " up " in call or call.startswith("rm ")
+        call == "run" or call.startswith(("run ", "rm ")) or " up " in call
         for call in host.calls()[calls_before:]
     )
     assert list(host.tmp.iterdir()) == []
@@ -707,8 +704,7 @@ def _registry_failure_with_safety_checks(
     assert host.files() == before
     assert {path.name: _mode(path) for path in host.app_dir.iterdir()} == modes
     assert not any(
-        call.startswith("run ") or " up " in call or call.startswith("rm ")
-        for call in host.calls()[calls_before:]
+        call.startswith(("run ", "rm ")) or " up " in call for call in host.calls()[calls_before:]
     )
     assert list(shared_config.iterdir()) == []
     assert list(host.tmp.iterdir()) == []

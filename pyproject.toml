@@ -45,7 +45,51 @@ line-length = 100
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+    "W",
+    "FA",
+    "G",
+    "PIE",
+    "T10",
+    "TID",
+    "PLE",
+    "YTT",
+    "ANN",
+    "D",
+]
+ignore = [
+    # mypy --strict enforces type safety; explicit Any covers 707 dynamic payloads/fakes/fixtures
+    # across the repo (29 in app/, 537 in tests/, 17 in scripts/, 2 in review/, 122 in .agents/).
+    "ANN401",
+    # Docstring presence rules (12,229 existing symbols: 7,724 D103, 2,527 D102, 1,186 D101,
+    # 540 D107, 184 D105, 42 D100, 26 D104) are omitted so tests/helpers need no ceremony.
+    "D100",
+    "D101",
+    "D102",
+    "D103",
+    "D104",
+    "D105",
+    "D106",
+    "D107",
+    # Docstring formatting backlog (729 hits across repo, including 333 inside SYNC-mirrored
+    # `.agents/` files owned by dmc-268-ui-t6):
+    "D202",  # 8 hits (app: 4, tests: 4; all outside .agents)
+    "D205",  # 365 hits (app: 101, tests: 74, scripts: 2, review: 26, .agents: 162)
+    "D209",  # 327 hits (168 outside .agents, 159 in .agents)
+    "D210",  # 1 hit (1 in .agents)
+    "D301",  # 15 hits (14 outside .agents, 1 in .agents)
+    "D403",  # 13 hits (3 outside .agents, 10 in .agents)
+]
+
+[tool.ruff.lint.pydocstyle]
+# Disables conflicting blank-line/first-line rules (D203, D213) and D401 (647 imperative-mood hits).
+convention = "google"
 
 [tool.ruff.format]
 exclude = ["*.md"]
