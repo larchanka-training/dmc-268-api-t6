@@ -125,6 +125,7 @@ from review.scripts.validate_dataset import (  # noqa: E402
     POLICY_ARMS,
     SCHEMA_PATH,
     _patch_added_lines,
+    apply_case_patch,
     uses_policy_arms,
     validate_case,
 )
@@ -768,6 +769,60 @@ def _rag_warnings(
     return []
 
 
+def reconstruct_head_file_contents(
+    case_dir: Path,
+    record: Mapping[str, Any],
+    *,
+    warnings: list[str] | None = None,
+) -> dict[str, bytes]:
+    """Reconstruct PR-head file bytes by applying the case patch onto ``base_path``."""
+    case_id = str(record.get("id") or case_dir.name)
+    base_rel = record.get("base_path")
+    patch_rel = record.get("patch_path")
+    if not isinstance(base_rel, str) or not isinstance(patch_rel, str):
+        if warnings is not None:
+            warnings.append(f"case {case_id}: base_path or patch_path missing")
+        return {}
+    base = case_dir / base_rel
+    patch = case_dir / patch_rel
+    if not base.is_dir() or not patch.is_file():
+        if warnings is not None:
+            warnings.append(f"case {case_id}: base directory or patch file missing")
+        return {}
+    apply_directory = record.get("apply_directory")
+    applied, files = apply_case_patch(
+        base,
+        patch,
+        apply_directory=apply_directory if isinstance(apply_directory, str) else None,
+        check_only=False,
+        prefix="replay-head-",
+    )
+    if applied.returncode != 0:
+        if warnings is not None:
+            err_msg = applied.stderr.strip() or applied.stdout.strip() or "git apply failed"
+            warnings.append(f"case {case_id}: {err_msg}")
+        return {}
+    if isinstance(apply_directory, str) and apply_directory and not files:
+        if warnings is not None:
+            warnings.append(
+                f"case {case_id}: apply_directory {apply_directory!r} "
+                "not found in reconstructed tree"
+            )
+        return {}
+    return files
+
+
+def _has_string_suggestion(raw_response: object) -> bool:
+    if not isinstance(raw_response, Mapping):
+        return False
+    findings = raw_response.get("findings")
+    if not isinstance(findings, Sequence) or isinstance(findings, (str, bytes)):
+        return False
+    return any(
+        isinstance(item, Mapping) and isinstance(item.get("suggestion"), str) for item in findings
+    )
+
+
 def replay(
     root: Path = DEFAULT_ROOT,
     *,
@@ -820,6 +875,12 @@ def replay(
         case_id = record["id"]
         response_path = response_paths[case_id]
         raw, valid, exit_code, validator_output = _validated_raw(response_path, v2=v2)
+        answer = _normalized_answer(response_path, v2=v2)
+        file_contents = (
+            reconstruct_head_file_contents(case_dir, record, warnings=warnings)
+            if _has_string_suggestion(raw) or _has_string_suggestion(answer)
+            else None
+        )
         case = ScoringCase(
             case_id=case_id,
             truths=tuple(record["expected_findings"]),
@@ -830,9 +891,9 @@ def replay(
             usage=None if usage is None else tuple(usage[case_id]),
             arm=scoring_arm,
             must_not_flag=tuple(record.get("must_not_flag", ())),
+            file_contents=file_contents,
         )
         cases.append(case)
-        answer = _normalized_answer(response_path, v2=v2)
         normalized_cases.append(
             replace(case, raw_response=answer, response_valid=answer is not None)
         )
@@ -916,6 +977,18 @@ def _quality_lines(scored: dict[str, Any]) -> list[str]:
     ]
 
 
+def _suggestions_line(suggestions: Mapping[str, Any] | None, *, indent: str = "") -> str | None:
+    if suggestions is None:
+        return None
+    if not suggestions.get("total", 0) and not suggestions.get("unchecked", 0):
+        return None
+    return (
+        f"{indent}Suggestions valid: {_percent(suggestions['share'])} "
+        f"({suggestions['valid']}/{suggestions['total']}, "
+        f"unchecked={suggestions.get('unchecked', 0)})"
+    )
+
+
 def format_console(report: dict[str, Any]) -> str:
     """Human-readable summary using the same counts as the JSON report."""
     provenance = report["provenance"]
@@ -941,7 +1014,6 @@ def format_console(report: dict[str, Any]) -> str:
             f"Precision={_percent(counts['precision'])} Recall={_percent(counts['recall'])}"
         )
     lines.append(f"Severity mismatches: {len(report['severity_mismatches'])}")
-    # Shown only where they apply, so main-corpus summaries keep their exact lines.
     # In arm none the rules are not shown: what is found or flagged there is "without rules".
     rule = report.get("rule_constraints")
     if rule is not None and rule["total"]:
@@ -966,6 +1038,9 @@ def format_console(report: dict[str, Any]) -> str:
             f"Usage: calls={usage['calls']} tokens_in={usage['tokens_in']} "
             f"tokens_out={usage['tokens_out']} cost_usd={usage['cost_usd']}"
         )
+    sugg_line = _suggestions_line(report.get("suggestions"))
+    if sugg_line is not None:
+        lines.append(sugg_line)
     normalized = report.get("gateway_normalized")
     if normalized is not None:
         loss = normalized["attribution_loss"]
@@ -975,6 +1050,9 @@ def format_console(report: dict[str, Any]) -> str:
             "(not the published review):"
         )
         lines.extend(f"  {line}" for line in _quality_lines(normalized))
+        norm_sugg_line = _suggestions_line(normalized.get("suggestions"), indent="  ")
+        if norm_sugg_line is not None:
+            lines.append(norm_sugg_line)
         lines.append(
             f"  rule_name nulled by the post-processor: {nulled}/{loss['findings']} findings"
         )
