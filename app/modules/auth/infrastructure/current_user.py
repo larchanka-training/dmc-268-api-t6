@@ -9,6 +9,7 @@ from app.modules.auth.application.get_me import CurrentUser, MyWorkspace
 from app.modules.auth.application.scope import AuthScope
 from app.modules.auth.infrastructure.models import GitHubUserProfile
 from app.modules.repositories.infrastructure.models import ProviderInstallation
+from app.modules.workspaces.domain.status import WorkspaceStatus
 from app.modules.workspaces.infrastructure.models import GitHubUserWorkspaceAccess, Workspace
 
 
@@ -37,6 +38,7 @@ class SqlAlchemyCurrentUserRepository:
                     .where(
                         GitHubUserWorkspaceAccess.github_user_id == scope.user_id,
                         Workspace.id.in_(scope.workspace_ids),
+                        Workspace.status != WorkspaceStatus.DELETED,
                         ProviderInstallation.provider == "github",
                         ProviderInstallation.deleted_at.is_(None),
                     )
