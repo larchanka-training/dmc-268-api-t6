@@ -77,10 +77,8 @@ import asyncio
 import hashlib
 import json
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -126,8 +124,8 @@ from review.scripts.validate_dataset import (  # noqa: E402
     DEFAULT_ROOT,
     POLICY_ARMS,
     SCHEMA_PATH,
-    _git_env,
     _patch_added_lines,
+    apply_case_patch,
     uses_policy_arms,
     validate_case,
 )
@@ -778,47 +776,40 @@ def reconstruct_head_file_contents(
     warnings: list[str] | None = None,
 ) -> dict[str, bytes]:
     """Reconstruct PR-head file bytes by applying the case patch onto ``base_path``."""
+    case_id = str(record.get("id") or case_dir.name)
     base_rel = record.get("base_path")
     patch_rel = record.get("patch_path")
     if not isinstance(base_rel, str) or not isinstance(patch_rel, str):
+        if warnings is not None:
+            warnings.append(f"case {case_id}: base_path or patch_path missing")
         return {}
     base = case_dir / base_rel
     patch = case_dir / patch_rel
     if not base.is_dir() or not patch.is_file():
+        if warnings is not None:
+            warnings.append(f"case {case_id}: base directory or patch file missing")
         return {}
     apply_directory = record.get("apply_directory")
-    with tempfile.TemporaryDirectory(prefix="replay-head-") as tmp:
-        workdir = Path(tmp) / "worktree"
-        shutil.copytree(base, workdir)
-        command = ["git", "-c", "core.autocrlf=false", "apply", "--whitespace=nowarn"]
-        if isinstance(apply_directory, str) and apply_directory:
-            command.append(f"--directory={apply_directory}")
-        env = {**_git_env(), "GIT_CEILING_DIRECTORIES": tmp}
-        applied = subprocess.run(
-            [*command, str(patch)],
-            cwd=workdir,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if applied.returncode != 0:
-            if warnings is not None:
-                err_msg = applied.stderr.strip() or applied.stdout.strip() or "git apply failed"
-                warnings.append(f"case {record.get('id', case_dir.name)}: {err_msg}")
-            return {}
-        source_root = (
-            workdir / apply_directory
-            if isinstance(apply_directory, str) and apply_directory
-            else workdir
-        )
-        if not source_root.is_dir():
-            return {}
-        return {
-            path.relative_to(source_root).as_posix(): path.read_bytes()
-            for path in source_root.rglob("*")
-            if path.is_file() and not path.is_symlink()
-        }
+    applied, files = apply_case_patch(
+        base,
+        patch,
+        apply_directory=apply_directory if isinstance(apply_directory, str) else None,
+        check_only=False,
+        prefix="replay-head-",
+    )
+    if applied.returncode != 0:
+        if warnings is not None:
+            err_msg = applied.stderr.strip() or applied.stdout.strip() or "git apply failed"
+            warnings.append(f"case {case_id}: {err_msg}")
+        return {}
+    if isinstance(apply_directory, str) and apply_directory and not files:
+        if warnings is not None:
+            warnings.append(
+                f"case {case_id}: apply_directory {apply_directory!r} "
+                "not found in reconstructed tree"
+            )
+        return {}
+    return files
 
 
 def _has_string_suggestion(raw_response: object) -> bool:
@@ -986,6 +977,18 @@ def _quality_lines(scored: dict[str, Any]) -> list[str]:
     ]
 
 
+def _suggestions_line(suggestions: Mapping[str, Any] | None, *, indent: str = "") -> str | None:
+    if suggestions is None:
+        return None
+    if not suggestions.get("total", 0) and not suggestions.get("unchecked", 0):
+        return None
+    return (
+        f"{indent}Suggestions valid: {_percent(suggestions['share'])} "
+        f"({suggestions['valid']}/{suggestions['total']}, "
+        f"unchecked={suggestions.get('unchecked', 0)})"
+    )
+
+
 def format_console(report: dict[str, Any]) -> str:
     """Human-readable summary using the same counts as the JSON report."""
     provenance = report["provenance"]
@@ -1011,7 +1014,6 @@ def format_console(report: dict[str, Any]) -> str:
             f"Precision={_percent(counts['precision'])} Recall={_percent(counts['recall'])}"
         )
     lines.append(f"Severity mismatches: {len(report['severity_mismatches'])}")
-    # Shown only where they apply, so main-corpus summaries keep their exact lines.
     # In arm none the rules are not shown: what is found or flagged there is "without rules".
     rule = report.get("rule_constraints")
     if rule is not None and rule["total"]:
@@ -1036,13 +1038,9 @@ def format_console(report: dict[str, Any]) -> str:
             f"Usage: calls={usage['calls']} tokens_in={usage['tokens_in']} "
             f"tokens_out={usage['tokens_out']} cost_usd={usage['cost_usd']}"
         )
-    suggestions = report.get("suggestions")
-    if suggestions is not None and (suggestions["total"] or suggestions.get("unchecked", 0)):
-        lines.append(
-            f"Suggestions valid: {_percent(suggestions['share'])} "
-            f"({suggestions['valid']}/{suggestions['total']}, "
-            f"unchecked={suggestions.get('unchecked', 0)})"
-        )
+    sugg_line = _suggestions_line(report.get("suggestions"))
+    if sugg_line is not None:
+        lines.append(sugg_line)
     normalized = report.get("gateway_normalized")
     if normalized is not None:
         loss = normalized["attribution_loss"]
@@ -1052,13 +1050,9 @@ def format_console(report: dict[str, Any]) -> str:
             "(not the published review):"
         )
         lines.extend(f"  {line}" for line in _quality_lines(normalized))
-        norm_sugg = normalized.get("suggestions")
-        if norm_sugg is not None and (norm_sugg["total"] or norm_sugg.get("unchecked", 0)):
-            lines.append(
-                f"  Suggestions valid: {_percent(norm_sugg['share'])} "
-                f"({norm_sugg['valid']}/{norm_sugg['total']}, "
-                f"unchecked={norm_sugg.get('unchecked', 0)})"
-            )
+        norm_sugg_line = _suggestions_line(normalized.get("suggestions"), indent="  ")
+        if norm_sugg_line is not None:
+            lines.append(norm_sugg_line)
         lines.append(
             f"  rule_name nulled by the post-processor: {nulled}/{loss['findings']} findings"
         )

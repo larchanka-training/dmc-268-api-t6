@@ -154,7 +154,21 @@ Replay считает те же первые ответы в двух колон
 
 ### 3.2.7. Метрика корректности предложений правок (suggestions) (#446)
 
-Метрика `suggestions: {total, valid, unchecked, share}` оценивает синтаксическую валидность строковых `suggestion` против реконструированных файлов головы PR (`base_path` + применённый `diff.patch`, включая `apply_directory`). Делитель `total = valid + invalid` учитывает только проверенные предложения в поддерживаемых исходных файлах (`validate_suggestion_tree`). Непроверенные предложения (отсутствующий файл, неподдерживаемое расширение, файл > `MAX_SOURCE_BYTES`, не-UTF-8, сбой воркера) учитываются в отдельном счётчике `unchecked` вне знаменателя `total`, чтобы не искажать долю `share = valid / total`. Значения — в [test-plan/eval-baselines.md](test-plan/eval-baselines.md#327-метрика-корректности-suggestion-и-статус-swapi-кейсов-446).
+Метрика `suggestions: {total, valid, unchecked, share}` оценивает синтаксическую корректность строковых `suggestion` против реконструированных файлов головы PR (`base_path` + применённый `diff.patch`, с учётом `apply_directory`).
+
+**Нормативный контракт классификации:**
+- **`total = valid + invalid`**: знаменатель доли `share = valid / total`, учитывающий только проверенные предложения.
+- **`unchecked`** (вынесен за пределы `total`, чтобы не занижать и не завышать `share`):
+  1. Файл отсутствует в реконструированном дереве головы (`file_contents is None` или `path not in file_contents`).
+  2. Некорректные координаты строк: нецелый `line` или нецелый `start_line` (`isinstance(..., bool)` или `not isinstance(..., int)`).
+  3. Неподдерживаемый язык файла (`language_for_path(path) is None`).
+  4. Не-UTF-8 байты файла (`UnicodeEncodeError` при кодировании).
+  5. Размер файла превышает `MAX_SOURCE_BYTES` (64 КБ).
+  6. Инфраструктурные сбои анализатора: `NON_UTF8` или `WORKER_ERROR` из `validate_suggestion_tree`.
+- **`valid`**: предложение успешно применилось к исходному файлу и прошло Tree-sitter-валидацию (`validate_suggestion_tree` возвращает `is_valid=True`, синтаксис корректен, дубликаты условий не внесены).
+- **`invalid`**: синтаксическая ошибка после наложения (`SYNTAX_ERROR`), дублирование условий (`DUPLICATE_NESTED_CONDITION`), либо ошибка наложения замены на файл (`APPLICATION_FAILED`). Неверная реконструкция головы переводит предложения с `APPLICATION_FAILED` в `invalid`, поэтому точность реконструкции критична для расчёта `share`.
+
+Исторические baselines и замеры корпуса — в [test-plan/eval-baselines.md](test-plan/eval-baselines.md#327-метрика-корректности-suggestion-на-зафиксированном-baseline-446).
 
 ### 3.3. Ручной оракул семантики
 

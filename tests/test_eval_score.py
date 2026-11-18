@@ -698,43 +698,6 @@ def test_score_cases_suggestions_metric_valid_multiline_suggestion() -> None:
     }
 
 
-_SWAPI_BROKEN_SUGGESTIONS: tuple[tuple[str, str, int | None, int, str], ...] = tuple(
-    (c.path, c.fixture_name, c.start_line, c.line, c.suggestion) for c in SWAPI_SUGGESTION_CASES
-)
-
-
-@pytest.mark.parametrize(
-    ("path", "fixture_name", "start_line", "line", "suggestion"),
-    _SWAPI_BROKEN_SUGGESTIONS,
-    ids=[item[1].removesuffix(".ts") for item in _SWAPI_BROKEN_SUGGESTIONS],
-)
-def test_score_cases_swapi_real_pr_broken_suggestions_individually(
-    path: str,
-    fixture_name: str,
-    start_line: int | None,
-    line: int,
-    suggestion: str,
-) -> None:
-    """Each authentic SWAPI PR #3 suggestion fails AST validation against its real source file."""
-    source = (_SWAPI_FIXTURES / fixture_name).read_text(encoding="utf-8")
-    sc = case(
-        predictions=[
-            {
-                "path": path,
-                "line": line,
-                "start_line": start_line,
-                "severity": "high",
-                "category": "correctness",
-                "suggestion": suggestion,
-            }
-        ],
-        file_contents={path: source},
-        added_by_path={path: {line}},
-    )
-    report = score_cases([sc])
-    assert report["suggestions"] == {"total": 1, "valid": 0, "unchecked": 0, "share": 0.0}
-
-
 def test_score_cases_swapi_six_suggestions_give_zero_valid() -> None:
     """All six SWAPI PR #3 broken suggestions yield 0/6 valid across commits 8bc8b5d + 858e1c1."""
     cases = [
@@ -742,20 +705,20 @@ def test_score_cases_swapi_six_suggestions_give_zero_valid() -> None:
             case_id=f"SWAPI-{idx}",
             predictions=[
                 {
-                    "path": path,
-                    "line": line,
-                    "start_line": start_line,
+                    "path": item.path,
+                    "line": item.line,
+                    "start_line": item.start_line,
                     "severity": "high",
                     "category": "correctness",
-                    "suggestion": suggestion,
+                    "suggestion": item.suggestion,
                 }
             ],
-            file_contents={path: (_SWAPI_FIXTURES / fixture_name).read_text(encoding="utf-8")},
-            added_by_path={path: {line}},
+            file_contents={
+                item.path: (_SWAPI_FIXTURES / item.fixture_name).read_text(encoding="utf-8")
+            },
+            added_by_path={item.path: {item.line}},
         )
-        for idx, (path, fixture_name, start_line, line, suggestion) in enumerate(
-            _SWAPI_BROKEN_SUGGESTIONS, start=1
-        )
+        for idx, item in enumerate(SWAPI_SUGGESTION_CASES, start=1)
     ]
     report = score_cases(cases)
     assert report["suggestions"] == {"total": 6, "valid": 0, "unchecked": 0, "share": 0.0}
@@ -812,7 +775,7 @@ def test_classify_suggestion_branches(
 ) -> None:
     from review.scripts.eval_score import _classify_suggestion
 
-    assert _classify_suggestion(prediction, contents) == "unchecked"
+    assert _classify_suggestion(prediction, str(prediction["suggestion"]), contents) == "unchecked"
 
 
 def test_score_cases_suggestion_worker_error_counts_as_unchecked(

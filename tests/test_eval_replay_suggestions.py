@@ -189,8 +189,9 @@ def test_eval_replay_reconstructs_post_patch_files_and_scores_suggestions(tmp_pa
 
     # Verify format_console prints suggestions valid in strict and normalized
     console = format_console(report)
-    assert "Suggestions valid: 66.7% (2/3, unchecked=1)" in console
-    assert "  Suggestions valid: 66.7% (2/3, unchecked=1)" in console
+    console_lines = console.splitlines()
+    assert any(line == "Suggestions valid: 66.7% (2/3, unchecked=1)" for line in console_lines)
+    assert any(line == "  Suggestions valid: 66.7% (2/3, unchecked=1)" for line in console_lines)
 
 
 def test_reconstruct_head_file_contents_sec04_apply_directory() -> None:
@@ -200,3 +201,62 @@ def test_reconstruct_head_file_contents_sec04_apply_directory() -> None:
     sec04_files = reconstruct_head_file_contents(sec04_dir, sec04_record)
     assert "src/flask/sessions.py" in sec04_files
     assert b"SECRET_KEY_FALLBACKS" in sec04_files["src/flask/sessions.py"]
+
+
+def test_reconstruct_head_file_contents_git_apply_failure_records_warning(tmp_path: Path) -> None:
+    """When git apply fails, an informative warning is recorded and empty dict is returned."""
+    case_dir = tmp_path / "case"
+    base = case_dir / "base"
+    base.mkdir(parents=True)
+    (base / "file.txt").write_text("line 1\nline 2\n", encoding="utf-8")
+    bad_patch = "--- a/file.txt\n+++ b/file.txt\n@@ -1,2 +1,2 @@\n-nonexistent line\n+replacement\n"
+    (case_dir / "diff.patch").write_text(bad_patch, encoding="utf-8")
+    record = {
+        "id": "FAIL-01",
+        "base_path": "base",
+        "patch_path": "diff.patch",
+    }
+    warnings: list[str] = []
+    files = reconstruct_head_file_contents(case_dir, record, warnings=warnings)
+    assert files == {}
+    assert len(warnings) == 1
+    assert "case FAIL-01: " in warnings[0]
+    assert "patch failed" in warnings[0].lower() or "error" in warnings[0].lower()
+
+
+def test_reconstruct_head_missing_base_or_patch_warning(tmp_path: Path) -> None:
+    """When base_path or patch_path does not exist on disk, a warning is recorded."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir(parents=True)
+    record = {
+        "id": "MISSING-01",
+        "base_path": "missing_base",
+        "patch_path": "missing.patch",
+    }
+    warnings: list[str] = []
+    files = reconstruct_head_file_contents(case_dir, record, warnings=warnings)
+    assert files == {}
+    assert len(warnings) == 1
+    assert "case MISSING-01: base directory or patch file missing" in warnings[0]
+
+
+def test_reconstruct_head_missing_apply_directory_warning(tmp_path: Path) -> None:
+    """When apply_directory is specified but absent after patch, a warning is recorded."""
+    case_dir = tmp_path / "case"
+    base = case_dir / "base"
+    base.mkdir(parents=True)
+    (base / "file.txt").write_text("hello\n", encoding="utf-8")
+    (case_dir / "diff.patch").write_text(
+        "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-hello\n+world\n", encoding="utf-8"
+    )
+    record = {
+        "id": "NO-DIR-01",
+        "base_path": "base",
+        "patch_path": "diff.patch",
+        "apply_directory": "nonexistent_subdir",
+    }
+    warnings: list[str] = []
+    files = reconstruct_head_file_contents(case_dir, record, warnings=warnings)
+    assert files == {}
+    assert len(warnings) == 1
+    assert "case NO-DIR-01:" in warnings[0]
