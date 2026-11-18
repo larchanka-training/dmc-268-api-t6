@@ -142,7 +142,9 @@ def test_publish_valid_json_text_preserves_the_raw_object(encoded: str) -> None:
     assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, raw)) is True
 
     assert repository.raw_objects == [value]
-    stored_finding = cast(list[dict[str, object]], repository.raw_objects[0]["findings"])[0]
+    raw_obj = repository.raw_objects[0]
+    assert raw_obj is not None
+    stored_finding = cast(list[dict[str, object]], raw_obj["findings"])[0]
     assert type(stored_finding["confidence"]) is int
     assert stored_finding["confidence"] == 1
     assert repository.marked == 1
@@ -235,7 +237,7 @@ def test_publish_snapshot_run_preserves_v2_rule_attribution() -> None:
         async def store_review_output(
             self,
             run_id: UUID,
-            model_output: dict[str, object],
+            model_output: dict[str, object] | None,
             parsed: ReviewOutput,
             processed: ProcessedReviewOutput,
         ) -> ReviewPublication | None:
@@ -745,7 +747,7 @@ def test_publish_review_output_repacks_overflow_with_verifier_threshold() -> Non
         async def store_review_output(
             self,
             run_id: UUID,
-            model_output: dict[str, object],
+            model_output: dict[str, object] | None,
             parsed: ReviewOutput,
             processed: ProcessedReviewOutput,
         ) -> ReviewPublication:
@@ -1097,12 +1099,12 @@ def test_publish_review_output_persists_dropped_findings() -> None:
         async def store_review_output(
             self,
             run_id: UUID,
-            model_output: dict[str, object],
+            model_output: dict[str, object] | None,
             parsed: ReviewOutput,
             processed: ProcessedReviewOutput,
         ) -> ReviewPublication | None:
             stored_processed.append(processed)
-            assert "_dropped_findings" not in model_output
+            assert model_output is not None and "_dropped_findings" not in model_output
             return self.publication
 
     repo = Repo(_context(), _publication())
