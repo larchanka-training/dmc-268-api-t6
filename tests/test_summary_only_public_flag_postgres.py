@@ -42,6 +42,7 @@ from tests.test_clean_without_text_acceptance_postgres import RevisionSource, ch
 from tests.test_clean_without_text_result_postgres import result_env as result_env
 from tests.test_review_context_stage import Parser, Policy, Vcs
 from tests.test_severity_threshold_postgres import RecordingQueue
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 _PATCH = "@@ -1 +1 @@\n-old\n+new"
 
@@ -147,6 +148,7 @@ def test_incomplete_withheld_files_publish_summary_only(
                 worker_id="worker",
                 expected_attempt=1,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             ).execute(RUN_ATTEMPTED, answer())
             async with SqlAlchemyReviewOutputUnitOfWork(factory) as uow:
                 await uow.reviews.mark_review_published(RUN_ATTEMPTED)

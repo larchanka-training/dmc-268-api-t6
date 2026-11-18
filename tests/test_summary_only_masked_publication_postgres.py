@@ -59,6 +59,7 @@ from tests.publication_settings_postgres import _insert, _ready
 from tests.test_clean_without_text_acceptance_postgres import RevisionSource, checkpoint
 from tests.test_review_context_stage import Parser, Policy, Vcs
 from tests.test_severity_threshold_postgres import RecordingQueue
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 _LINE = "@@ -1 +1 @@\n-old\n+new"
 # The worker withholds the lock, so both paths publish it as ignored, with the mask.
@@ -305,6 +306,7 @@ def test_masked_file_and_lock_keep_published_coverage(env: Env, version: int) ->
                     worker_id="worker",
                     expected_attempt=1,
                     run_url=lambda _: None,
+                    parser=NullSuggestionParser(),
                 ).execute(run_id, answer())
                 async with factory() as session:
                     saved = await session.scalar(

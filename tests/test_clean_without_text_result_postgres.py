@@ -62,6 +62,7 @@ from tests.clean_without_text_fakes import answer, finding
 from tests.portal_postgres import HEAD, PR_NEW, REPO_A, RUN_ATTEMPTED, Env, portal_schema
 from tests.run_coverage_fakes import code_snapshot, empty_snapshot
 from tests.test_severity_threshold_postgres import RecordingQueue
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 
 @pytest.fixture
@@ -159,6 +160,7 @@ def test_postgres_snapshot_reload_and_finalization_persist_matching_result_summa
                     worker_id="worker",
                     expected_attempt=1,
                     run_url=lambda _: None,
+                    parser=NullSuggestionParser(),
                 ).execute(RUN_ATTEMPTED, answer())
                 is True
             )
@@ -210,6 +212,7 @@ def test_final_result_commits_in_running_before_publication_transition(
                         worker_id="worker",
                         expected_attempt=1,
                         run_url=lambda _: None,
+                        parser=NullSuggestionParser(),
                     ).execute(RUN_ATTEMPTED, NoModelAnswer() if backend_only else answer())
             async with SqlAlchemyReviewOutputUnitOfWork(factory) as uow:
                 await real_enter(
@@ -269,6 +272,7 @@ def test_malformed_saved_plan_cannot_resume_or_supply_publication_context(result
                 worker_id="worker",
                 expected_attempt=1,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             )
             assert await store.execute(RUN_ATTEMPTED, answer()) is True
             async with factory.begin() as session:
@@ -329,6 +333,7 @@ def test_finalization_failure_or_cancel_leaves_no_partial_result(
                 worker_id="worker",
                 expected_attempt=1,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             )
             if failure == "write":
                 with pytest.raises(RuntimeError, match="finalization failed"):
@@ -382,6 +387,7 @@ def test_final_result_and_plan_contain_only_supported_findings(result_env: Env) 
                 worker_id="worker",
                 expected_attempt=1,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             )
             assert await store.checkpoint_candidates(
                 RUN_ATTEMPTED,
@@ -504,6 +510,7 @@ def test_comment_receipts_follow_saved_plan_order_not_finding_row_order(result_e
                 worker_id="worker",
                 expected_attempt=1,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             )
             assert await store.execute(
                 RUN_ATTEMPTED,
@@ -591,6 +598,7 @@ def test_t8_queue_pointer_keeps_final_plan_event_after_repository_setting_change
                 worker_id="worker",
                 expected_attempt=1,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             ).execute(
                 RUN_ATTEMPTED,
                 VerifiedReviewOutput({"findings": [candidate], "summary": answer()["summary"]}),
@@ -652,6 +660,7 @@ def test_publish_start_distinguishes_crash_before_and_after_provider_action(
                 worker_id="worker",
                 expected_attempt=1,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             )
             assert await store.execute(RUN_ATTEMPTED, NoModelAnswer())
             before = await tools()
@@ -717,6 +726,7 @@ def test_postgres_finalization_reads_referenced_policy_effective_coverage_and_re
                 worker_id="worker",
                 expected_attempt=1,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             ).execute(RUN_ATTEMPTED, answer())
             async with factory() as session:
                 action = await session.scalar(
@@ -764,6 +774,7 @@ def test_later_prompt_context_trace_does_not_erase_current_identity_valid_classi
                 worker_id="worker",
                 expected_attempt=1,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             ).execute(RUN_ATTEMPTED, answer())
             async with factory() as session:
                 action = await session.scalar(

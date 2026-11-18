@@ -55,6 +55,7 @@ from tests.verifier_pipeline_fakes import (
     FakeQueue,
     FakeRepository,
     FakeUnitOfWork,
+    NullSuggestionParser,
     verifier_snapshot,
 )
 
@@ -350,6 +351,7 @@ def _stored(
         worker_id="test-worker",
         expected_attempt=1,
         run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
     output = VerifiedReviewOutput(
         {"findings": findings, "summary": SUMMARY},

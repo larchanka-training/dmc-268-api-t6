@@ -20,6 +20,7 @@ from app.modules.reviews.infrastructure.review_output_unit_of_work import (
     SqlAlchemyReviewOutputUnitOfWork,
 )
 from tests.gitlab_http_fakes import Stream
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 
 class Queue:
@@ -105,6 +106,7 @@ async def publishing(
         worker_id="publication",
         expected_attempt=1,
         run_url=lambda _run_id: None,
+        parser=NullSuggestionParser(),
     ).execute(
         run,
         answer

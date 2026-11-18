@@ -21,6 +21,7 @@ from app.modules.reviews.application.run_coverage import RunCoverage
 from tests.clean_without_text_fakes import answer
 from tests.review_output_fakes import RecordingFactory, RecordingProvider, RecordingRepository
 from tests.run_coverage_fakes import coverage
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 
 @pytest.mark.parametrize("no_text", [False, True])
@@ -57,7 +58,7 @@ def test_legacy_inline_default_unknown_and_none_have_matching_body_labels(no_tex
     factory = RecordingFactory(repository)
     provider = RecordingProvider()
     assert asyncio.run(
-        PublishReviewOutput(factory, provider).execute(
+        PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(
             UUID("00000000-0000-0000-0000-000000000408"), answer()
         )
     )
@@ -122,6 +123,7 @@ def test_queue_store_rejects_missing_backend_summary_before_writes(
         worker_id="worker",
         expected_attempt=1,
         run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
     with pytest.raises(InvalidReviewOutput, match="Missing backend summary for run_id="):
         asyncio.run(store.execute(UUID(int=213), answer()))

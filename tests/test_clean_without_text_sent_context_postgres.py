@@ -50,6 +50,7 @@ from tests.test_clean_without_text_result_postgres import result_env as result_e
 from tests.test_gateway_review_model import RUN, Transport, _gateway
 from tests.test_review_prompt_pins_postgres import _bind_v4
 from tests.test_severity_threshold_postgres import RecordingQueue
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 
 @pytest.mark.integration
@@ -194,6 +195,7 @@ def test_actual_execution_partial_result_survives_postgres_http_checkrun_and_rec
                     worker_id="worker",
                     expected_attempt=1,
                     run_url=lambda _: None,
+                    parser=NullSuggestionParser(),
                 ),
                 reflection_pass=ReflectionPass(Verifier()),
             ).execute(RUN_ATTEMPTED)
