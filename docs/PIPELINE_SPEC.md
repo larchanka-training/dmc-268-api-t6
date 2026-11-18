@@ -782,6 +782,76 @@ GitHub для этого нет.
 {"detail": "the repository has no active rule or prompt version"}
 ```
 
+### 6.2 Матрица нештатных условий: стратегия «падаем» или «деградируем» (#461)
+
+В соответствии с требованием задачи #461 (Ч.2), для каждого кода из `KNOWN_ERROR_CODES` (`app/modules/reviews/application/run_failures.py:113`) определена предлагаемая стратегия обработки: **«падаем»** (`failed`) или **«деградируем»** (`succeeded` с частичным покрытием либо безопасное продолжение по diff без необязательного обогащения). Детальные правила переходов, ретраев и видимости в Check-run / VCS статусах определены в основном каталоге [§6](#6-каталог-error_code) и каталоге текстов ошибок `check_runs.py` (`_ERROR_TEXTS`).
+
+#### Принципы классификации решений:
+1. **Деградируем (`succeeded`, `partial`/`none`, `runs.error_code = null` или продолжение без необязательного шага):**
+   - Сбой носит локальный характер и не затрагивает безопасность или корректность обязательных правил (`rules.md`, `AGENTS.md`).
+   - Исходный diff доступен, обязательный контекст вмещается в бюджет.
+   - Для `llm_context_overflow`: пользователь получает честное информативное ревью с перечислением непроверенных файлов (`review_input_incomplete`) и нейтральный статус check-run («проверка неполная»), вместо скрытого падения системы. Для бюджетов Bitbucket: прогон продолжается по diff без необязательного контекста L2/L3 (`payload = None`).
+   - Реализованные пути:
+     - `llm_context_overflow` на стадии ревью: публикуется частичное ревью `NoModelAnswer` со статусом coverage `partial` и перечнем файлов (`review_input_incomplete`), без вызова verifier и `change_summary` (§2, #461). Вне стадии ревью (например, на конвенциях) — терминальный отказ `failed`.
+     - `bitbucket_request_budget_exceeded` и `bitbucket_response_budget_exceeded`: на стадии `context.build` при чтении необязательного контекста L2/L3 превышение бюджета перехватывается в `review_context_stage.py` (`payload = None`, см. поведенческий тест `test_context_stage_propagates_control_but_preserves_optional_fallback`), и анализ продолжается по полному diff; при сбое на классификации blob (`vcs_diff.py`, см. тест `test_bitbucket_blob_budget_and_rate_limit_escape_omission`) — терминальный отказ `failed`.
+2. **Падаем (`failed`, `runs.error_code != null`):**
+   - Нарушена целостность правил или политик (`policy_*`): заменять правила пустыми или игнорировать их запрещено (инвариант безопасности).
+   - Сбой верификации находок (`verification_*`): публиковать непроверенные (unverified) замечания модели запрещено (инвариант CVS §8 / SD §7).
+   - Невозможно получить обязательный diff (`diff_fetch_failed`, `bitbucket_fetch_failed`): без кода анализ невозможен.
+   - Исчерпаны глобальные ресурсы или авторизация (`budget_exceeded`, `deadline_exceeded`, `llm_payment_required`, `github_forbidden`).
+
+#### Сводная матрица стратегий по `KNOWN_ERROR_CODES`
+
+| `error_code` | Класс | Стратегия | Обоснование решения (детали состояния и видимости см. §6) |
+|---|---|---|---|
+| `bitbucket_commit_messages_fetch_failed` | Bitbucket Cloud | падаем | Обязательное чтение истории коммитов PR из Bitbucket API. T9 до 3 попыток с backoff; при исчерпании — терминальный `failed` (§6). Деградация невозможна: анализ версий и конвенции требуют достоверных коммитов. |
+| `bitbucket_engine_unsupported` | Bitbucket Cloud | падаем | Запрошенный движок анализа (например, deep/sandbox) не поддерживается в интеграции с Bitbucket Cloud. Терминальный отказ без ретрая. |
+| `bitbucket_fetch_failed` | Bitbucket Cloud | падаем | Обязательное чтение diff и проверяемых файлов PR из Bitbucket Cloud API. T9 до 3 попыток с backoff. Без исходного diff анализ невозможен. |
+| `bitbucket_invalid_response` | Bitbucket Cloud | падаем | Ответ Bitbucket API нарушает контракт данных или повреждён при передаче (невалидный JSON или схема payload). Без корректных данных продолжение невозможно. |
+| `bitbucket_request_budget_exceeded` | Bitbucket Cloud | деградируем | Превышен лимит запросов к Bitbucket API при чтении необязательного контекста L2/L3: перехватывается в `review_context_stage.py` (`payload = None`), ревью продолжается по diff без обогащения; при сбое на классификации blob (`vcs_diff.py`) — терминальный отказ `failed`. |
+| `bitbucket_response_budget_exceeded` | Bitbucket Cloud | деградируем | Превышен суммарный объём ответов Bitbucket API при чтении необязательного контекста: аналогично `request_budget` перехватывается в `review_context_stage.py` с продолжением по diff; при сбое на классификации blob (`vcs_diff.py`) — терминальный отказ `failed`. |
+| `bitbucket_review_limit_exceeded` | Bitbucket Cloud | падаем | PR Bitbucket превышает лимит файлов для ревью (`bitbucket_vcs.py:456`, диффы более 200 файлов diffstat). Терминальный отказ без ретрая. |
+| `bitbucket_source_unavailable` | Bitbucket Cloud | падаем | Исходный fork недоступен в Bitbucket Cloud (удалён fork или отозван доступ, `bitbucket_vcs.py:get_pull_request_diff`; §6 `bitbucket_source_unavailable` и `check_runs.py:41`). Деградация невозможна. |
+| `budget_exceeded` | Бюджет Run | падаем | Превышен локальный лимит стоимости прогона ($0.50 fast / $3.00 deep). Немедленный останов всех вызовов модели во избежание неконтролируемого перерасхода. |
+| `commit_messages_fetch_failed` | GitHub | падаем | Обязательное чтение метаданных коммитов PR из GitHub API. T9 до 3 попыток со backoff; при исчерпании — терминальный `failed` (§6). |
+| `deadline_exceeded` | Время | падаем | Истёк глобальный дедлайн выполнения прогона (watchdog 8 мин fast / 10 мин deep с fallback на fast, §3). Воркер обязан немедленно прервать обработку. |
+| `diff_fetch_failed` | GitHub | падаем | Не удалось загрузить diff PR из GitHub (HTTP 5xx, таймаут или 429). T9 до 3 попыток с экспоненциальным backoff. Без diff ревью невозможно. |
+| `github_forbidden` | GitHub | падаем | HTTP 403 Forbidden (без rate limit) или 404 Not Found от GitHub App API (отозваны права, удалён репозиторий или закрыта установка; `vcs_failures.py:157`; 401 относится к `diff_fetch_failed`). Терминальный отказ. |
+| `github_publish_failed` | GitHub | падаем | Сбой публикации ревью в GitHub API (сеть, 5xx, конфликт версий). До 3 безопасных повторов публикации (§5.2); при исчерпании — терминальный отказ `failed`. |
+| `internal_error` | Система | падаем | Непредвиденное внутреннее исключение в коде сервиса. Прогон падает в `failed` с логированием полного stack trace для расследования разработчиками. |
+| `lease_expired` | Система | падаем | Обработка задачи прервалась 3 раза подряд из-за потери lease воркером (§6; таблица жизненного цикла §1, переходы T12/T13). Восстановление через реконсилер, затем терминальный `failed`. |
+| `llm_context_overflow` | LLM | деградируем | На стадии ревью при соблюдении mandatory-бюджетов деградирует в частичное ревью `NoModelAnswer` (`succeeded`, coverage `partial`, `review_input_incomplete`, §2, #461); вне ревью (например, на `conventions`) — терминальный отказ `failed`. |
+| `llm_invalid_output` | LLM | падаем | Ответ модели не является валидным JSON либо нарушает JSON Schema контракта `ReviewOutput`. Bounded repair + fallback; при исчерпании — `failed`. |
+| `llm_payment_required` | LLM | падаем | HTTP 402 от шлюза провайдера LLM (исчерпан баланс токенов). Запрос fallback-модели; при отсутствии — терминальный отказ `failed`. |
+| `llm_rate_limited` | LLM | падаем | HTTP 429 от шлюза провайдера после ротации ключей и исчерпания локальных попыток. T9 с учётом `Retry-After`; при исчерпании — `failed`. |
+| `llm_timeout` | LLM | падаем | Таймаут ожидания ответа модели (90 с fast / 300 с deep). Повтор в шлюзе, затем fallback; при исчерпании — терминальный отказ `failed`. |
+| `llm_unavailable` | LLM | падаем | HTTP 5xx или сетевой обрыв связи со шлюзом провайдера. Повтор в шлюзе, затем fallback, затем T9; при исчерпании — терминальный отказ `failed`. |
+| `policy_access_denied` | Политика | падаем | HTTP 403 / отказ доступа к файлу правил в репозитории. Деградация невозможна: правила обязательны к исполнению. |
+| `policy_context_violation` | Политика | падаем | Попытка отправить в модель запрещённые политики или нарушить изоляцию правил. Терминальный отказ безопасности. |
+| `policy_document_control_character` | Политика | падаем | В документе правил обнаружены управляющие символы (ASCII 0-31 кроме табуляции и перевода строк). Защита от prompt injection. |
+| `policy_document_decode_error` | Политика | падаем | Ошибка декодирования UTF-8 в файле правил (`rules.md` или `AGENTS.md`). Деградация запрещена: файл должен быть валидным текстом. |
+| `policy_document_too_large` | Политика | падаем | Размер файла правил превысил предел raw-документа 65 536 байт (64 KiB, `RULES_FORMAT_SPEC.md` §3). Терминальный отказ. |
+| `policy_document_type_unsupported` | Политика | падаем | Необычный тип файла правил в Git: символическая ссылка, submodule/gitlink или Git LFS-указатель вместо обычного текстового файла (`RULES_FORMAT_SPEC.md` §3.1, `check_runs.py:66`). Терминальный отказ. |
+| `policy_fetch_transient` | Политика | падаем | Временный сетевой сбой или HTTP 5xx при загрузке документа правил из VCS. T9 со backoff; при исчерпании — терминальный `failed`. |
+| `policy_ignore_block_duplicate` | Политика | падаем | Повторный блок `review-ignore` в одном документе правил (нарушение формата `RULES_FORMAT_SPEC`). |
+| `policy_ignore_block_nested` | Политика | падаем | Вложенный блок `review-ignore` внутри другого блока (нарушение формата `RULES_FORMAT_SPEC`). |
+| `policy_ignore_block_unclosed` | Политика | падаем | Незакрытый блок `review-ignore` (отсутствуют закрывающие тройные обратные кавычки). |
+| `policy_ignore_info_invalid` | Политика | падаем | Некорректная info-строка блока `review-ignore` (недопустимые пробелы или лишние параметры). |
+| `policy_ignore_limit_exceeded` | Политика | падаем | Превышен лимит блока `review-ignore` (более 256 непустых строк, маска длиннее 256 байт или более 32 сегментов, `RULES_FORMAT_SPEC.md` §3). |
+| `policy_ignore_pattern_invalid` | Политика | падаем | Некорректный синтаксис glob-паттерна в `review-ignore` (непарные скобки, экранирования). |
+| `policy_match_budget_exceeded` | Политика | падаем | Превышен бюджет шагов сопоставления путей и правил (защита от алгоритмической сложности и ReDoS). |
+| `policy_path_invalid` | Политика | падаем | Недопустимый путь к проверяемому файлу PR в правилах игнорирования: path traversal `..` с выходом за пределы репозитория либо абсолютный путь (`review_ignore.py:336`, `check_runs.py:77`). |
+| `policy_prompt_budget_exceeded` | Политика | падаем | Текст обязательных правил превышает выделенный базовый бюджет промпта. Деградация невозможна: правила обязательны к исполнению. |
+| `policy_rate_limited` | Политика | падаем | HTTP 429 от API VCS при загрузке правил. T9 с учётом `Retry-After`; при исчерпании попыток — `failed`. |
+| `policy_revision_unavailable` | Политика | падаем | Запрошенная ревизия базовой ветки для чтения правил недоступна в репозитории. |
+| `policy_snapshot_integrity_error` | Политика | падаем | Контрольная сумма снимка правил не совпала с хэшем блобов (нарушение целостности данных снимка). |
+| `pr_base_changed` | VCS / Жизненный цикл | падаем | Базовая ветка PR изменилась во время прогона (retarget до сохранения diff). Прогон завершается ошибкой `failed` без повтора (§6, §5.2 `pr_base_changed`). |
+| `verification_budget_exceeded` | Верификатор | падаем | Исчерпан денежный бюджет verifier на прогон (§4.5, `reflection_pass.py:1078-1080`, `check_runs.py:92`). Публикация непроверенных находок модели запрещена инвариантом безопасности (CVS §8). |
+| `verification_context_overflow` | Верификатор | падаем | Обязательный verifier envelope с находками не поместился в окно контекста модели верификатора. Непроверенные кандидаты отбрасывать нельзя. |
+| `verification_deadline_exceeded` | Верификатор | падаем | До стадии verifier не осталось безопасного временного окна до глобального дедлайна прогона. |
+| `verification_invalid_output` | Верификатор | падаем | Верификатор вернул ответ не по схеме. Repair + fallback; при повторном отказе — `failed` (публикация непроверенных кандидатов запрещена). |
+| `verification_unavailable` | Верификатор | падаем | Шлюз или модель верификатора вернули 5xx/недоступны. T9 до 3 попыток, затем терминальный `failed`. |
+
 ---
 
 ## 7. Check-run бота (SD §8.3)
