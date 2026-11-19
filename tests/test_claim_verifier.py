@@ -62,40 +62,169 @@ REPO_ID = UUID("00000000-0000-0000-0000-000000004451")
 RUN_ID = UUID("00000000-0000-0000-0000-000000004452")
 INSPECTOR = TreeSitterClaimSyntaxInspector()
 
-# Authentic excerpt structure from larchanka/swapi-mcp-example#3 (commit 858e1c1) src/tools/films.ts
+# Authentic excerpt structure from larchanka/swapi-mcp-example#3 (commit 8bc8b5d) src/tools/films.ts
 SWAPI_FILMS_TS = "\n".join(
     [
-        'import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";',  # 1
-        'import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";',  # 2
-        'import { z } from "zod";',  # 3
-        'import { ApiError, type SwapiClient } from "../api-client.js";',  # 4
-        'import { idFromUrl, type Film } from "../types/swapi.js";',  # 5
-        'import { jsonResult, toErrorResult } from "./common.js";',  # 6
-        *[f"// filler line {idx}" for idx in range(7, 93)],  # 7..92
-        "    async ({ film_id: filmId, episode_id: episodeId }) => {",  # 93
-        "      const hasFilmId = filmId !== undefined;",  # 94
-        "      const hasEpisodeId = episodeId !== undefined;",  # 95
-        "      if ((hasFilmId && hasEpisodeId) || (!hasFilmId && !hasEpisodeId)) {",  # 96
-        "        throw new McpError(",  # 97
-        "          ErrorCode.InvalidParams,",  # 98
-        "          \"Provide exactly one of 'film_id' or 'episode_id'.\",",  # 99
-        "        );",  # 100
-        "      }",  # 101
-        "      try {",  # 102
-        "        const film =",  # 103
-        "          filmId !== undefined",  # 104
-        "            ? await client.getFilm(filmId)",  # 105
-        "            : await requireFilmByEpisode(client, episodeId as number);",  # 106
-        "        return jsonResult({",  # 107
-        '          film_id: idFromUrl(film.url, "films"),',  # 108
-        "          ...film,",  # 109
-        "        });",  # 110
-        "      } catch (error) {",  # 111
-        "        return toErrorResult(error);",  # 112
-        "      } finally {",  # 113
-        "        cleanupFilm();",  # 114
-        "      }",  # 115
-        "    },",  # 116
+        'import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";',
+        'import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";',
+        'import { z } from "zod";',
+        'import { ApiError, type SwapiClient } from "../api-client.js";',
+        'import { idFromUrl, type Film } from "../types/swapi.js";',
+        'import { jsonResult, toErrorResult } from "./common.js";',
+        "",
+        "interface FilmSummary {",
+        "  film_id: number | undefined;",
+        "  episode_id: number;",
+        "  title: string;",
+        "  release_date: string;",
+        "  director: string;",
+        "  producer: string;",
+        "  character_count: number;",
+        "}",
+        "",
+        "interface CharacterSummary {",
+        "  id: number | undefined;",
+        "  name: string;",
+        "  gender: string;",
+        "  birth_year: string;",
+        "  height: string;",
+        "  mass: string;",
+        "  hair_color: string;",
+        "  eye_color: string;",
+        "  url: string;",
+        "}",
+        "",
+        "interface UnavailableCharacter {",
+        "  id: number | undefined;",
+        "  url: string;",
+        "  error: string;",
+        "}",
+        "",
+        "export function registerFilmTools(server: McpServer, client: SwapiClient): void {",
+        "  server.registerTool(",
+        '    "list_films",',
+        "    {",
+        '      title: "List Star Wars episodes",',
+        "      description:",
+        (
+            '        "List all Star Wars film episodes available in SWAPI, '
+            'sorted by episode number. " +'
+        ),
+        (
+            '        "Returns for each episode: film_id (SWAPI resource id), '
+            'episode_id (episode number), " +'
+        ),
+        (
+            '        "title, release date, director, producer and '
+            'how many characters appear in it. " +'
+        ),
+        ('        "Use this tool first to discover episodes; then pass film_id or episode_id " +'),
+        (
+            '        "to get_film_characters to fetch characters, '
+            'or get_film for full episode details.",'
+        ),
+        "      inputSchema: {},",
+        "    },",
+        "    async () => {",
+        "      try {",
+        "        const films = await client.listFilms();",
+        "        const episodes = films",
+        "          .map(toFilmSummary)",
+        "          .sort((a, b) => a.episode_id - b.episode_id);",
+        "        return jsonResult({ total_episodes: episodes.length, episodes });",
+        "      } catch (error) {",
+        "        return toErrorResult(error);",
+        "      }",
+        "    },",
+        "  );",
+        "",
+        "  server.registerTool(",
+        '    "get_film",',
+        "    {",
+        '      title: "Get Star Wars film details",',
+        "      description:",
+        (
+            '        "Get detailed information about a specific Star Wars film episode, '
+            'including title, " +'
+        ),
+        (
+            '        "episode number, opening crawl text, director, producer, release date, '
+            'and links to " +'
+        ),
+        '        "characters, planets, starships, vehicles, and species. " +',
+        (
+            '        "Provide EITHER film_id (SWAPI film resource id, 1-6 — '
+            'see the film_id field of list_films) " +'
+        ),
+        (
+            "        \"OR episode_id (the episode number, 1-6, e.g. 4 for 'A New Hope'); "
+            'exactly one of them is required. " +'
+        ),
+        ('        "Note: SWAPI film ids do not match episode numbers (film_id 1 is Episode IV).",'),
+        "      inputSchema: {",
+        "        film_id: z",
+        "          .number()",
+        "          .int()",
+        "          .positive()",
+        "          .optional()",
+        "          .describe(",
+        '            "SWAPI film resource id (1-6). Film 1 is Episode IV, film 4 is Episode I. " +',
+        '              "Use the film_id returned by list_films.",',
+        "          ),",
+        "        episode_id: z",
+        "          .number()",
+        "          .int()",
+        "          .positive()",
+        "          .optional()",
+        "          .describe(",
+        (
+            "            \"Episode number (1-6), e.g. 4 for 'A New Hope'. "
+            'Provide this OR film_id, not both.",'
+        ),
+        "          ),",
+        "      },",
+        "    },",
+        "    async ({ film_id: filmId, episode_id: episodeId }) => {",
+        "      if ((filmId === undefined) === (episodeId === undefined)) {",
+        "        throw new McpError(",
+        "          ErrorCode.InvalidParams,",
+        (
+            "          \"Provide exactly one of 'film_id' or 'episode_id' "
+            'to identify the episode.",'
+        ),
+        "        );",
+        "      }",
+        "      try {",
+        "        const film =",
+        "          filmId !== undefined",
+        "            ? await client.getFilm(filmId)",
+        "            : await requireFilmByEpisode(client, episodeId as number);",
+        "",
+        "        return jsonResult({",
+        '          film_id: idFromUrl(film.url, "films"),',
+        "          ...film,",
+        "        });",
+        "      } catch (error) {",
+        "        return toErrorResult(error);",
+        "      }",
+        "    },",
+        "  );",
+        "}",
+    ]
+)
+
+SWAPI_VEHICLES_TS = "\n".join(
+    [
+        'import { z } from "zod";',
+        "export function registerVehicleTools(server: McpServer, client: SwapiClient) {",
+        "  server.tool(",
+        '    "get_vehicle",',
+        "    {",
+        "      idOrUrl: z.union([z.number().int().positive(), z.string()]),",
+        "    },",
+        "    async ({ idOrUrl }) => jsonResult(await client.getVehicle(idOrUrl)),",
+        "  );",
+        "}",
     ]
 )
 
@@ -273,11 +402,11 @@ def _snapshot() -> PolicySnapshot:
 
 
 def test_swapi_films_modified_hunk_rejects_false_import_and_try_catch_with_l3_context() -> None:
-    """Modified hunk starts at L93 while L2 holds import and L102-112 holds try/catch."""
+    """Modified hunk starts at L93 while L2 holds import and L100-112 holds try/catch."""
     films_lines = SWAPI_FILMS_TS.splitlines()
     films_cf = _hunk_changed_file(
         "src/tools/films.ts",
-        {ln: ("context" if ln != 94 else "added", films_lines[ln - 1]) for ln in range(93, 117)},
+        {ln: ("context" if ln != 94 else "added", films_lines[ln - 1]) for ln in range(93, 115)},
     )
     ctx = _context(
         changed_files=(films_cf,),
@@ -287,15 +416,15 @@ def test_swapi_films_modified_hunk_rejects_false_import_and_try_catch_with_l3_co
     cand_import = _candidate(
         "c-import",
         _finding(
-            line=96,
+            line=95,
             title="McpError is not imported in get_film tool",
             body=(
-                "The `get_film` tool uses `McpError` and `ErrorCode` on lines 97-100, "
+                "The `get_film` tool uses `McpError` and `ErrorCode` on lines 95-98, "
                 "but neither is imported."
             ),
             evidence_refs=[
                 EvidenceRef(
-                    block_id=file_block_id("src/tools/films.ts"), start_line=96, end_line=100
+                    block_id=file_block_id("src/tools/films.ts"), start_line=94, end_line=98
                 )
             ],
         ),
@@ -303,7 +432,7 @@ def test_swapi_films_modified_hunk_rejects_false_import_and_try_catch_with_l3_co
     cand_try_header = _candidate(
         "c-try-header",
         _finding(
-            line=102,
+            line=100,
             title="Unhandled error in get_film tool",
             body=(
                 "`get_film` calls `client.getFilm` and `requireFilmByEpisode` "
@@ -311,7 +440,7 @@ def test_swapi_films_modified_hunk_rejects_false_import_and_try_catch_with_l3_co
             ),
             evidence_refs=[
                 EvidenceRef(
-                    block_id=file_block_id("src/tools/films.ts"), start_line=102, end_line=106
+                    block_id=file_block_id("src/tools/films.ts"), start_line=100, end_line=105
                 )
             ],
         ),
@@ -319,12 +448,12 @@ def test_swapi_films_modified_hunk_rejects_false_import_and_try_catch_with_l3_co
     cand_try_inner = _candidate(
         "c-try-inner",
         _finding(
-            line=105,
+            line=103,
             title="No try/catch around API call",
             body="client.getFilm is called without a try/catch block.",
             evidence_refs=[
                 EvidenceRef(
-                    block_id=file_block_id("src/tools/films.ts"), start_line=105, end_line=105
+                    block_id=file_block_id("src/tools/films.ts"), start_line=103, end_line=103
                 )
             ],
         ),
@@ -347,7 +476,7 @@ def test_swapi_films_modified_hunk_rejects_false_import_and_try_catch_with_l3_co
 def test_try_catch_check_excludes_catch_and_finally_clauses_and_try_finally() -> None:
     """Only caught try bodies count; catch/finally and uncaught try...finally stay supported."""
     films_cf = _hunk_changed_file(
-        "src/tools/films.ts", {112: ("added", "return toErrorResult(error);")}
+        "src/tools/films.ts", {111: ("added", "return toErrorResult(error);")}
     )
     try_finally_ts = (
         "async function f() {\n  try {\n    await work();\n  } finally {\n    done();\n  }\n}\n"
@@ -366,11 +495,16 @@ def test_try_catch_check_excludes_catch_and_finally_clauses_and_try_finally() ->
 
     in_catch = _candidate(
         "c-in-catch",
-        _finding(line=112, title="Unhandled error", body="Called without a try/catch block."),
+        _finding(line=111, title="Unhandled error", body="Called without a try/catch block."),
     )
     in_finally = _candidate(
         "c-in-finally",
-        _finding(line=114, title="Unhandled cleanup", body="cleanupFilm lacks a try/catch."),
+        _finding(
+            path="src/tools/tf.ts",
+            line=5,
+            title="Unhandled cleanup",
+            body="done() lacks a try/catch.",
+        ),
     )
     in_try_finally = _candidate(
         "c-try-finally",
@@ -651,6 +785,13 @@ def test_swapi_comparative_id_or_url_checks_cited_external_block_contents() -> N
             DiffLine(i, "added", line) for i, line in enumerate(SWAPI_STARSHIPS_TS.splitlines(), 1)
         ),
     )
+    vehicles_cf = ChangedFile(
+        path="src/tools/vehicles.ts",
+        status="added",
+        lines=tuple(
+            DiffLine(i, "added", line) for i, line in enumerate(SWAPI_VEHICLES_TS.splitlines(), 1)
+        ),
+    )
     client_cf = ChangedFile(
         path="src/api-client.ts",
         status="added",
@@ -658,7 +799,7 @@ def test_swapi_comparative_id_or_url_checks_cited_external_block_contents() -> N
             DiffLine(i, "added", line) for i, line in enumerate(SWAPI_API_CLIENT_TS.splitlines(), 1)
         ),
     )
-    ctx = _context(changed_files=(starships_cf, client_cf))
+    ctx = _context(changed_files=(starships_cf, vehicles_cf, client_cf))
 
     no_external_ref = _candidate(
         "c-no-ext",
@@ -688,8 +829,26 @@ def test_swapi_comparative_id_or_url_checks_cited_external_block_contents() -> N
                 EvidenceRef(
                     block_id=file_block_id("src/tools/starships.ts"), start_line=6, end_line=6
                 ),
-                # Lines 1-2 of api-client.ts do NOT contain idOrUrl!
-                EvidenceRef(block_id=file_block_id("src/api-client.ts"), start_line=1, end_line=2),
+                # Lines 1-2 of vehicles.ts do NOT contain idOrUrl!
+                EvidenceRef(
+                    block_id=file_block_id("src/tools/vehicles.ts"), start_line=1, end_line=2
+                ),
+            ],
+        ),
+    )
+    non_tool_external_ref = _candidate(
+        "c-non-tool-ref",
+        _finding(
+            path="src/tools/starships.ts",
+            line=6,
+            title="Inconsistent parameter naming in get_starship",
+            body="The tool uses `id`, while other tools in the codebase use `idOrUrl`.",
+            evidence_refs=[
+                EvidenceRef(
+                    block_id=file_block_id("src/tools/starships.ts"), start_line=6, end_line=6
+                ),
+                # api-client.ts is not under src/tools/*
+                EvidenceRef(block_id=file_block_id("src/api-client.ts"), start_line=8, end_line=9),
             ],
         ),
     )
@@ -699,12 +858,14 @@ def test_swapi_comparative_id_or_url_checks_cited_external_block_contents() -> N
             path="src/tools/starships.ts",
             line=6,
             title="Inconsistent parameter naming",
-            body="Other files use `idOrUrl`.",
+            body="Other tools use `idOrUrl`.",
             evidence_refs=[
                 EvidenceRef(
                     block_id=file_block_id("src/tools/starships.ts"), start_line=6, end_line=6
                 ),
-                EvidenceRef(block_id=file_block_id("src/api-client.ts"), start_line=8, end_line=9),
+                EvidenceRef(
+                    block_id=file_block_id("src/tools/vehicles.ts"), start_line=6, end_line=7
+                ),
             ],
         ),
     )
@@ -726,6 +887,7 @@ def test_swapi_comparative_id_or_url_checks_cited_external_block_contents() -> N
     candidates = (
         no_external_ref,
         unrelated_external_lines,
+        non_tool_external_ref,
         valid_external_ref,
         prose_stopword_finding,
     )
@@ -740,6 +902,7 @@ def test_swapi_comparative_id_or_url_checks_cited_external_block_contents() -> N
     assert [(c.candidate_id, st) for c, st, _ in rejected] == [
         ("c-no-ext", "insufficient_context"),
         ("c-bad-ref", "insufficient_context"),
+        ("c-non-tool-ref", "insufficient_context"),
     ]
 
 
@@ -937,7 +1100,7 @@ def test_ac3_true_findings_and_out_of_scope_logic_remain_supported() -> None:
         "c-logic",
         _finding(
             path="src/tools/films.ts",
-            line=96,
+            line=94,
             title="Missing validation for exactly one identifier",
             body="The check does not enforce that exactly one of film_id or episode_id is passed.",
             evidence_refs=[
@@ -947,19 +1110,62 @@ def test_ac3_true_findings_and_out_of_scope_logic_remain_supported() -> None:
             ],
         ),
     )
+    # Authentic test error branch findings from swapi-mcp-example#3
+    test_search_people_err = _candidate(
+        "c-test-api",
+        _finding(
+            path="test/api-client.test.ts",
+            line=134,
+            title="Test does not verify ApiError properties on 404 response in searchPeople",
+            body=(
+                "The test checks that searchPeople throws an error, but it does not assert "
+                "that the thrown error is an instance of ApiError or check its status code."
+            ),
+            evidence_refs=[
+                EvidenceRef(
+                    block_id=file_block_id("test/api-client.test.ts"), start_line=130, end_line=135
+                )
+            ],
+        ),
+    )
+    test_get_film_err = _candidate(
+        "c-test-tools",
+        _finding(
+            path="test/tools.test.ts",
+            line=170,
+            title="Test does not verify error result on invalid params in get_film",
+            body=(
+                "The test error branch asserts toErrorResult is called but does not verify "
+                "the McpError code and message in the returned result structure."
+            ),
+            evidence_refs=[
+                EvidenceRef(
+                    block_id=file_block_id("test/tools.test.ts"), start_line=165, end_line=175
+                )
+            ],
+        ),
+    )
 
     supported, rejected = filter_verified_candidates(
-        candidates=(ssrf, id_from_url, exactly_one),
+        candidates=(ssrf, id_from_url, exactly_one, test_search_people_err, test_get_film_err),
         decisions=(
             _supported_decision(ssrf),
             _supported_decision(id_from_url),
             _supported_decision(exactly_one),
+            _supported_decision(test_search_people_err),
+            _supported_decision(test_get_film_err),
         ),
         context=ctx,
         claim_syntax=INSPECTOR,
     )
     assert rejected == []
-    assert [c.candidate_id for c in supported] == ["c-ssrf", "c-id-url", "c-logic"]
+    assert [c.candidate_id for c in supported] == [
+        "c-ssrf",
+        "c-id-url",
+        "c-logic",
+        "c-test-api",
+        "c-test-tools",
+    ]
 
 
 class _PipelineStub(_AcceptingCheckpointPublisher):
@@ -1052,7 +1258,7 @@ def test_execute_review_run_drops_false_claims_while_retaining_valid_findings() 
     films_lines = SWAPI_FILMS_TS.splitlines()
     films_cf = _hunk_changed_file(
         "src/tools/films.ts",
-        {ln: ("context" if ln != 94 else "added", films_lines[ln - 1]) for ln in range(93, 117)},
+        {ln: ("context" if ln != 94 else "added", films_lines[ln - 1]) for ln in range(93, 115)},
     )
     starships_cf = ChangedFile(
         path="src/tools/starships.ts",
@@ -1088,7 +1294,7 @@ def test_execute_review_run_drops_false_claims_while_retaining_valid_findings() 
         "findings": [
             {
                 "path": "src/tools/films.ts",
-                "line": 96,
+                "line": 95,
                 "start_line": None,
                 "severity": "high",
                 "category": "correctness",
@@ -1100,14 +1306,14 @@ def test_execute_review_run_drops_false_claims_while_retaining_valid_findings() 
                 "evidence_refs": [
                     {
                         "block_id": file_block_id("src/tools/films.ts"),
-                        "start_line": 96,
-                        "end_line": 96,
+                        "start_line": 94,
+                        "end_line": 98,
                     }
                 ],
             },
             {
                 "path": "src/tools/films.ts",
-                "line": 105,
+                "line": 103,
                 "start_line": None,
                 "severity": "high",
                 "category": "correctness",
@@ -1119,8 +1325,8 @@ def test_execute_review_run_drops_false_claims_while_retaining_valid_findings() 
                 "evidence_refs": [
                     {
                         "block_id": file_block_id("src/tools/films.ts"),
-                        "start_line": 105,
-                        "end_line": 105,
+                        "start_line": 103,
+                        "end_line": 103,
                     }
                 ],
             },
@@ -1206,3 +1412,72 @@ def test_execute_review_run_drops_false_claims_while_retaining_valid_findings() 
     assert isinstance(output_no_ast, VerifiedReviewOutput)
     no_ast_findings = cast(list[dict[str, Any]], output_no_ast["findings"])
     assert len(no_ast_findings) == 3
+
+
+def test_multi_symbol_import_claims() -> None:
+    """'A and B are not imported' is contradicted ONLY if both A and B are imported."""
+    # Source only imports ErrorCode, McpError is missing
+    source_one = b'import { ErrorCode } from "sdk";\nexport function f() {}\n'
+    # Source imports both
+    source_both = b'import { ErrorCode, McpError } from "sdk";\nexport function f() {}\n'
+
+    finding = _finding(
+        path="src/tools.ts",
+        line=5,
+        title="Missing imports",
+        body="`McpError` and `ErrorCode` are not imported.",
+    )
+
+    # When only ErrorCode is imported, claim is partially true -> supported (retained)
+    res_one = audit_candidate_claim(finding, source_one, claim_syntax=INSPECTOR)
+    assert res_one.status == "supported"
+
+    # When both are imported, claim is contradicted -> dropped
+    res_both = audit_candidate_claim(finding, source_both, claim_syntax=INSPECTOR)
+    assert res_both.status == "contradicted"
+
+
+def test_comparative_framework_name_without_quotes_remains_supported() -> None:
+    """'other endpoints use Depends' should not trigger comparative param check."""
+    finding = _finding(
+        path="app/api.py",
+        line=10,
+        title="FastAPI dependency injection",
+        body="other endpoints use Depends for authentication.",
+    )
+    res = audit_candidate_claim(finding, b"def api(): pass\n")
+    assert res.status == "supported"
+
+
+def test_security_finding_with_incidental_comparative_remark_remains_supported() -> None:
+    """Primary security defect finding is retained even if incidental remark lacks external ref."""
+    finding = _finding(
+        path="src/tools/films.ts",
+        line=100,
+        title="SSRF vulnerability in fetchFilm: user URL fetched without validation",
+        body=(
+            "The URL is fetched directly without domain validation. "
+            "Other tools use validateUrl parameter."
+        ),
+        evidence_refs=[
+            EvidenceRef(block_id=file_block_id("src/tools/films.ts"), start_line=100, end_line=105)
+        ],
+    )
+    res = audit_candidate_claim(finding, SWAPI_FILMS_TS.encode("utf-8"), claim_syntax=INSPECTOR)
+    assert res.status == "supported"
+
+
+def test_python_try_header_line_is_recognized_as_enclosed() -> None:
+    """Python try: header line is treated as enclosed by try body, matching TypeScript behavior."""
+    py_source = (
+        b"def worker():\n    try:\n        call_external()\n    except Exception:\n        pass\n"
+    )
+    # Line 2 is the 'try:' statement itself
+    finding = _finding(
+        path="app/worker.py",
+        line=2,
+        title="Unhandled call_external",
+        body="call_external is not wrapped in a try/except block.",
+    )
+    res = audit_candidate_claim(finding, py_source)
+    assert res.status == "contradicted"

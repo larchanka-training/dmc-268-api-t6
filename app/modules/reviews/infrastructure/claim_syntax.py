@@ -1,4 +1,19 @@
-"""Tree-sitter backed syntax inspection for deterministic claim auditing."""
+"""Tree-sitter backed syntax inspection for deterministic claim auditing.
+
+In-process design justification:
+- Scope: Operates only on complete file sources already present in memory from the
+  PR context (either an L3 `full_file` block or a contiguous `1..N` `added` diff hunk).
+- Bounded operations: Performs localized, deterministic AST queries: extracting
+  top-level import binding names and walking the ancestor chain of a single target line
+  for enclosing try/catch blocks.
+- Safety boundaries: Guarded by `MAX_SOURCE_BYTES` (512 KiB) before parsing, and
+  monotonic CPU deadlines (`MAX_PARSE_CPU_SECONDS_PER_FILE`) during AST traversals.
+- Subprocess rationale: Spawning an external `ast_worker` subprocess or IPC serialization
+  for every candidate finding in the reflection pass introduces IPC round-trip latency
+  and process scheduling overhead, while parsing already in-memory buffers with C
+  tree-sitter bindings executes synchronously in sub-millisecond time. Tree-sitter's
+  C parser handles memory internally and errors are caught safely fail-open.
+"""
 
 from __future__ import annotations
 
@@ -60,8 +75,12 @@ class TreeSitterClaimSyntaxInspector:
             _LOGGER.warning("Tree-sitter import parse skipped for %s: %s", path, exc)
             return None
 
+        deadline = time.monotonic() + self._cpu_seconds
         bindings: set[str] = set()
         for node in tree.root_node.named_children:
+            if time.monotonic() > deadline:
+                _LOGGER.warning("Tree-sitter import walk timed out for %s", path)
+                return None
             if node.type == "import_statement":
                 # Skip `import type { ... }` or `import type Foo from '...'`
                 if any(child.type == "type" for child in node.children):
@@ -135,7 +154,7 @@ class TreeSitterClaimSyntaxInspector:
             _LOGGER.warning("Tree-sitter AST parse skipped for %s: %s", path, exc)
             return None
 
-        deadline = time.process_time() + self._cpu_seconds
+        deadline = time.monotonic() + self._cpu_seconds
         target_row = target_line - 1
         lines = source.splitlines()
         if target_row < 0 or target_row >= len(lines):
@@ -155,7 +174,7 @@ class TreeSitterClaimSyntaxInspector:
 
         curr = node
         while curr is not None:
-            if time.process_time() > deadline:
+            if time.monotonic() > deadline:
                 _LOGGER.warning("Tree-sitter try/catch walk timed out for %s", path)
                 return None
             if curr.type in _FUNCTION_BOUNDARY_TYPES:

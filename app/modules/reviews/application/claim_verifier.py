@@ -4,15 +4,32 @@ Scope and explicit boundaries (issue #445):
 - Covers TypeScript, TSX, JavaScript (``.ts``, ``.tsx``, ``.js``, ``.jsx``, ``.mjs``, ``.cjs``)
   and Python (``.py``, ``.pyi``). Go files and unrecognized extensions skip AST-based checks.
 - Audited claim classes:
-  1. Missing-import claims (``X is not imported``, ``missing import for X``), excluding
-     module-path complaints (``X is not imported from ...``) and wrong-source import hints.
+  1. Missing-import claims (``X is not imported``, ``missing import for X``, or multi-symbol
+     enumerations such as ``A and B are not imported``), excluding module-path complaints
+     (``X is not imported from ...``) and wrong-source import hints. Multi-symbol claims are
+     contradicted only when all claimed symbols are present in imported bindings; if any
+     claimed symbol is genuinely missing, the finding is preserved as supported.
      Requires complete file source (``L3 full_file`` or un-truncated ``added`` diff).
   2. Missing ``try/catch`` (or Python ``try/except``) claims when the finding line sits inside
-     the caught ``body`` of a ``try`` block (excludes ``catch``/``except``, ``else``, and
-     ``finally`` blocks, as well as ``try ... finally`` without a catch handler).
-     Requires complete file source.
+     the caught ``body`` or the ``try`` header line itself of a ``try`` block (excludes
+     ``catch``/``except``, ``else``, and ``finally`` blocks, as well as ``try ... finally``
+     without a catch handler). Requires complete file source.
   3. Cross-file comparative claims (``other tools/files use <param>``) checked against
      external ``evidence_refs`` and their referenced blocks in ``ReviewContext``.
+     - "other tools use <param>" strictly requires external citations to originate from tool
+       definitions (under ``*/tools/*``).
+     - When a finding asserts a primary local defect (e.g. SSRF or security vulnerability), an
+       incidental unverified comparative remark in the finding body does not drop the finding.
+       Only findings whose primary thesis is cross-tool consistency are dropped when external
+       evidence is missing.
+     - Scoped to English regex keywords; paraphrased or non-English comparative claims fall
+       outside deterministic AST audit scope.
+- Parser safety and performance bounds:
+  - Synchronous C-parsers (CPython ``ast.parse`` and Tree-sitter C extension) run in-process on
+    already in-memory source buffers bounded by pre-flight ``MAX_SOURCE_BYTES`` (512 KiB) checks,
+    returning fail-open with logging on memory or syntax errors.
+  - AST traversals are bound by monotonic deadlines (``MAX_PARSE_CPU_SECONDS_PER_FILE``).
+  - ``MAX_PARSER_MEMORY_BYTES`` governs the separate background ``ast_worker`` subprocess.
 - Explicitly outside deterministic audit scope: logical assertions without single-block
   syntactic truth (such as ``"accepts at most one parameter"`` / ``"exactly one"``) and AST
   checks on modified files lacking an ``L3 full_file`` block.
@@ -109,11 +126,14 @@ _COMPARATIVE_STOPWORDS = frozenset(
     }
 )
 
+_IDENTIFIER_ITEM = r"[`'\"]?[A-Za-z_$][A-Za-z0-9_$]*[`'\"]?"
+_SEPARATOR = r"(?:,\s*(?:and|or)\s*|,\s*|\s+(?:and|or)\s+)"
+_IDENTIFIERS_LIST = rf"{_IDENTIFIER_ITEM}(?:{_SEPARATOR}{_IDENTIFIER_ITEM})*"
+
 _NOT_IMPORTED_PATTERN = re.compile(
-    r"(?:\b[`'\"]?(?P<id1>[A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?\s+(?:is|are|isn't|aren't)\s+"
+    rf"(?:\b(?P<list1>{_IDENTIFIERS_LIST})\s+(?:is|are|isn't|aren't|was|were)\s+"
     r"(?:not|never)\s+imported\b)"
-    r"|(?:\bmissing\s+(?:an?\s+|the\s+)?import\s+(?:for\s+)?[`'\"]?(?P<id2>[A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?\b)"
-    r"|(?:\b[`'\"]?(?P<id3>[A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?\s+(?:was|were)\s+not\s+imported\b)",
+    rf"|(?:\bmissing\s+(?:an?\s+|the\s+)?import\s+(?:for\s+)?(?P<list2>{_IDENTIFIERS_LIST})\b)",
     re.IGNORECASE,
 )
 
@@ -132,7 +152,7 @@ _QUALIFIED_IMPORT_TAIL = re.compile(
 
 _NO_TRY_CATCH_PATTERN = re.compile(
     r"\b(?:"
-    r"not\s+(?:wrapped|inside|in)\s+(?:(?:a|an)\s+)?(?:(?:surrounding|enclosing|outer|explicit|proper)\s+)?try\s*[/-]?\s*(?:catch|except)"
+    r"not\s+(?:wrapped(?:\s+in)?|inside|in)\s+(?:(?:a|an)\s+)?(?:(?:surrounding|enclosing|outer|explicit|proper)\s+)?try\s*[/-]?\s*(?:catch|except)"
     r"|without\s+(?:(?:a|an|any)\s+)?(?:(?:surrounding|enclosing|outer|explicit|proper)\s+)?try\s*[/-]?\s*(?:catch|except)"
     r"|missing\s+(?:(?:a|an)\s+)?(?:(?:surrounding|enclosing|outer|explicit|proper)\s+)?try\s*[/-]?\s*(?:catch|except)"
     r"|no\s+(?:(?:surrounding|enclosing|outer|explicit|proper)\s+)?try\s*[/-]?\s*(?:catch|except)(?:\s+block)?"
@@ -343,9 +363,11 @@ def _audit_import_claim(
         ):
             continue
 
-        symbol = next((val for val in match.groupdict().values() if val is not None), None)
-        if symbol and symbol.lower() not in _IMPORT_STOPWORDS:
-            claimed_symbols.append(symbol)
+        raw_list = match.group("list1") or match.group("list2") or ""
+        tokens = re.findall(r"\b[A-Za-z_$][A-Za-z0-9_$]*\b", raw_list)
+        for tok in tokens:
+            if tok.lower() not in _IMPORT_STOPWORDS and tok.lower() not in {"and", "or", "for"}:
+                claimed_symbols.append(tok)
     if not claimed_symbols:
         return ClaimAuditResult(status="supported")
 
@@ -353,12 +375,12 @@ def _audit_import_claim(
     if imported_symbols is None:
         return ClaimAuditResult(status="supported")
 
-    for symbol in claimed_symbols:
-        if symbol in imported_symbols:
-            return ClaimAuditResult(
-                status="contradicted",
-                reason=f"Symbol '{symbol}' is already imported in {file_path}",
-            )
+    if all(symbol in imported_symbols for symbol in claimed_symbols):
+        symbols_str = ", ".join(f"'{s}'" for s in claimed_symbols)
+        return ClaimAuditResult(
+            status="contradicted",
+            reason=f"Symbols {symbols_str} are already imported in {file_path}",
+        )
     return ClaimAuditResult(status="supported")
 
 
@@ -388,6 +410,39 @@ def _audit_try_catch_claim(
     return ClaimAuditResult(status="supported")
 
 
+_PRIMARY_DEFECT_TITLE_KEYWORDS = frozenset(
+    {
+        "ssrf",
+        "injection",
+        "vulnerability",
+        "vulnerable",
+        "cve",
+        "overflow",
+        "unhandled",
+        "crash",
+        "leak",
+        "dos",
+        "rce",
+        "auth",
+        "security",
+        "sanitization",
+        "bypass",
+    }
+)
+
+
+def _is_tool_path(path: str | None) -> bool:
+    if not path:
+        return False
+    norm = path.replace("\\", "/").lower()
+    return "/tools/" in norm or norm.startswith("tools/")
+
+
+def _is_primary_defect_finding(finding: ReviewFindingV2) -> bool:
+    title_lower = finding.title.lower()
+    return any(kw in title_lower for kw in _PRIMARY_DEFECT_TITLE_KEYWORDS)
+
+
 def _audit_comparative_external_claim(
     *,
     text: str,
@@ -410,6 +465,15 @@ def _audit_comparative_external_claim(
         external_refs.append(ref)
 
     if not external_refs:
+        if _is_primary_defect_finding(finding):
+            _LOGGER.info(
+                "Retaining primary defect candidate %s:%s "
+                "despite unverified comparative remark '%s'",
+                finding.path,
+                finding.line,
+                param,
+            )
+            return ClaimAuditResult(status="supported")
         return ClaimAuditResult(
             status="insufficient_context",
             reason=f"Claim asserts other tools/files use '{param}' without external block evidence",
@@ -418,10 +482,14 @@ def _audit_comparative_external_claim(
     if context_blocks is None:
         return ClaimAuditResult(status="supported")
 
+    is_tool_claim = bool(re.search(r"\bother\s+tools\b", text, re.IGNORECASE))
     identifier_re = re.compile(rf"(?<![A-Za-z0-9_$]){re.escape(param)}(?![A-Za-z0-9_$])")
+    matched_external = False
     for ref in external_refs:
         snippet = context_blocks.get(ref.block_id)
         if snippet is None:
+            continue
+        if is_tool_claim and not _is_tool_path(snippet.path):
             continue
         if snippet.lines:
             cited = "\n".join(
@@ -430,9 +498,39 @@ def _audit_comparative_external_claim(
                 if ln in snippet.lines
             )
             if cited and identifier_re.search(cited):
-                return ClaimAuditResult(status="supported")
+                matched_external = True
+                break
         elif identifier_re.search(snippet.text):
-            return ClaimAuditResult(status="supported")
+            matched_external = True
+            break
+
+    if matched_external:
+        return ClaimAuditResult(status="supported")
+
+    if _is_primary_defect_finding(finding):
+        _LOGGER.info(
+            "Retaining primary defect candidate %s:%s despite unverified comparative claim '%s'",
+            finding.path,
+            finding.line,
+            param,
+        )
+        return ClaimAuditResult(status="supported")
+
+    if is_tool_claim and not any(
+        _is_tool_path(
+            context_blocks.get(ref.block_id).path
+            if context_blocks.get(ref.block_id) is not None
+            else None
+        )
+        for ref in external_refs
+    ):
+        return ClaimAuditResult(
+            status="insufficient_context",
+            reason=(
+                f"Claim asserts other tools use '{param}' "
+                "but cited external blocks are not tool files"
+            ),
+        )
 
     return ClaimAuditResult(
         status="insufficient_context",
@@ -447,11 +545,7 @@ def _extract_comparative_param(text: str) -> str | None:
         keyword_suffix = bool(match.group("kw"))
         if param.lower() in _COMPARATIVE_STOPWORDS and not quoted:
             continue
-        if (
-            quoted
-            or keyword_suffix
-            or any(ch.isupper() or ch.isdigit() or ch in {"_", "$"} for ch in param)
-        ):
+        if quoted or keyword_suffix:
             return param
     return None
 
@@ -596,9 +690,8 @@ def _is_python_line_in_try_body(
         if isinstance(curr, _PYTHON_FUNCTION_BOUNDARIES):
             return (False, None, None)
         if isinstance(curr, (ast.Try, ast.TryStar)) and curr.handlers and curr.body:
-            body_start = curr.body[0].lineno
             body_end = max(stmt.end_lineno or stmt.lineno for stmt in curr.body)
-            if body_start <= target_line <= body_end:
+            if curr.lineno <= target_line <= body_end:
                 return (True, curr.lineno, body_end)
         curr = parents.get(curr)
 
