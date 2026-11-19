@@ -516,14 +516,13 @@ def _audit_comparative_external_claim(
         )
         return ClaimAuditResult(status="supported")
 
-    if is_tool_claim and not any(
-        _is_tool_path(
-            context_blocks.get(ref.block_id).path
-            if context_blocks.get(ref.block_id) is not None
-            else None
-        )
-        for ref in external_refs
-    ):
+    has_tool_block = False
+    for ref in external_refs:
+        snip = context_blocks.get(ref.block_id)
+        if snip is not None and _is_tool_path(snip.path):
+            has_tool_block = True
+            break
+    if is_tool_claim and not has_tool_block:
         return ClaimAuditResult(
             status="insufficient_context",
             reason=(
