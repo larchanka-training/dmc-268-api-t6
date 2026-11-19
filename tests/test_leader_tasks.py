@@ -5,17 +5,13 @@ from __future__ import annotations
 import ast
 import asyncio
 import logging
-from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 import app.common.application.leader_tasks as common_leader_tasks
-import app.modules.code_index.application.leader_tasks as index_leader_module
-import app.modules.reviews.application.run_data_retention as retention_module
 from app.common.application.leader_tasks import (
     TASK_TIMEOUT_MARGIN_SECONDS,
     TICK_BUDGET_SECONDS,
@@ -23,33 +19,10 @@ from app.common.application.leader_tasks import (
     ScheduledTask,
 )
 from app.modules.reviews.application.run_data_retention import INTERVAL_SECONDS, PurgeExpiredRunData
-from app.worker import WorkerProcess
-from tests.leader_task_fakes import Clock, Recorder
-from tests.leader_task_fakes import Runs as _Runs
+from tests.leader_task_fakes import Clock, Recorder, Runs, worker_process
 from tests.run_data_retention_fakes import RetentionStore, make_retention_task
 
 _APP_ROOT = Path(__file__).resolve().parents[1] / "app"
-
-
-@dataclass
-class _StubLeader:
-    async def execute(self, *, limit: int = 100) -> int:
-        return 0
-
-    async def replay_pending_publications(self, *, limit: int = 100) -> int:
-        return 0
-
-
-def _worker_process(tasks: list[ScheduledTask], clock: Callable[[], float]) -> WorkerProcess:
-    stub = _StubLeader()
-    return WorkerProcess(
-        handle_run=cast(Any, None),
-        handle_delivery=cast(Any, None),
-        publish_review=cast(Any, None),
-        enqueue=cast(Any, stub),
-        sweep=cast(Any, stub),
-        leader_tasks=LeaderTasks(tasks, clock=clock),
-    )
 
 
 def test_modules_do_not_duplicate_leader_scheduler_constants_or_gates() -> None:
@@ -74,8 +47,33 @@ def test_modules_do_not_duplicate_leader_scheduler_constants_or_gates() -> None:
     }
     assert "CodeIndexLeaderTasks" not in index_defs
     assert "LeaderTasks" not in index_defs
-    for attr in ("TICK_BUDGET_SECONDS", "TASK_TIMEOUT_MARGIN_SECONDS", "ScheduledTask"):
-        assert not hasattr(index_leader_module, attr)
+
+    # AST check: no duplicated scheduler constants (*_SECONDS, *_MARGIN*) or gate variables (_due)
+    for tree, allowed in (
+        (index_tree, {"HEAD_READ_RESERVE_SECONDS"}),
+        (retention_tree, {"INTERVAL_SECONDS"}),
+    ):
+        top_level_targets: set[str] = set()
+        for stmt in tree.body:
+            targets = []
+            if isinstance(stmt, ast.Assign):
+                targets.extend(stmt.targets)
+            elif isinstance(stmt, ast.AnnAssign):
+                targets.append(stmt.target)
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    name = t.id
+                    if (name.endswith("_SECONDS") or "_MARGIN" in name) and name not in allowed:
+                        top_level_targets.add(name)
+        assert not top_level_targets
+
+        due_references = {
+            node.id if isinstance(node, ast.Name) else node.attr
+            for node in ast.walk(tree)
+            if (isinstance(node, ast.Name) and node.id == "_due")
+            or (isinstance(node, ast.Attribute) and node.attr == "_due")
+        }
+        assert not due_references
 
     retention_imports = [
         *(
@@ -98,13 +96,11 @@ def test_modules_do_not_duplicate_leader_scheduler_constants_or_gates() -> None:
     }
     assert not any("Scheduler" in name or "LeaderTasks" in name for name in retention_defs)
     assert not hasattr(PurgeExpiredRunData, "tick")
-    for attr in ("TICK_BUDGET_SECONDS", "TICK_TIMEOUT_MARGIN_SECONDS"):
-        assert not hasattr(retention_module, attr)
 
 
 def test_a_task_runs_on_the_first_tick_and_then_once_its_interval_has_passed() -> None:
     clock = Clock()
-    runs: _Runs = []
+    runs: Runs = []
     tasks = LeaderTasks(
         [
             ScheduledTask("ttl", Recorder("ttl", clock, runs), 3_600),
@@ -130,7 +126,7 @@ def test_a_failing_task_is_logged_and_neither_stops_the_others_nor_the_tick(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     clock = Clock()
-    runs: _Runs = []
+    runs: Runs = []
     failing = Recorder("ttl", clock, runs, error=RuntimeError("database is gone"))
     tasks = LeaderTasks(
         [
@@ -157,7 +153,7 @@ def test_a_failing_task_is_logged_and_neither_stops_the_others_nor_the_tick(
 
 def test_the_tasks_of_a_tick_share_one_deadline() -> None:
     clock = Clock()
-    runs: _Runs = []
+    runs: Runs = []
     tasks = LeaderTasks(
         [
             ScheduledTask("ttl", Recorder("ttl", clock, runs, cost=4), 3_600),
@@ -177,7 +173,7 @@ def test_the_tasks_of_a_tick_share_one_deadline() -> None:
 
 def test_a_task_with_work_left_runs_again_on_the_next_tick() -> None:
     clock = Clock()
-    runs: _Runs = []
+    runs: Runs = []
     busy = Recorder("gc", clock, runs, remains=True)
     tasks = LeaderTasks([ScheduledTask("gc", busy, 300)], clock=clock)
 
@@ -211,7 +207,7 @@ def test_after_a_timeout_only_a_task_that_continues_runs_again_on_the_next_tick(
     monkeypatch.setattr(common_leader_tasks, "TICK_BUDGET_SECONDS", 0.01)
     monkeypatch.setattr(common_leader_tasks, "TASK_TIMEOUT_MARGIN_SECONDS", 0.05)
     clock = Clock()
-    runs: _Runs = []
+    runs: Runs = []
     tasks = LeaderTasks(
         [
             ScheduledTask(
@@ -237,7 +233,7 @@ def test_after_a_timeout_only_a_task_that_continues_runs_again_on_the_next_tick(
 
 def test_a_timeout_error_the_task_raises_itself_moves_the_gate_of_a_task_that_continues() -> None:
     clock = Clock()
-    runs: _Runs = []
+    runs: Runs = []
     raising = Recorder("reconcile", clock, runs, error=TimeoutError("the listing timed out"))
     tasks = LeaderTasks(
         [ScheduledTask("reconcile", raising, 600, continue_after_timeout=True)], clock=clock
@@ -252,7 +248,7 @@ def test_a_timeout_error_the_task_raises_itself_moves_the_gate_of_a_task_that_co
 
 def test_a_cancellation_in_a_task_propagates_out_of_the_tick() -> None:
     clock = Clock()
-    runs: _Runs = []
+    runs: Runs = []
     tasks = LeaderTasks(
         [
             ScheduledTask("ttl", Recorder("ttl", clock, runs, error=asyncio.CancelledError()), 60),
@@ -269,11 +265,11 @@ def test_a_cancellation_in_a_task_propagates_out_of_the_tick() -> None:
 
 def test_index_and_retention_with_remaining_work_share_one_tick_budget() -> None:
     clock = Clock()
-    runs: _Runs = []
+    runs: Runs = []
     index = Recorder("gc", clock, runs, cost=6.0, remains=True)
     retention_store = RetentionStore(clock, runs=(100, 100), cost=4.0)
     retention_task = make_retention_task(retention_store, clock)
-    process = _worker_process(
+    process = worker_process(
         [
             ScheduledTask("gc", index, 300),
             ScheduledTask("run_data_retention", retention_task, INTERVAL_SECONDS),
@@ -301,11 +297,11 @@ def test_hung_index_task_leaves_retention_gate_open_for_next_tick(
     monkeypatch.setattr(common_leader_tasks, "TICK_BUDGET_SECONDS", 0.01)
     monkeypatch.setattr(common_leader_tasks, "TASK_TIMEOUT_MARGIN_SECONDS", 0.02)
     clock = Clock()
-    runs: _Runs = []
+    runs: Runs = []
     hanging_index = Recorder("gc", clock, runs, hang=True, hang_advance=0.03)
     retention_store = RetentionStore(clock)
     retention_task = make_retention_task(retention_store, clock)
-    process = _worker_process(
+    process = worker_process(
         [
             ScheduledTask("gc", hanging_index, 300),
             ScheduledTask("run_data_retention", retention_task, INTERVAL_SECONDS),
@@ -333,7 +329,7 @@ def test_hung_retention_after_index_work_receives_only_remaining_budget_and_one_
     monkeypatch.setattr(common_leader_tasks, "TICK_BUDGET_SECONDS", 0.06)
     monkeypatch.setattr(common_leader_tasks, "TASK_TIMEOUT_MARGIN_SECONDS", 0.02)
     clock = Clock()
-    runs: _Runs = []
+    runs: Runs = []
     index = Recorder("gc", clock, runs, cost=0.04, remains=True)
     retention_timeouts: list[float] = []
     captured_deadlines: list[float | None] = []
@@ -350,7 +346,7 @@ def test_hung_retention_after_index_work_receives_only_remaining_budget_and_one_
             return True
 
     monkeypatch.setattr(asyncio, "timeout", spy_timeout)
-    process = _worker_process(
+    process = worker_process(
         [
             ScheduledTask("gc", index, 300),
             ScheduledTask("run_data_retention", _HangingRetention(), INTERVAL_SECONDS),
@@ -367,12 +363,8 @@ def test_hung_retention_after_index_work_receives_only_remaining_budget_and_one_
     assert "Leader task run_data_retention failed" in caplog.text
 
 
-def test_retention_failure_timeout_and_cancellation_in_leader_tasks(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_retention_failure_in_leader_tasks(caplog: pytest.LogCaptureFixture) -> None:
     clock = Clock()
-
-    # Failure stays inside the tick and waits INTERVAL_SECONDS before retrying.
     failing_store = RetentionStore(clock, runs=(RuntimeError("database"), 0))
     failing_leader = LeaderTasks(
         [
@@ -393,7 +385,10 @@ def test_retention_failure_timeout_and_cancellation_in_leader_tasks(
     assert failing_store.calls == ["runs", "runs", "blobs"]
     assert "Leader task run_data_retention failed" in caplog.text
 
-    # Timeout stays inside the tick and waits INTERVAL_SECONDS before retrying.
+
+def test_retention_timeout_in_leader_tasks(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     monkeypatch.setattr(common_leader_tasks, "TICK_BUDGET_SECONDS", 0.01)
     monkeypatch.setattr(common_leader_tasks, "TASK_TIMEOUT_MARGIN_SECONDS", 0.01)
     hung_clock = Clock()
@@ -407,31 +402,42 @@ def test_retention_failure_timeout_and_cancellation_in_leader_tasks(
         return 0
 
     monkeypatch.setattr(hung_store, "purge_expired_runs", hang)
-    hung_leader = LeaderTasks(
-        [
-            ScheduledTask(
-                "run_data_retention",
-                make_retention_task(hung_store, hung_clock),
-                INTERVAL_SECONDS,
-            )
-        ],
-        clock=hung_clock,
+    task = ScheduledTask(
+        "run_data_retention",
+        make_retention_task(hung_store, hung_clock),
+        INTERVAL_SECONDS,
+        continue_after_timeout=False,
     )
-    asyncio.run(hung_leader.tick())
-    asyncio.run(hung_leader.tick())
-    assert hung_calls == 1
+    assert task.continue_after_timeout is False
+    hung_leader = LeaderTasks([task], clock=hung_clock)
 
-    # Cancellation propagates out of LeaderTasks.tick().
-    cancelled_store = RetentionStore(hung_clock, runs=(asyncio.CancelledError(),))
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(hung_leader.tick())
+        # Gate is closed after timeout: does not run again on immediate next tick
+        asyncio.run(hung_leader.tick())
+
+    assert hung_calls == 1
+    assert "Leader task run_data_retention failed" in caplog.text
+
+    # Gate re-opens after INTERVAL_SECONDS
+    hung_clock.now += INTERVAL_SECONDS
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(hung_leader.tick())
+    assert hung_calls == 2
+
+
+def test_retention_cancellation_in_leader_tasks() -> None:
+    clock = Clock()
+    cancelled_store = RetentionStore(clock, runs=(asyncio.CancelledError(),))
     cancelled_leader = LeaderTasks(
         [
             ScheduledTask(
                 "run_data_retention",
-                make_retention_task(cancelled_store, hung_clock),
+                make_retention_task(cancelled_store, clock),
                 INTERVAL_SECONDS,
             )
         ],
-        clock=hung_clock,
+        clock=clock,
     )
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(cancelled_leader.tick())

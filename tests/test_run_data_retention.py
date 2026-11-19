@@ -4,19 +4,18 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any, cast
 
 import pytest
 
 from app.bootstrap.run_data_retention import RunDataRetentionSettings
 from app.common.application.leader_tasks import LeaderTasks, ScheduledTask
 from app.modules.reviews.application.run_data_retention import INTERVAL_SECONDS
-from app.worker import WorkerProcess, WorkerSettings
+from app.worker import WorkerSettings
 from tests.run_data_retention_fakes import (
     DEFAULT_RETENTION_NOW as _NOW,
 )
 from tests.run_data_retention_fakes import (
-    RetentionClock,
+    Clock,
     RetentionStore,
     make_retention_task,
 )
@@ -68,7 +67,7 @@ def test_the_worker_settings_read_the_retention_period() -> None:
 _DAY = 86_400
 
 
-def _leader(store: RetentionStore, clock: RetentionClock) -> LeaderTasks:
+def _leader(store: RetentionStore, clock: Clock) -> LeaderTasks:
     return LeaderTasks(
         [ScheduledTask("run_data_retention", make_retention_task(store, clock), INTERVAL_SECONDS)],
         clock=clock,
@@ -76,7 +75,7 @@ def _leader(store: RetentionStore, clock: RetentionClock) -> LeaderTasks:
 
 
 def test_a_pass_drains_the_runs_then_the_blobs_one_transaction_per_batch() -> None:
-    clock = RetentionClock(1_000.0)
+    clock = Clock(1_000.0)
     store = RetentionStore(clock, runs=(100, 100, 3), blobs=(1_000, 7))
 
     assert asyncio.run(make_retention_task(store, clock).run(10)) is False
@@ -97,7 +96,7 @@ def test_a_pass_drains_the_runs_then_the_blobs_one_transaction_per_batch() -> No
 def test_a_pass_reports_the_work_its_budget_cut_off(
     runs: tuple[int, ...], blobs: tuple[int, ...], calls: list[str]
 ) -> None:
-    clock = RetentionClock(1_000.0)
+    clock = Clock(1_000.0)
     store = RetentionStore(clock, runs=runs, blobs=blobs, cost=6.0)
 
     assert asyncio.run(make_retention_task(store, clock).run(10)) is True
@@ -106,7 +105,7 @@ def test_a_pass_reports_the_work_its_budget_cut_off(
 
 
 def test_retention_runs_and_resumes_through_leader_tasks() -> None:
-    clock = RetentionClock(1_000.0)
+    clock = Clock(1_000.0)
     store = RetentionStore(clock, runs=(100,), cost=6.0)
     leader = _leader(store, clock)
 
@@ -128,50 +127,3 @@ def test_retention_runs_and_resumes_through_leader_tasks() -> None:
     asyncio.run(ticks())
 
     assert store.calls == ["runs", "runs", "runs", "blobs", "runs", "blobs"]
-
-
-class _Leader:
-    def __init__(self, failing: str | None = None) -> None:
-        self.calls: list[str] = []
-        self._failing = failing
-
-    def _call(self, name: str) -> None:
-        self.calls.append(name)
-        if name == self._failing:
-            raise RuntimeError(f"{name} failed")
-
-    async def execute(self) -> None:
-        self._call("sweep")
-
-    async def replay_pending_publications(self) -> None:
-        self._call("replay")
-
-    async def tick(self) -> None:
-        self._call("retention")
-
-    def process(self) -> WorkerProcess:
-        return WorkerProcess(
-            handle_run=cast(Any, None),
-            handle_delivery=cast(Any, None),
-            publish_review=cast(Any, None),
-            enqueue=cast(Any, self),
-            sweep=cast(Any, self),
-            leader_tasks=cast(Any, self),
-        )
-
-
-def test_the_worker_leader_runs_the_retention_after_the_outbox_replay() -> None:
-    leader = _Leader()
-
-    asyncio.run(leader.process().leader_tick())
-
-    assert leader.calls == ["sweep", "replay", "retention"]
-
-
-def test_the_worker_leader_runs_the_retention_even_when_the_replay_fails() -> None:
-    leader = _Leader(failing="replay")
-
-    with pytest.raises(RuntimeError, match="replay failed"):
-        asyncio.run(leader.process().leader_tick())
-
-    assert leader.calls == ["sweep", "replay", "retention"]

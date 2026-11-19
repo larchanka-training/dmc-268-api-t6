@@ -49,8 +49,7 @@ from app.modules.code_index.application.vcs import (
     VcsUnavailable,
 )
 from app.modules.code_index.domain.enums import PurgeReason
-from tests.leader_task_fakes import Clock, Recorder
-from tests.leader_task_fakes import Runs as _Runs
+from tests.leader_task_fakes import Clock, Recorder, Runs
 
 _TTL = timedelta(days=30)
 R1, R2, R3, R4 = (UUID(int=number) for number in range(1, 5))
@@ -277,7 +276,7 @@ def test_a_hanging_task_times_out_rolls_back_its_unit_and_the_next_task_runs(
     monkeypatch.setattr(common_leader_tasks, "TICK_BUDGET_SECONDS", 0.01)
     monkeypatch.setattr(common_leader_tasks, "TASK_TIMEOUT_MARGIN_SECONDS", 0.05)
     clock = Clock()
-    runs: _Runs = []
+    runs: Runs = []
     index = Index(Tracker(), clock, garbage={R1: [3]}, hang=True)
     tasks = LeaderTasks(
         [
@@ -1024,7 +1023,7 @@ def test_reconcile_starts_no_head_read_with_less_than_its_reserve_left() -> None
 
 def test_a_slow_reconcile_runs_last_on_what_is_left_and_never_starves_the_other_tasks() -> None:
     clock = Clock()
-    runs: _Runs = []
+    runs: Runs = []
     repositories = (R1, R2, R3, R4, UUID(int=5))
     index = Index(
         Tracker(),

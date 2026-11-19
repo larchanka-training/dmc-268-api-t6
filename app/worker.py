@@ -14,7 +14,7 @@ import os
 import socket
 import sys
 import time
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -55,7 +55,7 @@ from app.bootstrap.worker_shutdown import (
     stop_during_startup,
     supervise_shutdown,
 )
-from app.common.application.leader_tasks import LeaderTasks
+from app.common.application.leader_tasks import LeaderTasks, ScheduledTask
 from app.common.infrastructure.db.leader import WORKER_LEADER_LOCK, run_as_leader
 from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
 from app.common.infrastructure.telemetry import (
@@ -1051,6 +1051,14 @@ def compose_worker_process(
     )
 
 
+def _order_leader_tasks(tasks: Iterable[ScheduledTask]) -> list[ScheduledTask]:
+    """Place `reconcile` last so it consumes only remaining tick headroom (#556)."""
+    items = list(tasks)
+    reconcile = [t for t in items if t.name == "reconcile"]
+    others = [t for t in items if t.name != "reconcile"]
+    return others + reconcile
+
+
 async def run_worker(
     settings: WorkerSettings,
     *,
@@ -1192,18 +1200,18 @@ async def _run_worker(
                 gateway=gateway,
                 provider_factory=provider_factory,
                 delays=delays,
-                # Order inside the shared 10s tick budget (#556): index tasks run first
-                # (`reconcile` consumes remaining index headroom), followed by hourly
-                # `run_data_retention`. If `reconcile` drains the tick budget,
-                # `run_data_retention` keeps its gate open and will run on subsequent
-                # ticks after index tasks; `BitbucketStatusReconciler` runs right after.
+                # Order inside the shared 10s tick budget (#556): converge, dispatch, GC,
+                # TTL and hourly `run_data_retention` run first; `reconcile` runs last on
+                # remaining headroom (ADR 0001 §4-§6).
                 leader_tasks=LeaderTasks(
-                    [
-                        *index_leader_tasks(settings.code_index, session_factory, index),
-                        run_data_retention_scheduled_task(
-                            settings.run_data_retention, session_factory
-                        ),
-                    ]
+                    _order_leader_tasks(
+                        [
+                            *index_leader_tasks(settings.code_index, session_factory, index),
+                            run_data_retention_scheduled_task(
+                                settings.run_data_retention, session_factory
+                            ),
+                        ]
+                    )
                 ),
             )
             run_queue = await channels.consumer_queue(run_queue_name("fast"))
