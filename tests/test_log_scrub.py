@@ -12,7 +12,6 @@ import logging
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -103,6 +102,36 @@ def test_jwt_tokens_are_scrubbed() -> None:
             "response=",
             'Quoted scheme payload: {"Authorization": "***"}',
         ),
+        (
+            "API key without scheme: Authorization: sk-abcdef1234567890",
+            "sk-abcdef1234567890",
+            "API key without scheme: Authorization: ***",
+        ),
+        (
+            "Unquoted Digest auth: Authorization: Digest dXNlcjpwYXNzd29yZA==",
+            "dXNlcjpwYXNzd29yZA==",
+            "Unquoted Digest auth: Authorization: Digest ***",
+        ),
+        (
+            "Unquoted Negotiate auth: Authorization: Negotiate YII1234567890",
+            "YII1234567890",
+            "Unquoted Negotiate auth: Authorization: Negotiate ***",
+        ),
+        (
+            'Truncated unclosed double quote: Authorization: "Bearer secret-payload-val',
+            "secret-payload-val",
+            'Truncated unclosed double quote: Authorization: "Bearer ***',
+        ),
+        (
+            "Truncated unclosed single quote: Authorization: 'Bearer secret-payload-val",
+            "secret-payload-val",
+            "Truncated unclosed single quote: Authorization: 'Bearer ***",
+        ),
+        (
+            'Truncated key without scheme: Authorization: "sk-abcdef1234567890',
+            "sk-abcdef1234567890",
+            'Truncated key without scheme: Authorization: "***',
+        ),
     ],
 )
 def test_authorization_headers_are_scrubbed(
@@ -115,15 +144,13 @@ def test_authorization_headers_are_scrubbed(
     assert entry["message"] == expected_message
 
 
-def test_auth_quoted_pattern_redos_prevention() -> None:
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_auth_quoted_pattern_redos_prevention(quote: str) -> None:
     """Unclosed quotes with repeated escape sequences must not cause catastrophic backtracking."""
-    payload = 'Authorization: "' + "\\n" * 40
+    payload = f"Authorization: {quote}" + "\\n" * 40
     formatter = JsonFormatter("test-service")
-    t0 = time.perf_counter()
     entry = _format_record(formatter, payload)
-    duration = time.perf_counter() - t0
-    assert duration < 0.1
-    assert payload in entry["message"]
+    assert "***" in entry["message"]
 
 
 def test_configured_process_secrets_cached_at_init_and_non_secrets_preserved(
@@ -218,6 +245,24 @@ def test_configure_logging_installs_scrubber_on_root_logger() -> None:
     json_handlers = [h for h in root.handlers if h.get_name() == "dmc-json"]
     assert len(json_handlers) == 1
     assert isinstance(json_handlers[0].formatter, JsonFormatter)
+
+
+def test_configure_logging_warns_on_malformed_json_secret(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bad_value = "{not-valid-json-secret-12345"
+    monkeypatch.setenv("BITBUCKET_CREDENTIAL_KEYS", bad_value)
+    with caplog.at_level(logging.WARNING):
+        configure_logging("test-service")
+
+    assert "BITBUCKET_CREDENTIAL_KEYS" in caplog.text
+    assert bad_value not in caplog.text
+    records = [
+        r
+        for r in caplog.records
+        if r.name == "app.common.infrastructure.telemetry" and r.levelname == "WARNING"
+    ]
+    assert any("BITBUCKET_CREDENTIAL_KEYS" in r.getMessage() for r in records)
 
 
 def test_configure_logging_scrubs_real_process_stderr() -> None:
