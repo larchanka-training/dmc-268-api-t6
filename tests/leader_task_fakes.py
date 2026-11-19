@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any, cast
+
+from app.common.application.leader_tasks import LeaderTasks, ScheduledTask
+from app.worker import WorkerProcess
 
 type Runs = list[tuple[str, float, float]]
 
@@ -44,3 +49,48 @@ class Recorder:
         if self.error is not None:
             raise self.error
         return self.remains
+
+
+@dataclass
+class StubLeader:
+    """Stub for outbox sweep and publication replay in worker leader tests."""
+
+    calls: list[str] = field(default_factory=list)
+    failing: str | None = None
+    error: type[BaseException] = RuntimeError
+
+    def _call(self, name: str) -> None:
+        self.calls.append(name)
+        if name == self.failing:
+            raise self.error(f"{name} failed")
+
+    async def execute(self, *, limit: int = 100) -> int:
+        self._call("sweep")
+        return 0
+
+    async def replay_pending_publications(self, *, limit: int = 100) -> int:
+        self._call("replay")
+        return 0
+
+
+def worker_process(
+    leader_tasks: LeaderTasks | list[ScheduledTask],
+    *,
+    stub: StubLeader | None = None,
+    clock: Callable[[], float] | None = None,
+) -> WorkerProcess:
+    leader = stub or StubLeader()
+    if isinstance(leader_tasks, LeaderTasks):
+        tasks = leader_tasks
+    elif clock is not None:
+        tasks = LeaderTasks(leader_tasks, clock=clock)
+    else:
+        tasks = LeaderTasks(leader_tasks)
+    return WorkerProcess(
+        handle_run=cast(Any, None),
+        handle_delivery=cast(Any, None),
+        publish_review=cast(Any, None),
+        enqueue=cast(Any, leader),
+        sweep=cast(Any, leader),
+        leader_tasks=tasks,
+    )

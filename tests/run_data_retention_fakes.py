@@ -8,11 +8,11 @@ from types import TracebackType
 from typing import Any, Self
 
 from app.modules.reviews.application.run_data_retention import PurgeExpiredRunData
-from tests.leader_task_fakes import Clock as RetentionClock
+from tests.leader_task_fakes import Clock
 
 __all__ = [
     "DEFAULT_RETENTION_NOW",
-    "RetentionClock",
+    "Clock",
     "RetentionStore",
     "RetentionUow",
     "make_retention_task",
@@ -26,7 +26,7 @@ class RetentionStore:
 
     def __init__(
         self,
-        clock: RetentionClock,
+        clock: Clock,
         *,
         runs: Sequence[int | BaseException] = (),
         blobs: Sequence[int | BaseException] = (),
@@ -81,7 +81,7 @@ class RetentionUow:
 
 def make_retention_task(
     store: RetentionStore,
-    clock: RetentionClock,
+    clock: Clock,
     *,
     now: Callable[[], datetime] = lambda: DEFAULT_RETENTION_NOW,
 ) -> PurgeExpiredRunData:

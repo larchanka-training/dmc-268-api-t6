@@ -57,6 +57,7 @@ from app.worker import (
     github_adapters,
     run_worker,
 )
+from tests.leader_task_fakes import StubLeader, worker_process
 
 RUN = UUID("4fabfd21-5acc-4351-a99c-349dffdc00cf")
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
@@ -662,45 +663,21 @@ def test_worker_leader_tick_runs_the_sweep_then_the_outbox_replay_every_thirty_s
 
 
 @dataclass
-class _LeaderCalls:
+class _LeaderCalls(StubLeader):
     """Records the sweep, the replay and the index tasks of a leader tick, in order."""
-
-    calls: list[str] = field(default_factory=list)
-    failing: str | None = None
-    error: type[BaseException] = RuntimeError
-
-    def _record(self, name: str) -> None:
-        self.calls.append(name)
-        if name == self.failing:
-            raise self.error(f"{name} failed")
-
-    async def execute(self, *, limit: int = 100) -> int:
-        self._record("sweep")
-        return 0
-
-    async def replay_pending_publications(self, *, limit: int = 100) -> int:
-        self._record("replay")
-        return 0
 
     def task(self, name: str) -> ScheduledTask:
         calls = self
 
         class Task:
             async def run(self, budget_seconds: float) -> bool:
-                calls._record(name)
+                calls._call(name)
                 return False
 
         return ScheduledTask(name, Task(), 300)
 
     def process(self) -> WorkerProcess:
-        return WorkerProcess(
-            handle_run=cast(Any, None),
-            handle_delivery=cast(Any, None),
-            publish_review=cast(Any, None),
-            enqueue=cast(Any, self),
-            sweep=cast(Any, self),
-            leader_tasks=LeaderTasks([self.task("ttl"), self.task("gc")]),
-        )
+        return worker_process([self.task("ttl"), self.task("gc")], stub=self)
 
 
 def test_worker_leader_tick_runs_the_index_tasks_after_the_outbox_replay() -> None:
@@ -793,9 +770,13 @@ def test_run_worker_hands_the_index_leader_tasks_to_the_worker_process(
     assert (composed["github"] is None) == (not app)
     leader = composed["leader_tasks"]
     assert isinstance(leader, LeaderTasks)
-    assert [task.name for task in leader.tasks] == [*names, "run_data_retention"]
-    assert isinstance(leader.tasks[-1].task, PurgeExpiredRunData)
-    assert leader.tasks[-1].continue_after_timeout is False
+    expected = [name for name in names if name != "reconcile"] + ["run_data_retention"]
+    if "reconcile" in names:
+        expected.append("reconcile")
+    assert [task.name for task in leader.tasks] == expected
+    retention_task = next(task for task in leader.tasks if task.name == "run_data_retention")
+    assert isinstance(retention_task.task, PurgeExpiredRunData)
+    assert retention_task.continue_after_timeout is False
     intervals = {task.name: task.interval_seconds for task in leader.tasks}
     assert intervals["gc"] == 120
     assert intervals["run_data_retention"] == INTERVAL_SECONDS
