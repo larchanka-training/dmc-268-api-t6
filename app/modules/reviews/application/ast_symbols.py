@@ -28,6 +28,15 @@ class AstLanguage(StrEnum):
     GO = "go"
 
 
+TS_JS_LANGUAGES: frozenset[AstLanguage] = frozenset(
+    {
+        AstLanguage.TYPESCRIPT,
+        AstLanguage.TSX,
+        AstLanguage.JAVASCRIPT,
+    }
+)
+
+
 _LANGUAGE_BY_SUFFIX = {
     ".py": AstLanguage.PYTHON,
     ".pyi": AstLanguage.PYTHON,
