@@ -57,9 +57,9 @@ templates pasted together as they are fail every run with `policy_ignore_block_d
 | --- | --- | --- |
 | `go` | 2112 | 1130 |
 | `python-fastapi` | 2467 | 1302 |
-| `security-baseline` | 2061 | 1080 |
+| `security-baseline` | 6325 | 2938 |
 | `typescript-react` | 2113 | 1137 |
-| Largest stack + `security-baseline` | 4270 | 2207 |
+| Largest stack + `security-baseline` | 8534 | 4081 |
 
 Tokens are the service's estimate of the block the model sees, at 3 characters per token. That
 block marks up every line, so the number is about 60 % above an estimate from the size of the file.
