@@ -21,12 +21,15 @@ info:
     suffix. IDs are UUIDs unless a field says it carries a GitHub numeric ID.
 
     **Authentication.** `auth-api` issues a 15-minute access JWT, sent as
-    `Authorization: Bearer <token>` on every other operation (global `bearerAuth`) except the
-    public badge (`/api/badges/...`, `security: []`), and a
+    `Authorization: Bearer <token>` on protected operations (global `bearerAuth`), and a
     rotating `refresh_token` cookie (30 days, `HttpOnly; Secure; SameSite=Strict;
     Path=/api/auth`). The SSE stream is read with `fetch` so it carries the same header.
-    Issuing the access token and the Bearer check on every other operation are implemented
-    in #11.
+    Agent device authorization (#249) instead issues an opaque 30-day token for one
+    GitHub repository. It is accepted only on repository settings, rules status, pull
+    request and run read operations; the stored user-grant projection still applies
+    (GitHub-side user revocation without App removal is reflected at the next OAuth,
+    as for browser access; see #101). It cannot access
+    `/api/auth/me`, metrics, Bitbucket administration, run cancellation or SSE.
 
     **Errors.** `HTTPException` errors are `{"detail": "<message>"}` (`ErrorResponse`);
     non-Bitbucket request validation failures use FastAPI's `HTTPValidationError`:
@@ -69,6 +72,8 @@ tags:
     description: Public status badges for a README, read without signing in.
   - name: auth
     description: GitHub App user authorization and session tokens.
+  - name: agent
+    description: Headless GitHub consent and revocable, one-repository agent credentials.
 paths:
   /api/runs:
     get:
@@ -1043,6 +1048,159 @@ paths:
             image/svg+xml:
               schema:
                 type: string
+  /api/agent/instructions:
+    get:
+      operationId: getAgentInstructions
+      tags: [agent]
+      summary: Get the pasteable agent setup procedure
+      description: >-
+        Public Markdown instructions for the device flow, repository settings,
+        Git rules, first review results and revocation. The landing copy points here.
+      x-service: portal-api
+      security: []
+      responses:
+        "200":
+          description: Agent setup procedure.
+          content:
+            text/markdown:
+              schema:
+                type: string
+  /api/agent/device/start:
+    post:
+      operationId: startAgentDeviceAuthorization
+      tags: [agent]
+      summary: Begin GitHub App device authorization for one repository
+      description: >-
+        Public bootstrap. The user must approve the GitHub App in GitHub's device flow.
+        No GitHub OAuth token or App key is returned to the agent. GitHub App device flow
+        must be enabled on the App registration.
+      x-service: portal-api
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [repository]
+              properties:
+                repository:
+                  type: string
+                  minLength: 3
+                  maxLength: 512
+                  pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*/[A-Za-z0-9._-]*[A-Za-z0-9_-][A-Za-z0-9._-]*$
+                  description: GitHub owner/repository full name.
+      responses:
+        "200":
+          description: Device code and human verification instructions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentDeviceChallenge"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "502":
+          description: GitHub device authorization is unavailable or disabled.
+        "503":
+          description: Agent authentication is not configured.
+  /api/agent/device/poll:
+    post:
+      operationId: pollAgentDeviceAuthorization
+      tags: [agent]
+      summary: Complete GitHub device authorization and receive an agent token
+      description: >-
+        Poll no more often than the returned interval. On authorization the API uses
+        the GitHub user token server-side to link installation grants, then returns
+        only a repository-scoped agent token. A device code is one-use.
+      x-service: portal-api
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [deviceCode]
+              properties:
+                deviceCode:
+                  type: string
+                  minLength: 1
+      responses:
+        "200":
+          description: Pending, authorized, denied or expired device flow.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentDevicePoll"
+        "404":
+          description: The requested repository is not available to the consenting user.
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          description: Polled before the interval elapsed.
+          headers:
+            Retry-After:
+              schema:
+                type: string
+        "502":
+          description: GitHub device authorization is unavailable.
+        "503":
+          description: Agent authentication is not configured.
+  /api/agent/tokens:
+    get:
+      operationId: listAgentTokens
+      tags: [agent]
+      summary: List active agent token IDs owned by the signed-in user
+      description: A browser JWT is required; token secrets and hashes are never returned.
+      x-service: portal-api
+      responses:
+        "200":
+          description: Active agent tokens for the owner.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OwnedAgentToken"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: An agent token cannot list tokens.
+        "503":
+          description: Agent authentication is not configured.
+  /api/agent/tokens/{token_id}:
+    parameters:
+      - name: token_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      operationId: revokeAgentToken
+      tags: [agent]
+      summary: Revoke an agent token owned by the signed-in user
+      description: A browser JWT is required; an agent token cannot revoke another token.
+      x-service: portal-api
+      responses:
+        "204":
+          description: Token revoked immediately.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: An agent token cannot revoke another token.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Agent authentication is not configured.
   /api/auth/github/callback:
     post:
       operationId: exchangeGithubCode
@@ -1155,8 +1313,8 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: JWT
-      description: Access JWT issued by auth-api, valid for 15 minutes.
+      bearerFormat: JWT or opaque agent token
+      description: Browser access JWT or repository-scoped agent token, where allowed.
     refreshCookie:
       type: apiKey
       in: cookie
@@ -1321,15 +1479,17 @@ components:
     RunStatus:
       type: string
       description: >-
-        Run lifecycle state. Terminal: succeeded, failed, cancelled, skipped. The steps recorded
-        as run actions inside `running` are `policy.load`, `vcs.fetch_diff`, `context.build`,
-        `context.rag`, `llm.repo_conventions`, `llm.call` and `llm.result_cache`; `llm.review_output` and
-        `review.postprocess` are written in the transaction that moves the run to `publishing`,
-        and so is `llm.verify`, before `review.postprocess`, but only on the snapshot path (a run
-        bound to a snapshot-contract review prompt), including Bitbucket Cloud runs; on that path
-        `context.manifest` precedes each `llm.call` that is not a retry (conventions, review and
-        verifier calls alike), inside `running`; `github.publish_review` or
-        `gitlab.publish_review` and `bitbucket.publish_review` run in `publishing`
+        Run lifecycle state. Terminal: succeeded, failed, cancelled, skipped. Current worker
+        actions in `running` include `policy.load`, `vcs.fetch_diff`, `context.build`,
+        `context.rag`, `llm.repo_conventions`, `llm.call`, `llm.result_cache`, and
+        `llm.review_output`. Snapshot runs also write `context.manifest` before each new provider
+        call, then candidate `review.postprocess` before verifier `llm.verify`; empty candidates
+        omit the verifier. `review.finalize` commits the immutable result and publication plan
+        while the run is `running`. T8 atomically writes `review.publish_start`, changes the state
+        to `publishing`, renews the lease, and notifies subscribers; the queue publish follows
+        commit. `github.publish_review`, `gitlab.publish_review`, or `bitbucket.publish_review`
+        follows in `publishing`. Historical traces can have `llm.verify` and final
+        `review.postprocess` at T8 without `review.finalize` or `review.publish_start`
         (docs/PIPELINE_SPEC.md §2).
       enum: [queued, running, publishing, succeeded, failed, cancelled, skipped]
     RunTrigger:
@@ -1796,18 +1956,26 @@ components:
             Step name written to run_actions; free text, not an enum. The code writes
             `policy.load`, `vcs.fetch_diff`, `context.build`, `context.rag`,
             `llm.repo_conventions`, `llm.call`, `llm.result_cache`, `llm.review_output`,
-            `review.postprocess`, `github.publish_review`, `gitlab.publish_review`, and
-            `bitbucket.publish_review`. It writes `llm.verify` and
-            `context.manifest` only on the snapshot path (a run bound to a snapshot-contract
-            review prompt), including Bitbucket Cloud runs. A `context.manifest` step precedes each
-            provider call of that path (conventions, review and verifier) that is not a retry;
-            its response is `{manifest_id, digest, block_count, input_tokens, tokens_by_role}`,
-            where `tokens_by_role` maps a source role to the tokens of the call's blocks of that
-            role. The per-attempt order and the planned steps that are not written yet are in
-            docs/PIPELINE_SPEC.md §2.
+            `review.finalize`, `review.publish_start`, `github.publish_review`,
+            `gitlab.publish_review`, and `bitbucket.publish_review`. Snapshot runs also write
+            `review.postprocess`, `llm.verify`, and `context.manifest`. The candidate
+            `review.postprocess` precedes verifier `llm.verify`; `review.finalize` precedes T8,
+            and `review.publish_start` is the T8 marker. A `context.manifest` step precedes each
+            new provider call of the snapshot path (conventions, review, verifier); its response
+            is `{manifest_id, digest, block_count, input_tokens, tokens_by_role}`. Historical
+            runs can contain final `review.postprocess` at T8 without the new marker. The
+            per-attempt order and request/response metadata are in docs/PIPELINE_SPEC.md §2.
         request:
           type: object
-          description: Request metadata of the step.
+          description: >-
+            Request metadata of the step. For a snapshot-path `review.postprocess`,
+            `request.phase` is `candidate`: this records candidate filtering before the
+            verifier, not the final result. Historical final `review.postprocess` rows at
+            T8 have no `phase`; use this discriminator when reading old and new runs.
+            A retry resumed from verifier does not repeat `llm.review_output` or candidate
+            `review.postprocess`; a retry resumed after `review.finalize` writes only the
+            `review.publish_start` marker before provider publication. For `llm.call`, use
+            `request.operation` to distinguish conventions, review, and verification.
         response:
           description: >-
             Response body, any JSON value, inline when it is at most 64 KB; null when it is
@@ -2306,6 +2474,63 @@ components:
           type: integer
           description: GitHub App installation ID.
       additionalProperties: false
+    OwnedAgentToken:
+      type: object
+      additionalProperties: false
+      required: [id, repository, createdAt, expiresAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        repository:
+          type: string
+          description: Repository full name for the token.
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+    AgentDeviceChallenge:
+      type: object
+      additionalProperties: false
+      required: [deviceCode, userCode, verificationUri, expiresIn, interval]
+      properties:
+        deviceCode:
+          type: string
+          description: Secret code the agent sends back only to the poll endpoint.
+        userCode:
+          type: string
+          description: Code the human enters at GitHub.
+        verificationUri:
+          type: string
+          format: uri
+        expiresIn:
+          type: integer
+          minimum: 1
+        interval:
+          type: integer
+          minimum: 1
+    AgentDevicePoll:
+      type: object
+      additionalProperties: false
+      required: [status, retryAfter, token, tokenId, expiresAt]
+      properties:
+        status:
+          type: string
+          enum: [pending, authorized, denied, expired]
+        retryAfter:
+          type: [integer, "null"]
+          minimum: 1
+        token:
+          type: [string, "null"]
+          description: Opaque repository-scoped secret, returned once after authorization.
+        tokenId:
+          type: [string, "null"]
+          format: uuid
+        expiresAt:
+          type: [string, "null"]
+          format: date-time
     Me:
       type: object
       description: >-

@@ -18,10 +18,6 @@ from app.modules.reviews.application.prepare_policy_snapshot import PreparePolic
 from app.modules.reviews.application.rerun_run import RerunOutcome, create_rerun
 from app.modules.reviews.application.review_output import parse_review_output
 from app.modules.reviews.application.store_review_output import StoreReviewOutput
-from app.modules.reviews.application.try_enqueue_webhook_run import (
-    PendingRunMessage,
-    RunInsertCandidate,
-)
 from app.modules.reviews.infrastructure.models import Run
 from app.modules.reviews.infrastructure.policy_snapshot_unit_of_work import (
     SqlAlchemyPolicySnapshotUnitOfWork,
@@ -32,8 +28,8 @@ from app.modules.reviews.infrastructure.review_output_unit_of_work import (
 )
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyReviewOutputRepository
-from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunStore
 from tests.portal_postgres import NOW, PR_NEW, REPO_A, RUN_ATTEMPTED, Env, portal_schema
+from tests.publication_settings_postgres import _insert, _ready
 from tests.test_prepare_policy_snapshot import Source
 from tests.test_severity_threshold_postgres import RecordingQueue
 
@@ -59,26 +55,6 @@ async def _settings(factory: async_sessionmaker[AsyncSession], threshold: str, c
             ),
             {"threshold": threshold, "cap": cap, "repo": REPO_A},
         )
-
-
-async def _ready(factory: async_sessionmaker[AsyncSession]) -> None:
-    async with factory.begin() as session:
-        await session.execute(
-            text("UPDATE runs SET state='succeeded' WHERE id=:run"), {"run": RUN_ATTEMPTED}
-        )
-        await session.execute(
-            text("UPDATE code_changes SET head_sha=:head WHERE id=:pr"),
-            {"head": "f" * 40, "pr": PR_NEW},
-        )
-
-
-async def _insert(session: AsyncSession) -> UUID:
-    store = SqlAlchemyWebhookRunStore(session)
-    candidate = await store.lock_candidate(PR_NEW)
-    assert isinstance(candidate, RunInsertCandidate)
-    message = await store.insert_webhook_run(candidate, NOW)
-    assert isinstance(message, PendingRunMessage)
-    return message.run_id
 
 
 async def _claim(factory: async_sessionmaker[AsyncSession], run_id: UUID, attempt: int) -> None:
@@ -286,6 +262,7 @@ def test_created_run_and_retry_keep_pins_but_rerun_uses_current_pair(env: Env) -
                 lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
                 queue,
                 worker_id="worker",
+                expected_attempt=2,
                 run_url=lambda _: None,
             ).execute(run_id, _answer())
             assert len(queue.pointers) == 1 and queue.pointers[0].run_id == run_id
@@ -310,13 +287,17 @@ def test_created_run_and_retry_keep_pins_but_rerun_uses_current_pair(env: Env) -
                     await session.execute(
                         text(
                             "SELECT request, response FROM run_actions "
-                            "WHERE run_id=:run AND tool='review.postprocess'"
+                            "WHERE run_id=:run AND tool='review.finalize'"
                         ),
                         {"run": run_id},
                     )
                 ).one()
-                assert action.request["severity_threshold"] == "warning"
-                assert action.request["max_inline"] == 1
+                final_result = await session.scalar(
+                    text("SELECT result FROM final_review_results WHERE run_id=:run"),
+                    {"run": run_id},
+                )
+                assert final_result["severity_threshold"] == "warning"
+                assert final_result["max_inline"] == 1
                 assert action.response["inline"] == 1 and action.response["body_only"] == 3
                 assert action.response["dropped"] == [
                     {"index": 4, "drop_reason": "severity_threshold"}

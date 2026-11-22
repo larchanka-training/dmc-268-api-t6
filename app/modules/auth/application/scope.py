@@ -11,3 +11,4 @@ class AuthScope:
     user_id: int
     workspace_ids: tuple[UUID, ...]
     expires_at: int | None = None
+    agent_repository_id: UUID | None = None

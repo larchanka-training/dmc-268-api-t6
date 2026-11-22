@@ -261,6 +261,40 @@ def test_a_summary_only_flag_alone_does_not_choose_the_line_limit() -> None:
     assert response["reason"] != "diff_too_large"
 
 
+@pytest.mark.parametrize(
+    ("flagged", "signal", "status"),
+    [
+        (False, NoReviewableText, "no_reviewable_text"),
+        (True, SummaryOnlyReview, "summary_only"),
+    ],
+    ids=["first-attempt", "flagged-by-an-earlier-attempt"],
+)
+def test_a_missing_patch_takes_no_text_partial_unless_its_rows_are_flagged(
+    flagged: bool, signal: type[Exception], status: str
+) -> None:
+    # No-text partial (CVS §2.2) ends before the builder like coverage none. Rows a
+    # summary-only attempt already flagged keep that stop, so a retry publishes the same.
+    missing = DiffSnapshot(
+        "src/note.txt",
+        None,
+        "d" * 40,
+        additions=3,
+        changes=3,
+        omission_reason="missing_patch",
+        summary_only=flagged,
+    )
+    run = _stage([missing])
+
+    with pytest.raises(signal):
+        asyncio.run(run.stage.run(RUN_ID))
+
+    [response] = run.steps("context.build")
+    assert response["status"] == status
+    assert response["coverage"]["status"] == "partial"
+    assert run.builder.runs == []
+    assert run.rag.opened == []
+
+
 def test_the_processor_lets_the_signal_through_before_the_conventions_call() -> None:
     events: list[str] = []
     repository = PinnedRepository(events, binding=_binding("v4"))

@@ -659,30 +659,28 @@ class ReviewContextStage:
             # the run is published with the backend result (coverage none), not skipped.
             # A legacy run keeps its model calls. Stored summary_only rows are already
             # excluded here and stop in _summary_only_reason before any model call.
-            response = await self._record_nothing_to_review(
-                run_id,
-                snapshot,
-                diff_map.head_sha,
-                ContextStatus.NO_REVIEWABLE_TEXT,
-                digest=diff_map.digest,
-                files=len(diff_map.files),
-                coverage=coverage,
-                diff_map=diff_map,
-                ignored_files=sum(coverage.exclusion_counts.values()),
-            )
-            if self._payloads is not None:
-                # The attempt's one context.build is also its context_payloads row: a failed
-                # write, or a retired origin, ends the attempt before publishing.
-                await self._payloads.save_context_payload(run_id, response)
+            await self._record_without_text(run_id, snapshot, diff_map, coverage)
             raise NoReviewableText
         reason = self._summary_only_reason(diff_map, stored, coverage, ignore)
+        if (
+            reason == "no_reviewable_files"
+            and self._snapshot_for_llm is not None
+            and not any(item.summary_only for item in stored)
+            and not self._has_text_outside_exclusions(diff_map, stored, ignore)
+        ):
+            # CVS §2.2 no-text partial, after both §2.3 triggers: incomplete files (E and T may
+            # be beside them) and no analysable text. Published like coverage none, with the
+            # backend result (coverage partial), not as summary-only. A legacy run, or rows an
+            # earlier attempt flagged, keep the summary-only stop below.
+            await self._record_without_text(run_id, snapshot, diff_map, coverage)
+            raise NoReviewableText
         if reason is not None:
             # #313: incomplete inventory, the line flag, or residual no_reviewable_files.
             # Coverage and its digest are the rows after the stop's flag, so a withheld
             # file stays an exclusion and a later attempt classifies the same rows.
             # No RAG and no model call. T19 and the legacy technical-only path already
             # returned.
-            response = await self._commit_summary_only(
+            await self._commit_summary_only(
                 run_id, snapshot, diff_map, classified_ignore, stored, reason
             )
             raise SummaryOnlyReview
@@ -800,6 +798,54 @@ class ReviewContextStage:
             return False
         pure_ignore = ignored > 0 and withheld == 0
         return not pure_ignore
+
+    def _has_text_outside_exclusions(
+        self, diff_map: DiffMap, stored: list[DiffSnapshot], ignore: IgnoreResult
+    ) -> bool:
+        """Whether a file that is neither E nor T keeps a hunk row: analysable text (CVS §2.2).
+
+        A truncated patch keeps the rows it has, so its file is not no-text partial even
+        though it is not anchorable. A stored omission (binary, generated, too_large,
+        missing_patch, empty_file) or an unusable name is never text here.
+        """
+        for item, file in zip(stored, diff_map.files, strict=True):
+            names = [name for name in (file.old_path, file.new_path) if name]
+            if (
+                item.omission_reason is not None
+                or file.omission_reason is not None
+                or ignore.decision_for(file.file_id) is not None
+                or any(
+                    name in ignore.denied_paths or self._builtin_excluded(name) for name in names
+                )
+            ):
+                continue
+            if any(hunk.rows for hunk in file.hunks):
+                return True
+        return False
+
+    async def _record_without_text(
+        self, run_id: UUID, snapshot: PolicySnapshot, diff_map: DiffMap, coverage: RunCoverage
+    ) -> None:
+        """Record ``context.build`` and its ``context_payloads`` row for a backend result.
+
+        Coverage none (technical skips only) and no-text partial both end the attempt after
+        this record and before RAG, the build and every model call (CVS §2.2).
+        """
+        response = await self._record_nothing_to_review(
+            run_id,
+            snapshot,
+            diff_map.head_sha,
+            ContextStatus.NO_REVIEWABLE_TEXT,
+            digest=diff_map.digest,
+            files=len(diff_map.files),
+            coverage=coverage,
+            diff_map=diff_map,
+            ignored_files=sum(coverage.exclusion_counts.values()),
+        )
+        if self._payloads is not None:
+            # The attempt's one context.build is also its context_payloads row: a failed
+            # write, or a retired origin, ends the attempt before publishing.
+            await self._payloads.save_context_payload(run_id, response)
 
     async def _commit_summary_only(
         self,

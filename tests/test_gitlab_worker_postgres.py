@@ -23,8 +23,8 @@ from app.common.infrastructure.db.leader import run_as_leader
 from app.modules.reviews.infrastructure.amqp import amqp_channels
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.worker import WorkerSettings, run_worker
-from tests import test_gitlab_projection_postgres as projection
-from tests.test_gitlab_projection_postgres import rig
+from tests import gitlab_projection_support as projection
+from tests.gitlab_projection_support import rig
 from tests.test_gitlab_repository_sources import SourceRouter
 from tests.test_gitlab_worker_outbox_postgres import pending_run
 from tests.worker_queue_postgres import (

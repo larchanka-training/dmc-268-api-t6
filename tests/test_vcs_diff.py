@@ -125,6 +125,8 @@ def test_review_input_keeps_all_file_metadata_but_omits_nonreviewable_paths() ->
         VcsFile("assets/logo.png", "modified", "8" * 40, None, 1, 1, 2, None),
         VcsFile("src/missing.py", "modified", "9" * 40, None, 1, 1, 2, None),
         VcsFile("locales/pl.json", "modified", "a" * 40, None, 1, 1, 2, "@@ -1 +1 @@\n-old\n+new"),
+        # A patch the parser cannot read is incomplete, not a failed run (CVS §2.2).
+        VcsFile("src/broken.py", "modified", "b" * 40, None, 1, 1, 2, "+new without a header"),
     )
 
     @dataclass
@@ -178,6 +180,7 @@ def test_review_input_keeps_all_file_metadata_but_omits_nonreviewable_paths() ->
         "migrations/0001_snapshot.py",
         "assets/logo.png",
         "src/missing.py",
+        "src/broken.py",
     )
     assert [item.reason for item in result.omissions] == [
         OmissionReason.GENERATED,
@@ -187,6 +190,7 @@ def test_review_input_keeps_all_file_metadata_but_omits_nonreviewable_paths() ->
         OmissionReason.GENERATED,
         OmissionReason.GENERATED,
         OmissionReason.BINARY,
+        OmissionReason.MISSING_PATCH,
         OmissionReason.MISSING_PATCH,
     ]
     assert provider.blobs_requested == ["8" * 40, "9" * 40]

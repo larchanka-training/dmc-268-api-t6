@@ -7,6 +7,7 @@ on legacy GitLab 17.4. Canonical target/start and merge base stay distinct.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
@@ -59,12 +60,21 @@ from app.modules.reviews.application.vcs_diff import (
     VcsPullRequest,
 )
 
+_LOGGER = logging.getLogger(__name__)
 _VCS_BYTES = 33554432
 _MAX_FILES = 200
 
 
 class _InvalidResponse(Exception):
     pass
+
+
+class _UnreadablePatch(Exception):
+    """A file whose patch the parser cannot read: GitLab gives no line counts for it."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self.path = path
 
 
 def _object(value: JsonValue) -> dict[str, JsonValue]:
@@ -347,9 +357,31 @@ class HttpGitLabVcsProvider:
             or _count(detail.get("real_size")) != count
         ):
             raise _InvalidResponse
-        files = tuple(self._file(_object(record)) for record in records)
-        if len({item.filename for item in files}) != count:
+        listed: list[VcsFile] = []
+        names: set[str] = set()
+        for record in records:
+            try:
+                item = self._file(_object(record))
+            except _UnreadablePatch as unreadable:
+                # Its line counts are unknown, so the file is left out: the list no longer
+                # matches changes_count and the run is summary-only diff_inventory_incomplete
+                # (CVS §2.3), not a failed diff fetch. The warning tells it apart from a
+                # short page.
+                _LOGGER.warning(
+                    "GitLab patch unreadable, file left out project_id=%s iid=%s "
+                    "diff_version_id=%s path=%s",
+                    snapshot.target_project_id,
+                    snapshot.iid,
+                    selected,
+                    unreadable.path,
+                )
+                names.add(unreadable.path)
+                continue
+            names.add(item.filename)
+            listed.append(item)
+        if len(names) != count:
             raise _InvalidResponse
+        files = tuple(listed)
         author = _object(data.get("author"))
         description = data.get("description")
         if description is not None:
@@ -412,7 +444,7 @@ class HttpGitLabVcsProvider:
                 try:
                     hunks = parse_hunks(split_lf(patch))
                 except UnifiedDiffError:
-                    raise _InvalidResponse from None
+                    raise _UnreadablePatch(new) from None
                 additions = sum(row.kind == "added" for hunk in hunks for row in hunk.rows)
                 deletions = sum(row.kind == "removed" for hunk in hunks for row in hunk.rows)
         return VcsFile(

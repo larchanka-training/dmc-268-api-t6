@@ -57,6 +57,7 @@ from app.common.infrastructure.telemetry import (
     shutdown_tracing,
 )
 from app.common.strict_json import StrictJsonRoute
+from app.modules.auth.api.agent_router import agent_router
 from app.modules.auth.api.router import auth_router
 from app.modules.auth.application.scope import AuthScope
 from app.modules.integrations.bitbucket.api.connections import (
@@ -294,8 +295,8 @@ def build_openapi(application: FastAPI) -> dict[str, Any]:
         "bearerAuth": {
             "type": "http",
             "scheme": "bearer",
-            "bearerFormat": "JWT",
-            "description": "Access JWT issued by auth-api, valid for 15 minutes.",
+            "bearerFormat": "JWT or opaque agent token",
+            "description": "Browser access JWT or repository-scoped agent token, where allowed.",
         }
     }
     for operation in _operations(
@@ -1295,3 +1296,4 @@ app.include_router(bitbucket_webhook_router)
 app.include_router(github_webhook_router)
 app.include_router(gitlab_webhook_router)
 app.include_router(auth_router)
+app.include_router(agent_router)

@@ -119,16 +119,18 @@ class ContextStatus(StrEnum):
     SUMMARY_ONLY = "summary_only"
     ALL_CHANGES_IGNORED = "all_changes_ignored"
     NO_CHANGES = "no_changes"
-    # Technical skips and exclusions only: coverage none, no model call (#130 F5).
+    # No analysable text, no model call: coverage none for technical skips and exclusions
+    # only (#130 F5), partial when an incomplete file is among them (no-text partial, #497).
     NO_REVIEWABLE_TEXT = "no_reviewable_text"
 
 
 class NoReviewableText(Exception):
-    """The attempt's change has no text the review could check (coverage none, CVS §2.2).
+    """The attempt's change has no text the review could check (CVS §2.2).
 
-    The context stage of a snapshot-path run raises it after it recorded ``context.build``
-    and the attempt's ``context_payloads`` row; the use case then publishes the backend
-    result without any model call (#130 F5). Only ``ExecuteReviewRun`` handles it, around
+    Coverage none (technical skips only, #130 F5) or no-text partial (an incomplete file,
+    #497). The context stage of a snapshot-path run raises it after it recorded
+    ``context.build`` and the attempt's ``context_payloads`` row; the use case then publishes
+    the backend result without any model call. Only ``ExecuteReviewRun`` handles it, around
     ``ReviewRunProcessor.prepare``; elsewhere ``classify_failure`` makes it ``internal_error``.
     """
 

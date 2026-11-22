@@ -34,6 +34,7 @@ from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
     VcsPullRequest,
 )
+from tests.run_coverage_fakes import code_snapshot, empty_snapshot
 from tests.test_review_context_stage import (
     _HEAD,
     _LOCATOR,
@@ -46,7 +47,6 @@ from tests.test_review_context_stage import (
     _snapshots,
     _stage,
 )
-from tests.test_run_coverage import code_snapshot, empty_snapshot
 
 _STAGE_LOGGER = "app.modules.reviews.application.review_context_stage"
 

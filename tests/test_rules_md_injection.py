@@ -66,6 +66,7 @@ from app.modules.reviews.application.review_output import (
     parse_review_output,
     parse_review_output_v2,
 )
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
     make_complete_prompt_bindings,
@@ -359,7 +360,7 @@ class _FailingVerifier:
         raise self._failure
 
 
-class _RecordingPublisher:
+class _RecordingPublisher(_AcceptingCheckpointPublisher):
     def __init__(self) -> None:
         self.outputs: list[Mapping[str, object] | str | bytes] = []
 
@@ -368,6 +369,10 @@ class _RecordingPublisher:
     ) -> bool:
         self.outputs.append(raw_output)
         return True
+
+
+class _CheckpointedPublishReviewOutput(_AcceptingCheckpointPublisher, PublishReviewOutput):
+    pass
 
 
 class _Reviews:
@@ -747,7 +752,7 @@ def _publish_with_rules(
     pipeline = _pipeline(
         model=model,
         verifier=verifier,
-        publisher=PublishReviewOutput(lambda: _UnitOfWork(reviews), provider),
+        publisher=_CheckpointedPublishReviewOutput(lambda: _UnitOfWork(reviews), provider),
         rules_text=rules_text,
     )
     assert asyncio.run(pipeline.execute(RUN_ID)) is True

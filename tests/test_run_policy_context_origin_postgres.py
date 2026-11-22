@@ -38,11 +38,11 @@ from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.worker import GitHubAdapters, compose_worker_process, review_context_stage_factory
 from tests.github_raw_blobs import blob_answer, git_blob_oid
+from tests.github_vcs_payload_fakes import _pull_payload
 from tests.portal_postgres import HEAD, INSTALL_A, REPO_A, RUN_ATTEMPTED, Env, portal_schema
+from tests.rag_review_context_fakes import _GREET_PATCH, _MODELS, _SERVICE
+from tests.retired_installation_fakes import DiscardTokenCache
 from tests.test_app_reinstall_postgres import FreshGitHub, apply
-from tests.test_github_vcs_provider import _pull_payload
-from tests.test_retired_installation_postgres import DiscardTokenCache
-from tests.test_review_context import _GREET_PATCH, _MODELS, _SERVICE
 from tests.test_run_origin_guard_postgres import prepare
 from tests.test_run_publication_origin_postgres import retire
 from tests.worker_queue_postgres import (

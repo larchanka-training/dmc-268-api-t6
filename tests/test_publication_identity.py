@@ -47,6 +47,7 @@ def context() -> PublishContext:
         ("run_id", UUID(int=99)),
         ("head_sha", "c" * 40),
         ("findings_hash", "different"),
+        ("review_event", "REQUEST_CHANGES"),
         ("review_body", "changed"),
         (
             "findings",

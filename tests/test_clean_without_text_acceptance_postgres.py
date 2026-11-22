@@ -50,11 +50,11 @@ from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
     SqlAlchemyRunProcessingUnitOfWork,
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
+from tests.clean_without_text_fakes import answer
 from tests.portal_postgres import HEAD, PR_NEW, PROMPT, REPO_A, RUN_ATTEMPTED, WS_A, Env, api
-from tests.test_clean_without_text_result import answer
+from tests.run_coverage_fakes import code_snapshot, empty_snapshot
 from tests.test_clean_without_text_result_postgres import result_env as result_env
 from tests.test_review_context_stage import Parser, Policy, Vcs
-from tests.test_run_coverage import code_snapshot, empty_snapshot
 from tests.test_severity_threshold_postgres import RecordingQueue
 
 
@@ -237,6 +237,7 @@ def test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result(
                 lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
                 queue,
                 worker_id="worker",
+                expected_attempt=1,
                 run_url=lambda _: None,
             ).execute(RUN_ATTEMPTED, answer())
             assert len(queue.pointers) == 1 and queue.pointers[0].review_event == "COMMENT"
@@ -244,7 +245,7 @@ def test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result(
                 run = await session.get(Run, RUN_ATTEMPTED)
                 saved = await session.scalar(
                     select(RunAction).where(
-                        RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.postprocess"
+                        RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.finalize"
                     )
                 )
                 assert run is not None and run.state.value == "publishing"

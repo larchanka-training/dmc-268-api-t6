@@ -53,7 +53,8 @@ default branch репозитория с включённым тумблером
    без изменения policy_digest, schema_version=1 и conventions key. Историческая
    NULL-пара без backfill сохраняет live fallback к Repository при каждой обработке
    и retry, даже если snapshot уже существует (PIPELINE_SPEC §9). Положение порога
-   после verifier и FinalReviewResult остаются целевым профилем #107/#130.
+   после verifier уже применяется на snapshot-пути, а #435 сохраняет приватный итог
+   и план перед публикацией; полный профиль FinalReviewResult ниже остаётся целью #107.
 2. Ignore применяется ко всем источникам всех LLM-вызовов, включая конвенции,
    AST, verifier, repair и fallback. Кэш не даёт разрешения на отправку источника.
 3. Карта diff доказывает допустимость якоря; manifest — видимость фрагмента;
@@ -144,6 +145,10 @@ counted allowed, даже если patch отсутствует. Raw counters E/
 без hunks не дают анализируемого текста и при выполнении условий таблицы
 идут в backend partial. При malformed parser error текущий DiffMap не сохраняет
 hunks; raw malformed patch не становится L1. Оба триггера §2.3 проверяются раньше.
+Patch GitHub, который парсер не читает, сохраняется как неполный файл, а не роняет run.
+GitLab считает строки файла по его hunks: такой файл не попадает в список, и inventory
+становится неполным (§2.3). Пока сборка L1 не берёт hunks truncated, truncated-only
+с сохранившимися строками публикуется как summary-only `no_reviewable_files`.
 
 | Состав согласованного inventory | Исход целевого профиля #107 |
 | --- | --- |
@@ -152,7 +157,7 @@ hunks; raw malformed patch не становится L1. Оба триггера
 | Достоверно пуст, предыдущие триггеры не сработали | skipped/no_changes, verdict=null, 0 LLM |
 | Только E, T/incomplete нет, inventory полный | skipped/all_changes_ignored, verdict=null, 0 LLM; check-run skipped |
 | Хотя бы один T, остальные только E/T, inventory полный и достоверный, incomplete нет | Backend FinalReviewResult: coverage=none, findings=[], verdict=null, 0 LLM; publishing → succeeded, check-run neutral; summaryOnly=false |
-| Нет анализируемого текста, есть incomplete (возможно E/T); inventory полный, relevant counters известны, counted allowed ≤3 000 | Backend FinalReviewResult: coverage=partial, findings=[], verdict=null, summaryOnly=false, 0 LLM; publishing → succeeded/neutral; это не none и не skipped. Пока маршрута no-text partial нет, этот набор публикуется как summary-only `no_reviewable_files`, coverage partial, 0 LLM |
+| Нет анализируемого текста, есть incomplete (возможно E/T); inventory полный, relevant counters известны, counted allowed ≤3 000 | Backend FinalReviewResult: coverage=partial, findings=[], verdict=null, summaryOnly=false, 0 LLM; publishing → succeeded/neutral; это не none и не skipped. Построен на snapshot path (v4+) с #497 ч.3; legacy (≤ v3) публикует этот набор как summary-only `no_reviewable_files`, coverage partial, 0 LLM |
 | Есть анализируемый текст и T/incomplete (E могут быть), counted allowed ≤3 000 | Ревью доступного текста с partial |
 | Есть анализируемый текст, T/incomplete нет, inventory/counters полны, counted allowed ≤3 000 (E могут быть) | Обычное ревью, возможен complete/clean; доказанные binary/empty_file в excluded_files сами по себе не снижают coverage |
 
@@ -165,7 +170,9 @@ VCS-only DiffMap/digest. Все backend-ветки обходят conventions, c
 и verifier, сохраняют закреплённые severity_threshold/max_comments и
 below_severity_threshold_count=0; summary сообщает фактическое отсутствие анализа.
 Для no-text partial известный reviewed_changed_lines=0, неизвестные исходные
-статистики — null. Backend-результаты идут в общий путь сохранения результата/плана
+статистики — null. Поля reviewed_changed_lines в коде пока нет (FinalReviewResult §8.1 —
+цель #107): no-text partial на snapshot path (#497 ч.3) закрепляет coverage.reviewed_files=0.
+Backend-результаты идут в общий путь сохранения результата/плана
 и публикации; skipped завершается без публикации.
 
 Выбор доказанного binary как E сохраняет текстовый scope: сервис не анализирует
@@ -1205,9 +1212,11 @@ retry при наличии checkpoint продолжает с verifier, не м
 сохранения успешного ответа может потребовать новый вызов в остатке лимитов;
 воспроизводимость снимка не означает детерминизм модели.
 
-В коде checkpoint кандидатов — сохранённый manifest каждого вызова snapshot-пути
-(`context_manifests`); возобновления с verifier ещё нет. Повторная попытка до
-принятого ответа заново выбирает RAG (§3.5): более новая публикация индекса даёт
+В коде #435 checkpoint кандидатов хранит принятый ответ, fitted context и manifest;
+повтор с восстановимым checkpoint продолжает с verifier без нового reviewer. Если
+показанный контекст или вход фильтрации не восстановить, новая попытка вызывает
+reviewer заново. Повторная попытка до принятого ответа заново выбирает RAG
+(§3.5): более новая публикация индекса даёт
 новый `index_commit_sha` в manifest её вызовов, а то же место остаётся под тем же
 `block_id`. Verifier принятой попытки показывает те же блоки RAG с тем же
 `index_commit_sha`, что её review (§5.2).
@@ -1424,13 +1433,13 @@ Legacy missing_patch нельзя повышать по одному empty SHA: 
   отказ `StoreReviewOutput` без backend summary;
 - тексты none в body и check-run;
 - публичный gate summary/saved_result, исторические succeeded без republish;
-- zero-LLM `none` на snapshot path с #130 F5 (legacy ≤ v3 по-прежнему вызывает модель) и summary-only с `NoModelAnswer`.
+- zero-LLM `none` на snapshot path с #130 F5 (legacy ≤ v3 по-прежнему вызывает модель), no-text partial
+  на snapshot path с #497 ч.3 (legacy ≤ v3 — summary-only `no_reviewable_files`) и summary-only с `NoModelAnswer`.
 
 Не объявлено реализованным в #213:
 
 - нового публичного coverage DTO, LLM-полей, `result_id` или таблиц результата нет;
-- полный #107, общий run-owned `file_omissions` #130/#168 и zero-LLM lifecycle no-text partial остаются целевыми,
-  а не активированными #213;
+- полный #107 и общий run-owned `file_omissions` #130/#168 остаются целевыми, а не активированными #213;
 - остальные reflection coordinate drops, `evidence_not_shown` и verifier `insufficient_context` остаются за lifecycle #107/#130; их общее влияние на
   coverage не объявляется реализованным в #213.
 
@@ -1438,8 +1447,9 @@ Legacy missing_patch нельзя повышать по одному empty SHA: 
 
 
 Уже существуют `run_policy_snapshots` вместе со staging `run_policy_documents`
-(миграция `20261011_0029`) и `context_manifests` (`20261025_0040`); остальные имена
-ниже — целевые таблицы/поля для будущих миграций, не существующая схема:
+(миграция `20261011_0029`), `context_manifests` (`20261025_0040`) и приватная
+`final_review_results` (#435). Остальные имена ниже — целевые таблицы/поля
+для будущих миграций, не существующая схема:
 
 | Данные | Контракт |
 | --- | --- |
@@ -1449,7 +1459,7 @@ Legacy missing_patch нельзя повышать по одному empty SHA: 
 | `context_evidence_blobs` | Workspace-scoped dedup по content hash, точные показанные excerpts |
 | `review_candidates` | Исходный finding v2/v3, digest, ID, accepted call, решения фильтров |
 | `verification_results` | Принятый call, ровно одно решение на candidate, resolved refs |
-| `final_review_results` | `run_id UNIQUE`, FinalReviewResult и digest, immutable после publishing |
+| `final_review_results` | #435: `run_id` PK, `source_attempt`, nullable accepted-call IDs, JSONB `result` и `publication_plan`, digest, `created_at`; результат сохраняется в `running` до T8 и остаётся immutable. Полный профиль #107 из §8.1, включая отдельные `version`, `result_id` и `below_severity_threshold_count`, ещё не реализован как контракт таблицы |
 | `publication_plans/items` | Сохранённые provider payloads, item keys, remote receipts, состояние доставки (§10) |
 
 Кандидаты и diagnostic drops не смешиваются с опубликованными findings. Поля
@@ -1489,7 +1499,7 @@ runs завершаются закреплённым legacy pipeline; новые
 
 Коды, которые шлюз вернул агенту «что изменилось» (PIPELINE_SPEC §4.5), к таблице не
 относятся: прогон с ними не падает, ревью публикуется без текста агента, а код пишется
-только в `review.postprocess.change_summary.error_code`.
+только в `review.finalize.change_summary.error_code`.
 
 ## 9. Карта diff и адаптеры VCS
 
@@ -2114,7 +2124,7 @@ review. Подтверждённый legacy-object связывается с run
 | Too_large-only; too_large >20 000 строк + 50 строк кода; маска assets/** + слишком большой assets/a.txt | Соответственно none; обычное ревью 50 строк с partial; skipped/ignored, так как маска побеждает too_large. Пока строки T входят в счётчик 3 000, too_large больше 3 000 строк — summary-only `diff_too_large`, coverage partial: соседние строки не ревьюятся |
 | Identity_unresolved, submodule либо доказанный pure rename/mode-only, отдельно и с ignored, incomplete нет | T с каноническими исходами none/partial; отсутствие строк не превращается в clean |
 | Неполный inventory либо неизвестные relevant counters; отдельно missing-patch-only 4 000 known строк | Сначала summary-only/partial, summaryOnly=true, 0 LLM; none/skipped и no-text partial неприменимы |
-| Только incomplete без hunks (missing/malformed/truncated patch), а также I+E, I+T и I+E+T; полный inventory, known counters 0/3 000, текста нет | Backend partial, summaryOnly=false, findings=[], verdict=null, 0 LLM включая conventions/verifier; pins и below_severity_threshold_count=0 сохранены, reviewed_changed_lines=0, неизвестная статистика null; publishing → succeeded/neutral. Пока маршрута no-text partial нет, этот набор публикуется как summary-only `no_reviewable_files`, coverage partial, 0 LLM |
+| Только incomplete без hunks (missing/malformed/truncated patch), а также I+E, I+T и I+E+T; полный inventory, known counters 0/3 000, текста нет | Backend partial, summaryOnly=false, findings=[], verdict=null, 0 LLM включая conventions/verifier; pins и below_severity_threshold_count=0 сохранены, reviewed_changed_lines=0 (поле — цель #107; сейчас тест закрепляет coverage.reviewed_files=0), неизвестная статистика null; publishing → succeeded/neutral. Построен на snapshot path (v4+) с #497 ч.3; legacy (≤ v3) публикует этот набор как summary-only `no_reviewable_files`, coverage partial, 0 LLM |
 | Truncated-only с сохранившимися разрешёнными hunks вне E/T, также с E/T; полный inventory, known counted allowed ≤3 000 | Hunks поступают в L1: обычное ревью с partial, blocking возможен; ограничения координат incomplete сохраняются. Оба триггера summary-only проверяются раньше (§2.2/§2.3); без hunks — backend partial по предыдущей строке. |
 | Доказанный empty_file (`100644`/`100755`) + проверенный код; empty-only | Complete/clean без supported warning/error; соответственно skipped/all_changes_ignored, 0 LLM |
 | Пустое added без полного proof; удалённая картинка без blob/независимого binary evidence | missing_patch/incomplete; рядом с кодом partial/null с причиной; metadata_only не E/T |

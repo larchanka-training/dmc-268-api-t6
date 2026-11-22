@@ -27,8 +27,8 @@ from app.modules.reviews.infrastructure.gitlab_merge_request_projection import (
     SqlAlchemyGitLabMergeRequestProjectionUnitOfWork,
 )
 from app.worker import WorkerProcess, WorkerSettings, compose_worker_process
-from tests import test_gitlab_projection_postgres as projection
-from tests.test_gitlab_projection_postgres import NOW, Rig, rig, seed_run
+from tests import gitlab_projection_support as projection
+from tests.gitlab_projection_support import NOW, Rig, rig, seed_run
 from tests.test_gitlab_rerun_postgres import seed_change, seed_github
 
 worker_outbox_database = projection.authority_database

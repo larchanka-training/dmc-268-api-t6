@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -18,85 +19,29 @@ from sqlalchemy import text
 from app.modules.integrations.gitlab.application.manage_connection import GitLabOriginPolicy
 from app.modules.reviews.application.publish_run_review import PublishRunReview
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer
-from app.modules.reviews.application.store_review_output import StoreReviewOutput
 from app.modules.reviews.infrastructure.gitlab_publication_resources import (
     GitLabInstalledPublicationResources,
-)
-from app.modules.reviews.infrastructure.review_output_unit_of_work import (
-    SqlAlchemyReviewOutputUnitOfWork,
 )
 from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunLifecycleStore,
     SqlAlchemyRunLifecycleUnitOfWork,
 )
-from tests import test_gitlab_projection_postgres as projection
-from tests.test_gitlab_projection_postgres import Rig, rig, seed_run
-from tests.test_gitlab_rerun_postgres import seed_change
-from tests.test_gitlab_run_http import Stream
+from tests.gitlab_http_fakes import Stream
+from tests.gitlab_projection_support import rig, seed_run
+from tests.gitlab_publication_support import installed, versions, wire
+from tests.gitlab_publication_support import publishing as seed_publishing
 from tests.test_publish_run_review import Trace
 
-publication_database = projection.authority_database
+publishing = partial(seed_publishing, seed_run=seed_run)
+pytest_plugins = ("tests.gitlab_projection_support",)
 pytestmark = pytest.mark.integration
 
 
-class Queue:
-    def __init__(self) -> None:
-        self.pointers: list[ReviewPublishPointer] = []
-
-    async def publish_review(self, pointer: ReviewPublishPointer) -> None:
-        self.pointers.append(pointer)
-
-
-async def publishing(
-    fixture: Rig,
-    *,
-    origin: str = "https://gitlab.com",
-    workspace: UUID | None = None,
-    replacement: bool = False,
-) -> ReviewPublishPointer:
-    target = await fixture.seed(origin=origin, workspace=workspace)
-    if replacement:
-        await fixture.lifecycle.rotate_token(
-            installation_id=target.origin_provider_installation_id,
-            token="replacement-authority-token",
-            expected_generation=1,
-        )
-    change = await seed_change(fixture, target.repository_id)
-    async with fixture.sessions.begin() as session:
-        await session.execute(
-            text("UPDATE code_changes SET head_sha=:head WHERE id=:id"),
-            {"head": "a" * 40, "id": change},
-        )
-    run = await seed_run(fixture, target, change, state="running", attempt=1)
-    async with fixture.sessions.begin() as session:
-        await session.execute(
-            text("UPDATE runs SET worker_id='publication' WHERE id=:id"), {"id": run}
-        )
-    queue = Queue()
-    assert await StoreReviewOutput(
-        lambda: SqlAlchemyReviewOutputUnitOfWork(fixture.sessions),
-        queue,
-        worker_id="publication",
-        run_url=lambda _run_id: None,
-    ).execute(
-        run,
-        {
-            "findings": [],
-            "summary": {
-                "problem": "No issue found.",
-                "done_well": "The code is clear.",
-                "effort": "none",
-            },
-        },
-    )
-    return queue.pointers[0]
-
-
 def test_installed_publication_uses_real_trusted_context_and_pool_one(
-    publication_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
 ) -> None:
     async def scenario() -> None:
-        async with rig(publication_database) as fixture:
+        async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             calls: list[tuple[str, str, str]] = []
 
@@ -174,29 +119,64 @@ def test_installed_publication_uses_real_trusted_context_and_pool_one(
     asyncio.run(asyncio.wait_for(scenario(), 25))
 
 
-def wire(status: int, payload: object, **headers: str) -> httpx.Response:
-    return httpx.Response(
-        status,
-        headers={"Content-Type": "application/json", **headers},
-        stream=Stream((json.dumps(payload).encode(),)),
-    )
+def test_installed_publication_uses_frozen_plan_body_once(
+    authority_database: tuple[str, str, UUID],
+) -> None:
+    async def scenario() -> None:
+        async with rig(authority_database) as fixture:
+            pointer = await publishing(fixture, historical=False)
+            async with fixture.sessions.begin() as session:
+                plan = await session.scalar(
+                    text("SELECT publication_plan FROM final_review_results WHERE run_id=:id"),
+                    {"id": pointer.run_id},
+                )
+                assert plan is not None and plan["findings"] == []
+                assert (
+                    await session.scalar(
+                        text(
+                            "SELECT count(*) FROM run_actions "
+                            "WHERE run_id=:id AND tool='review.publish_start'"
+                        ),
+                        {"id": pointer.run_id},
+                    )
+                    == 1
+                )
+                await session.execute(
+                    text("UPDATE runs SET review_body='later unsaved body' WHERE id=:id"),
+                    {"id": pointer.run_id},
+                )
+            posts: list[dict[str, object]] = []
 
+            async def external(request: httpx.Request) -> httpx.Response:
+                if request.url.path.endswith("/versions"):
+                    return wire(200, versions())
+                if request.method == "GET":
+                    return wire(200, [])
+                posts.append(json.loads(request.content))
+                return wire(201, {"notes": [{"id": 701}]})
 
-def versions() -> list[dict[str, str]]:
-    return [
-        {"head_commit_sha": "a" * 40, "base_commit_sha": "b" * 40, "start_commit_sha": "b" * 40}
-    ]
+            publisher = PublishRunReview(
+                uow_factory=lambda: SqlAlchemyRunLifecycleUnitOfWork(fixture.sessions),
+                reviews=None,
+                check_runs=None,
+                trace=Trace(),
+                gitlab_publications=installed(fixture, external),
+            )
+            await publisher.execute(pointer)
+            await publisher.execute(pointer)
+            assert len(posts) == 1
+            assert str(posts[0]["body"]).startswith(plan["review_body"])
+            assert "later unsaved body" not in str(posts[0]["body"])
+            async with fixture.sessions() as session:
+                assert (
+                    await session.scalar(
+                        text("SELECT state::text FROM runs WHERE id=:id"),
+                        {"id": pointer.run_id},
+                    )
+                    == "succeeded"
+                )
 
-
-def installed(fixture: Rig, external: Any) -> GitLabInstalledPublicationResources:
-    return GitLabInstalledPublicationResources(
-        session_factory=fixture.sessions,
-        authority=fixture.authority,
-        origin_policy=GitLabOriginPolicy(
-            frozenset({"https://gitlab.com", "https://other.gitlab.example"})
-        ),
-        transport_factory=lambda: httpx.MockTransport(external),
-    )
+    asyncio.run(asyncio.wait_for(scenario(), 25))
 
 
 @pytest.mark.parametrize(
@@ -214,13 +194,13 @@ def installed(fixture: Rig, external: Any) -> GitLabInstalledPublicationResource
     ],
 )
 def test_current_publication_authority_between_requests_and_retries(
-    publication_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     mutation: str,
     at: str,
     expected: str | None,
 ) -> None:
     async def scenario() -> None:
-        async with rig(publication_database) as fixture:
+        async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             async with fixture.sessions() as session:
                 initial = await SqlAlchemyRunLifecycleStore(session).publish_context(pointer.run_id)
@@ -326,10 +306,10 @@ def test_current_publication_authority_between_requests_and_retries(
 
 
 def test_factory_keeps_two_tenants_same_numeric_target_on_distinct_origins(
-    publication_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
 ) -> None:
     async def scenario() -> None:
-        async with rig(publication_database) as fixture:
+        async with rig(authority_database) as fixture:
             sibling = uuid4()
             async with fixture.sessions.begin() as session:
                 await session.execute(
@@ -381,12 +361,12 @@ def test_factory_keeps_two_tenants_same_numeric_target_on_distinct_origins(
 @pytest.mark.parametrize("changed", ["body", "hash", "route"])
 @pytest.mark.parametrize("terminal", ["complete", "finish"])
 def test_locked_final_write_refuses_new_payload_after_last_checkpoint(
-    publication_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     changed: str,
     terminal: str,
 ) -> None:
     async def scenario() -> None:
-        async with rig(publication_database) as fixture:
+        async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             async with fixture.sessions() as session:
                 expected = await SqlAlchemyRunLifecycleStore(session).publish_context(
@@ -476,12 +456,12 @@ def test_locked_final_write_refuses_new_payload_after_last_checkpoint(
     [("cancel", "cancelled_by_user"), ("head", "superseded"), ("closed", "pr_closed")],
 )
 def test_locked_final_write_honors_current_cancellation_facts(
-    publication_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     facts: str,
     reason: str,
 ) -> None:
     async def scenario() -> None:
-        async with rig(publication_database) as fixture:
+        async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             async with fixture.sessions() as session:
                 expected = await SqlAlchemyRunLifecycleStore(session).publish_context(
@@ -531,11 +511,11 @@ def test_locked_final_write_honors_current_cancellation_facts(
 
 @pytest.mark.parametrize("failures", [1, 4])
 def test_real_startup_fault_uses_existing_retry_budget_and_fresh_owned_transports(
-    publication_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     failures: int,
 ) -> None:
     async def scenario() -> None:
-        async with rig(publication_database) as fixture:
+        async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             entered: list[int] = []
             closed: list[int] = []
@@ -613,31 +593,29 @@ def test_real_startup_fault_uses_existing_retry_budget_and_fresh_owned_transport
 
 @pytest.mark.parametrize("primary", ["cancel", "programmer"])
 def test_primary_body_fault_survives_response_and_transport_close_faults(
-    publication_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     primary: str,
 ) -> None:
-    from collections.abc import AsyncIterator
-
     async def scenario() -> None:
-        async with rig(publication_database) as fixture:
+        async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             closed: list[str] = []
-
-            class Body(httpx.AsyncByteStream):
-                async def __aiter__(self) -> AsyncIterator[bytes]:
-                    if primary == "cancel":
-                        raise asyncio.CancelledError("primary cancellation")
-                    raise RuntimeError("primary programmer fault")
-                    yield b""  # pragma: no cover
-
-                async def aclose(self) -> None:
-                    closed.append("response")
-                    raise ValueError("secondary response close")
 
             class Transport(httpx.AsyncBaseTransport):
                 async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
                     return httpx.Response(
-                        200, headers={"Content-Type": "application/json"}, stream=Body()
+                        200,
+                        headers={"Content-Type": "application/json"},
+                        stream=Stream(
+                            (),
+                            failure=(
+                                asyncio.CancelledError("primary cancellation")
+                                if primary == "cancel"
+                                else RuntimeError("primary programmer fault")
+                            ),
+                            close_error=ValueError("secondary response close"),
+                            on_close=lambda: closed.append("response"),
+                        ),
                     )
 
                 async def aclose(self) -> None:
@@ -673,10 +651,10 @@ def test_primary_body_fault_survives_response_and_transport_close_faults(
 
 
 def test_installed_coordinates_fallback_retains_one_transport_and_generation(
-    publication_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
 ) -> None:
     async def scenario() -> None:
-        async with rig(publication_database) as fixture:
+        async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             async with fixture.sessions.begin() as session:
                 await session.execute(
@@ -753,7 +731,7 @@ def test_installed_coordinates_fallback_retains_one_transport_and_generation(
 
 @pytest.mark.parametrize("fault", ["storage", "codec"])
 def test_authority_transient_is_safe_retryable_publication_error_without_source_code(
-    publication_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     fault: str,
 ) -> None:
     from app.modules.integrations.gitlab.application.request_credentials import (
@@ -765,7 +743,7 @@ def test_authority_transient_is_safe_retryable_publication_error_without_source_
     )
 
     async def scenario() -> None:
-        async with rig(publication_database) as fixture:
+        async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             failures: list[str] = []
             pauses: list[float] = []
@@ -842,7 +820,7 @@ def test_authority_transient_is_safe_retryable_publication_error_without_source_
     ],
 )
 def test_initial_cancellation_is_fenced_across_execute_to_locked_write_gap(
-    publication_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     mutation: str,
     final_state: str,
     reason: str | None,
@@ -850,7 +828,7 @@ def test_initial_cancellation_is_fenced_across_execute_to_locked_write_gap(
     from app.modules.reviews.application.publish_run_review import PublishContext
 
     async def scenario() -> None:
-        async with rig(publication_database) as fixture:
+        async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             async with fixture.sessions.begin() as session:
                 await session.execute(
@@ -933,7 +911,7 @@ def test_initial_cancellation_is_fenced_across_execute_to_locked_write_gap(
 
 @pytest.mark.parametrize("fault", ["operational", "pool_timeout"])
 def test_final_checkpoint_only_sql_transient_uses_safe_existing_retry_and_markers(
-    publication_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     fault: str,
 ) -> None:
     from collections.abc import AsyncIterator
@@ -951,7 +929,7 @@ def test_final_checkpoint_only_sql_transient_uses_safe_existing_retry_and_marker
     )
 
     async def scenario() -> None:
-        async with rig(publication_database) as fixture:
+        async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             armed = False
             failures = 0
@@ -1065,7 +1043,7 @@ def test_final_checkpoint_only_sql_transient_uses_safe_existing_retry_and_marker
     ],
 )
 def test_inactive_publication_fences_payload_and_route_before_terminal_mutation(
-    publication_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     boundary: str,
     mutation: str,
     reason: str | None,
@@ -1073,7 +1051,7 @@ def test_inactive_publication_fences_payload_and_route_before_terminal_mutation(
     from app.modules.reviews.application.publish_run_review import PublishContext
 
     async def scenario() -> None:
-        async with rig(publication_database) as fixture:
+        async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             async with fixture.sessions() as session:
                 expected = await SqlAlchemyRunLifecycleStore(session).publish_context(
@@ -1217,13 +1195,13 @@ def test_inactive_publication_fences_payload_and_route_before_terminal_mutation(
 
 @pytest.mark.parametrize("boundary", ["early", "complete"])
 def test_inactive_rebound_publication_notifies_only_locked_original_workspace(
-    publication_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     boundary: str,
 ) -> None:
     import psycopg
 
     async def scenario() -> None:
-        async with rig(publication_database) as fixture:
+        async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             async with fixture.sessions() as session:
                 expected = await SqlAlchemyRunLifecycleStore(session).publish_context(
@@ -1272,7 +1250,7 @@ def test_inactive_rebound_publication_notifies_only_locked_original_workspace(
             assert inactive.publication_identity == expected.publication_identity
             assert inactive.publication_identity is not None
             assert inactive.publication_identity.origin_workspace_id == fixture.workspace
-            dsn = publication_database[0].replace("postgresql+psycopg://", "postgresql://")
+            dsn = authority_database[0].replace("postgresql+psycopg://", "postgresql://")
             with psycopg.connect(
                 dsn, autocommit=True, application_name="dmc169-t14-notify-listener"
             ) as listener:
@@ -1312,160 +1290,5 @@ def test_inactive_rebound_publication_notifies_only_locked_original_workspace(
                 }
             ]
             assert all(notice["workspace_id"] != str(replacement_workspace) for notice in notices)
-
-    asyncio.run(asyncio.wait_for(scenario(), 25))
-
-
-@pytest.mark.parametrize("changed", ["findings", "head"])
-def test_stale_installed_pointer_before_initial_inactive_snapshot_is_noop(
-    publication_database: tuple[str, str, UUID],
-    changed: str,
-) -> None:
-    import psycopg
-
-    async def scenario() -> None:
-        async with rig(publication_database) as fixture:
-            pointer = await publishing(fixture)
-            async with fixture.sessions() as session:
-                initial = await SqlAlchemyRunLifecycleStore(session).publish_context(pointer.run_id)
-            assert initial is not None and initial.vcs_input is not None
-            async with fixture.sessions.begin() as session:
-                await session.execute(
-                    text("UPDATE repositories SET installation_available=false WHERE id=:id"),
-                    {"id": initial.vcs_input.repository_id},
-                )
-                if changed == "findings":
-                    await session.execute(
-                        text(
-                            "INSERT INTO findings (id,run_id,file_path,line_start,"
-                            "severity,confidence,"
-                            "category,title,body,published,inline_comment) VALUES "
-                            "(:finding,:id,'x.py',1,'high',0.9,'correctness','New finding',"
-                            "'New payload',false,true)"
-                        ),
-                        {"finding": uuid4(), "id": pointer.run_id},
-                    )
-                else:
-                    await session.execute(
-                        text("UPDATE runs SET head_sha=:head WHERE id=:id"),
-                        {"id": pointer.run_id, "head": "c" * 40},
-                    )
-                    await session.execute(
-                        text("UPDATE code_changes SET head_sha=:head WHERE id=:id"),
-                        {"id": initial.vcs_input.code_change_id, "head": "c" * 40},
-                    )
-            async with fixture.sessions() as session:
-                before_run = await session.scalar(
-                    text("SELECT to_jsonb(r) FROM runs r WHERE id=:id"), {"id": pointer.run_id}
-                )
-                before_findings = (
-                    await session.scalars(
-                        text("SELECT to_jsonb(f) FROM findings f WHERE run_id=:id ORDER BY id"),
-                        {"id": pointer.run_id},
-                    )
-                ).all()
-
-            def external(request: httpx.Request) -> httpx.Response:
-                raise AssertionError("stale inactive pointer must not start HTTP")
-
-            trace = Trace()
-            with psycopg.connect(
-                publication_database[0].replace("postgresql+psycopg://", "postgresql://"),
-                autocommit=True,
-                application_name="dmc169-t14-stale-listener",
-            ) as listener:
-                listener.execute("LISTEN run_updated")
-                await PublishRunReview(
-                    uow_factory=lambda: SqlAlchemyRunLifecycleUnitOfWork(fixture.sessions),
-                    reviews=None,
-                    check_runs=None,
-                    trace=trace,
-                    gitlab_publications=installed(fixture, external),
-                ).execute(pointer)
-                notices = list(listener.notifies(timeout=0.1))
-            async with fixture.sessions() as session:
-                assert (
-                    await session.scalar(
-                        text("SELECT to_jsonb(r) FROM runs r WHERE id=:id"), {"id": pointer.run_id}
-                    )
-                    == before_run
-                )
-                assert (
-                    await session.scalars(
-                        text("SELECT to_jsonb(f) FROM findings f WHERE run_id=:id ORDER BY id"),
-                        {"id": pointer.run_id},
-                    )
-                ).all() == before_findings
-            assert notices == [] and trace.records == []
-
-    asyncio.run(asyncio.wait_for(scenario(), 25))
-
-
-@pytest.mark.parametrize("method", ["finish", "complete"])
-@pytest.mark.parametrize("facts", ["closed", "head", "user"])
-def test_legacy_inactive_default_keeps_installation_unavailable(
-    publication_database: tuple[str, str, UUID],
-    method: str,
-    facts: str,
-) -> None:
-    async def scenario() -> None:
-        async with rig(publication_database) as fixture:
-            pointer = await publishing(fixture)
-            async with fixture.sessions() as session:
-                context = await SqlAlchemyRunLifecycleStore(session).publish_context(pointer.run_id)
-            assert context is not None and context.vcs_input is not None
-            async with fixture.sessions.begin() as session:
-                await session.execute(
-                    text("UPDATE repositories SET installation_available=false WHERE id=:id"),
-                    {"id": context.vcs_input.repository_id},
-                )
-                await session.execute(
-                    text("UPDATE runs SET cancel_requested=true WHERE id=:id"),
-                    {"id": pointer.run_id},
-                )
-                if facts in {"closed", "head"}:
-                    await session.execute(
-                        text(
-                            "UPDATE code_changes SET state=CAST(:state AS code_change_state),"
-                            "head_sha=:head WHERE id=:id"
-                        ),
-                        {
-                            "id": context.vcs_input.code_change_id,
-                            "state": "closed" if facts == "closed" else "open",
-                            "head": "c" * 40,
-                        },
-                    )
-            # Deliberately OMIT expected_publication, preserving the original caller API.
-            async with fixture.sessions.begin() as session:
-                store = SqlAlchemyRunLifecycleStore(session)
-                if method == "finish":
-                    assert await store.finish(
-                        pointer.run_id,
-                        from_state="publishing",
-                        worker_id=None,
-                        state="failed",
-                        error_code="legacy_failure",
-                        error_message="safe",
-                        now=datetime.now(UTC),
-                    )
-                else:
-                    assert (
-                        await store.complete_publication(
-                            pointer.run_id,
-                            review_id=701,
-                            comment_ids=(),
-                            findings_hash=pointer.findings_hash,
-                            moved_to_body_finding_ids=(),
-                            now=datetime.now(UTC),
-                        )
-                        == "cancelled"
-                    )
-            async with fixture.sessions() as session:
-                assert (
-                    await session.execute(
-                        text("SELECT state::text,error_code FROM runs WHERE id=:id"),
-                        {"id": pointer.run_id},
-                    )
-                ).one() == ("cancelled", "installation_unavailable")
 
     asyncio.run(asyncio.wait_for(scenario(), 25))

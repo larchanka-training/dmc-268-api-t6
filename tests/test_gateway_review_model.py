@@ -62,6 +62,7 @@ from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, 
 from app.modules.reviews.infrastructure.llm.models import GatewayReviewModel
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelPrice, ModelProfile
 from app.modules.reviews.infrastructure.llm.transport import ChatRequest, ChatResponse
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
 from tests.llm_fakes import FakeClock, context_checkpoint
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
@@ -241,7 +242,7 @@ class _NoMeta:
         return None
 
 
-class _Pipeline:
+class _Pipeline(_AcceptingCheckpointPublisher):
     """Processor, prompt source and publisher around a real or fake review model."""
 
     def __init__(self, files: tuple[ChangedFile, ...], snapshot: PolicySnapshot | None) -> None:

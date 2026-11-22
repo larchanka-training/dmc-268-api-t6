@@ -2,7 +2,7 @@
 
 ``ExecuteReviewRun`` hands the verifier's candidate ids, the accepted call id and the
 decisions without ``reason`` to ``StoreReviewOutput`` on ``VerifiedReviewOutput``; the store
-passes them to ``enter_publishing``, which writes the ``llm.verify`` run action
+passes them to ``finalize_review`` before T8, which writes the ``llm.verify`` run action
 (``docs/PIPELINE_SPEC.md:177``; ``manifest_id`` names the stored manifest of the accepted
 verifier call, null when no manifest store is wired).
 """
@@ -13,6 +13,7 @@ import asyncio
 import itertools
 import logging
 import re
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
@@ -25,14 +26,14 @@ from app.modules.reviews.application.findings_post_processor import ProcessedRev
 from app.modules.reviews.application.reflection_pass import ReflectionPass, VerifierReply
 from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
-    ReviewOutput,
-    ReviewPublication,
     VerifiedReviewOutput,
 )
 from app.modules.reviews.application.store_review_output import (
     PublishingGuard,
     StoreReviewOutput,
 )
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
+from tests.review_output_fakes import InMemoryFinalization
 from tests.test_diff_anchor import _diff_map
 from tests.verifier_pipeline_fakes import (
     MAIN_BLOCK_ID,
@@ -48,6 +49,10 @@ from tests.verifier_pipeline_fakes import (
 
 ACCEPTED_CALL_ID = UUID("00000000-0000-0000-0000-000000013902")
 ACCEPTED_MANIFEST_ID = UUID("00000000-0000-0000-0000-000000013903")
+
+
+class _Publisher(_AcceptingCheckpointPublisher, FakePublisher):
+    pass
 
 
 def _finding(line: int, title: str) -> dict[str, Any]:
@@ -93,7 +98,7 @@ class _ReplyVerifier:
 
 
 def _execute(findings: list[dict[str, Any]], verifier: _ReplyVerifier) -> VerifiedReviewOutput:
-    publisher = FakePublisher()
+    publisher = _Publisher()
     pipeline = ExecuteReviewRun(
         FakeProcessor(),
         FakeRepository(),
@@ -173,12 +178,13 @@ def test_the_zero_candidate_bypass_writes_no_trace() -> None:
     assert output.verify_response is None
 
 
-# ---------- StoreReviewOutput passes it to enter_publishing ----------
+# ---------- StoreReviewOutput saves the trace before T8 ----------
 
 
-class _PublishingRepository:
+class _PublishingRepository(InMemoryFinalization):
     def __init__(self) -> None:
-        self.entered: list[dict[str, Any]] = []
+        self.finalized_trace: list[tuple[dict[str, Any] | None, dict[str, Any] | None]] = []
+        self.phases: list[str] = []
 
     async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
         return FindingPostProcessingInput(
@@ -196,34 +202,58 @@ class _PublishingRepository:
             head_sha="head_sha_123",
             head_current=True,
             repository_review_event="APPROVE",
+            attempt=1,
         )
 
-    async def store_review_output(
+    async def finalize_review(
         self,
         run_id: UUID,
-        answer: dict[str, Any],
-        parsed: ReviewOutput,
+        *,
+        model_output: dict[str, object] | None,
         processed: ProcessedReviewOutput,
-    ) -> ReviewPublication:
-        return ReviewPublication(head_sha="head_sha_123", findings=(), review_body="body")
+        result: dict[str, Any],
+        review_event: str,
+        findings_hash: str,
+        verify_request: dict[str, Any] | None,
+        verify_response: dict[str, Any] | None,
+        started_at: datetime,
+        duration_ms: int,
+    ) -> None:
+        await super().finalize_review(
+            run_id,
+            model_output=model_output,
+            processed=processed,
+            result=result,
+            review_event=review_event,
+            findings_hash=findings_hash,
+            verify_request=verify_request,
+            verify_response=verify_response,
+            started_at=started_at,
+            duration_ms=duration_ms,
+        )
+        self.finalized_trace.append((verify_request, verify_response))
+        self.phases.append("finalize")
 
-    async def enter_publishing(self, run_id: UUID, **kwargs: Any) -> None:
-        self.entered.append(kwargs)
+    async def enter_publishing_from_final(self, run_id: UUID, *, lease_until: datetime) -> bool:
+        assert self.phases == ["finalize"]
+        self.phases.append("t8")
+        return await super().enter_publishing_from_final(run_id, lease_until=lease_until)
 
 
-def _store(raw_output: Any) -> list[dict[str, Any]]:
+def _store(raw_output: Any) -> _PublishingRepository:
     reviews = _PublishingRepository()
     store = StoreReviewOutput(
         cast(Any, lambda: FakeUnitOfWork(reviews)),
         FakeQueue(),
         worker_id="test-worker",
+        expected_attempt=1,
         run_url=lambda _: None,
     )
     assert asyncio.run(store.execute(RUN_ID, raw_output)) is True
-    return reviews.entered
+    return reviews
 
 
-def test_store_passes_the_trace_to_enter_publishing() -> None:
+def test_store_saves_the_trace_before_t8() -> None:
     request = {
         "candidate_ids": ["c-1"],
         "accepted_call_id": "00000000-0000-0000-0000-000000013902",
@@ -231,7 +261,7 @@ def test_store_passes_the_trace_to_enter_publishing() -> None:
     }
     response = {"decisions": [{"candidate_id": "c-1", "status": "contradicted"}]}
 
-    entered = _store(
+    reviews = _store(
         VerifiedReviewOutput(
             {"findings": [], "summary": SUMMARY},
             verify_request=request,
@@ -239,14 +269,12 @@ def test_store_passes_the_trace_to_enter_publishing() -> None:
         )
     )
 
-    assert len(entered) == 1
-    assert entered[0]["verify_request"] == request
-    assert entered[0]["verify_response"] == response
+    assert reviews.phases == ["finalize", "t8"]
+    assert reviews.finalized_trace == [(request, response)]
 
 
 def test_a_plain_answer_passes_no_trace() -> None:
-    entered = _store({"findings": [], "summary": SUMMARY})
+    reviews = _store({"findings": [], "summary": SUMMARY})
 
-    assert len(entered) == 1
-    assert entered[0]["verify_request"] is None
-    assert entered[0]["verify_response"] is None
+    assert reviews.phases == ["finalize", "t8"]
+    assert reviews.finalized_trace == [(None, None)]

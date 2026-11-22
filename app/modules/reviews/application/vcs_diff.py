@@ -23,7 +23,12 @@ from app.modules.reviews.application.run_failures import (
     RunCancelled,
     RunFailure,
 )
-from app.modules.reviews.application.unified_diff import HunkRow, parse_hunks, split_lf
+from app.modules.reviews.application.unified_diff import (
+    HunkRow,
+    UnifiedDiffError,
+    parse_hunks,
+    split_lf,
+)
 
 _LOGGER = logging.getLogger(__name__)
 _MAX_PATCH_LINES = 20_000
@@ -264,8 +269,14 @@ class FetchVcsReviewInput:
                             reason = OmissionReason.MISSING_PATCH
             if reason is None:
                 assert file.patch is not None
-                changed.append(parse_file_patch(file.filename, file.status, file.patch))
-            else:
+                try:
+                    changed.append(parse_file_patch(file.filename, file.status, file.patch))
+                except UnifiedDiffError:
+                    # A patch the parser cannot read is incomplete (CVS §2.2), not a failed
+                    # run. Its raw text stays for the UI and is never model input; the diff
+                    # map classifies it as patch_malformed.
+                    reason = OmissionReason.MISSING_PATCH
+            if reason is not None:
                 omitted.append(VcsFileOmission(file, reason))
         if isinstance(self._provider, VcsStageVerifier):
             await self._provider.verify_current(checkpoint=self._checkpoint)

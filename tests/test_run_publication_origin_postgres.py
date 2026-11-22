@@ -40,9 +40,9 @@ from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunTraceUnitOfWork,
 )
 from tests.portal_postgres import HEAD, INSTALL_A, RUN_ATTEMPTED, Env, portal_schema
+from tests.retired_installation_fakes import DiscardTokenCache
 from tests.test_app_reinstall_postgres import FreshGitHub, apply
 from tests.test_publish_run_review import Trace
-from tests.test_retired_installation_postgres import DiscardTokenCache
 from tests.test_run_origin_guard_postgres import prepare
 
 

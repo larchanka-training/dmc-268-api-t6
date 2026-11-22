@@ -37,6 +37,7 @@ from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.worker import review_context_stage_factory
 from tests.code_index_postgres import C1, _build, _enable, _Index
+from tests.github_vcs_payload_fakes import _pull_payload
 from tests.portal_postgres import (
     HEAD,
     INSTALL_A,
@@ -46,10 +47,8 @@ from tests.portal_postgres import (
     Env,
     portal_schema,
 )
-from tests.rag_review_context_fakes import _USER_NOTED, _user_file
-from tests.test_github_vcs_provider import _pull_payload
-from tests.test_retired_installation_postgres import DiscardTokenCache
-from tests.test_review_context import _GREET_PATCH, _MODELS, _SERVICE
+from tests.rag_review_context_fakes import _GREET_PATCH, _MODELS, _SERVICE, _USER_NOTED, _user_file
+from tests.retired_installation_fakes import DiscardTokenCache
 from tests.test_run_origin_guard_postgres import prepare
 
 _BASE = "b" * 40

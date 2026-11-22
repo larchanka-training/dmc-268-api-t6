@@ -35,8 +35,8 @@ from app.modules.reviews.application.run_delivery import (
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 from app.modules.reviews.infrastructure.run_delivery import SqlAlchemyRunDeliveryReader
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleUnitOfWork
-from tests import test_gitlab_projection_postgres as projection
-from tests.test_gitlab_projection_postgres import Rig, rig, seed_run
+from tests import gitlab_projection_support as projection
+from tests.gitlab_projection_support import Rig, rig, seed_run
 from tests.test_gitlab_rerun_postgres import seed_change, seed_github
 
 run_delivery_database = projection.authority_database

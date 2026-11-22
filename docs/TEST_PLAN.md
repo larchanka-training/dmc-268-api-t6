@@ -174,8 +174,9 @@ lazy Reflection Pass; `ExecuteReviewRun` запускает его только 
 conventions/verifier DB-строк при создании, snapshot восстанавливает их версии
 и checksums по этим ID; старые и частично закреплённые Run сохраняют отсутствующие
 pins и неполные bindings. Reflection Pass соответствует обязательному verifier
-из CVS §7. Контролируемые PostgreSQL-тесты `test_snapshot_path_e2e_postgres.py`
-проверяют worker composition с явно закреплённым v4 и retry; активацию seed
+из CVS §7. Контролируемые PostgreSQL-тесты `test_snapshot_path_e2e_postgres.py` и
+`test_snapshot_path_e2e_rag_postgres.py` проверяют worker composition с явно закреплённым
+v4, retry и retrieved-контекстом; активацию seed
 проверяют `test_prompt_seeding.py`, качество смысла требует отдельной оценки. #213 дополнительно проверяет реальный GatewayReviewModel →
 ReviewReply → обе ветки Reflection Pass → StoreReviewOutput: полный/усечённый
 вход, пустой ответ, supported finding и anonymous unknown_path

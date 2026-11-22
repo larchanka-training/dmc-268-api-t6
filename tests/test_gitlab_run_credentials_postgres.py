@@ -11,11 +11,10 @@ import pytest
 from app.modules.integrations.gitlab.infrastructure.run_credentials import GitLabRunCredentials
 from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
-from tests import test_gitlab_projection_postgres as projection
-from tests.test_gitlab_projection_postgres import rig, seed_run
-from tests.test_gitlab_rerun_postgres import seed_change
+from tests.gitlab_projection_support import Rig, rig, seed_run
+from tests.gitlab_publication_support import seed_change
 
-run_database = projection.authority_database
+pytest_plugins = ("tests.gitlab_projection_support",)
 pytestmark = pytest.mark.integration
 
 
@@ -24,10 +23,10 @@ async def checkpoint() -> None:
 
 
 def test_rotation_between_requests_refuses_second_transport_call(
-    run_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
 ) -> None:
     async def scenario() -> None:
-        async with rig(run_database) as fixture:
+        async with rig(authority_database) as fixture:
             target = await fixture.seed()
             change = await seed_change(fixture, target.repository_id)
             run = await seed_run(fixture, target, change)
@@ -71,7 +70,7 @@ def test_rotation_between_requests_refuses_second_transport_call(
     asyncio.run(asyncio.wait_for(scenario(), 20))
 
 
-async def seeded_credentials(fixture: projection.Rig) -> tuple[GitLabRunCredentials, UUID]:
+async def seeded_credentials(fixture: Rig) -> tuple[GitLabRunCredentials, UUID]:
     from sqlalchemy import text
 
     target = await fixture.seed()
@@ -98,7 +97,7 @@ async def seeded_credentials(fixture: projection.Rig) -> tuple[GitLabRunCredenti
 
 @pytest.mark.parametrize("mutation", ["rotate", "revoke", "rebind", "pause", "head", "start"])
 def test_http_every_request_rechecks_real_persisted_authority(
-    run_database: tuple[str, str, UUID], mutation: str
+    authority_database: tuple[str, str, UUID], mutation: str
 ) -> None:
     from sqlalchemy import text
 
@@ -107,10 +106,10 @@ def test_http_every_request_rechecks_real_persisted_authority(
         GitLabMergeRequestResource,
         GitLabRunHttp,
     )
-    from tests.test_gitlab_run_http import Stream
+    from tests.gitlab_http_fakes import Stream
 
     async def scenario() -> None:
-        async with rig(run_database) as fixture:
+        async with rig(authority_database) as fixture:
             credentials, run = await seeded_credentials(fixture)
             target = await credentials.bind()
             calls: list[str] = []
@@ -172,13 +171,13 @@ def test_http_every_request_rechecks_real_persisted_authority(
 
 
 def test_full_expected_input_and_trusted_workspace_are_compared(
-    run_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
 ) -> None:
     from dataclasses import replace
     from uuid import uuid4
 
     async def scenario() -> None:
-        async with rig(run_database) as fixture:
+        async with rig(authority_database) as fixture:
             original, run = await seeded_credentials(fixture)
             value = original.expected_input
             variants = [
@@ -235,7 +234,7 @@ def test_full_expected_input_and_trusted_workspace_are_compared(
 
 
 def test_pool_one_reads_commit_before_http_and_independent_observer(
-    run_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
 ) -> None:
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import create_async_engine
@@ -246,14 +245,17 @@ def test_pool_one_reads_commit_before_http_and_independent_observer(
         GitLabMergeRequestResource,
         GitLabRunHttp,
     )
-    from tests.test_gitlab_run_http import Stream
+    from tests.gitlab_http_fakes import Stream
 
     async def scenario() -> None:
         observer = create_async_engine(
-            run_database[0], poolclass=NullPool, isolation_level="AUTOCOMMIT", hide_parameters=True
+            authority_database[0],
+            poolclass=NullPool,
+            isolation_level="AUTOCOMMIT",
+            hide_parameters=True,
         )
         try:
-            async with rig(run_database) as fixture:
+            async with rig(authority_database) as fixture:
                 credentials, run = await seeded_credentials(fixture)
 
                 async def external(request: httpx.Request) -> httpx.Response:
@@ -296,7 +298,7 @@ def test_pool_one_reads_commit_before_http_and_independent_observer(
 
 @pytest.mark.parametrize("stage", ["first_checkpoint", "final_checkpoint", "persisted_read"])
 def test_real_sql_operational_failure_at_each_admission_stage_is_required(
-    run_database: tuple[str, str, UUID], stage: str
+    authority_database: tuple[str, str, UUID], stage: str
 ) -> None:
     from datetime import UTC, datetime, timedelta
 
@@ -311,13 +313,13 @@ def test_real_sql_operational_failure_at_each_admission_stage_is_required(
 
     async def scenario() -> None:
         broken = create_async_engine(
-            make_url(run_database[0]).set(port=1),
+            make_url(authority_database[0]).set(port=1),
             connect_args={"connect_timeout": 1},
             hide_parameters=True,
         )
         broken_sessions = async_sessionmaker(broken)
         try:
-            async with rig(run_database) as fixture:
+            async with rig(authority_database) as fixture:
                 original, run = await seeded_credentials(fixture)
                 now = datetime.now(UTC)
                 bad_checkpoint = AttemptCheckpoint(
@@ -365,14 +367,14 @@ def test_real_sql_operational_failure_at_each_admission_stage_is_required(
 
 
 def test_codec_corruption_is_required_unavailable_not_false_cancellation(
-    run_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
 ) -> None:
     from sqlalchemy import text
 
     from app.modules.reviews.application.run_failures import RequiredSourceUnavailable
 
     async def scenario() -> None:
-        async with rig(run_database) as fixture:
+        async with rig(authority_database) as fixture:
             credentials, _ = await seeded_credentials(fixture)
             async with fixture.sessions.begin() as session:
                 await session.execute(
@@ -393,10 +395,10 @@ def test_codec_corruption_is_required_unavailable_not_false_cancellation(
 
 
 def test_concurrent_first_admission_pins_one_generation_and_later_attempt_may_rotate(
-    run_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
 ) -> None:
     async def scenario() -> None:
-        async with rig(run_database) as fixture:
+        async with rig(authority_database) as fixture:
             credentials, run = await seeded_credentials(fixture)
             first, second = await asyncio.gather(
                 credentials.credential_for_request(), credentials.credential_for_request()
@@ -424,17 +426,17 @@ def test_concurrent_first_admission_pins_one_generation_and_later_attempt_may_ro
 
 @pytest.mark.parametrize("status", [200, 404, 429, 500])
 def test_real_rotation_during_error_reply_is_control_not_optional_http(
-    run_database: tuple[str, str, UUID], status: int
+    authority_database: tuple[str, str, UUID], status: int
 ) -> None:
     from app.modules.integrations.gitlab.application.manage_connection import GitLabOriginPolicy
     from app.modules.integrations.gitlab.infrastructure.run_http import (
         GitLabMergeRequestResource,
         GitLabRunHttp,
     )
-    from tests.test_gitlab_run_http import Stream
+    from tests.gitlab_http_fakes import Stream
 
     async def scenario() -> None:
-        async with rig(run_database) as fixture:
+        async with rig(authority_database) as fixture:
             credentials, _ = await seeded_credentials(fixture)
             stream = Stream((b"{invalid",))
 
@@ -463,14 +465,14 @@ def test_real_rotation_during_error_reply_is_control_not_optional_http(
 
 
 def test_same_numeric_project_in_other_tenant_never_supplies_this_run_credentials(
-    run_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
 ) -> None:
     from uuid import uuid4
 
     from sqlalchemy import text
 
     async def scenario() -> None:
-        async with rig(run_database) as fixture:
+        async with rig(authority_database) as fixture:
             credentials, run = await seeded_credentials(fixture)
             other_workspace = uuid4()
             async with fixture.sessions.begin() as session:
@@ -510,7 +512,7 @@ def test_same_numeric_project_in_other_tenant_never_supplies_this_run_credential
 
 @pytest.mark.parametrize("control", ["cancel", "deadline", "required", "task", "programmer"])
 def test_admission_preserves_control_and_programmer_failures(
-    run_database: tuple[str, str, UUID], control: str
+    authority_database: tuple[str, str, UUID], control: str
 ) -> None:
     from datetime import UTC, datetime, timedelta
 
@@ -521,7 +523,7 @@ def test_admission_preserves_control_and_programmer_failures(
     )
 
     async def scenario() -> None:
-        async with rig(run_database) as fixture:
+        async with rig(authority_database) as fixture:
             original, run = await seeded_credentials(fixture)
             primary: BaseException = {
                 "cancel": RunCancelled("stopped"),

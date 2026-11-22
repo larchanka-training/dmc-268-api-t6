@@ -14,6 +14,7 @@ from app.modules.reviews.infrastructure.models import (
     CodeChangeDiff,
     ContextManifest,
     ContextPayload,
+    ReviewCandidateCheckpoint,
     Run,
 )
 
@@ -53,6 +54,9 @@ class SqlAlchemyRunDataRetentionStore:
         )
         await self._session.execute(
             delete(ContextManifest).where(ContextManifest.run_id.in_(run_ids))
+        )
+        await self._session.execute(
+            delete(ReviewCandidateCheckpoint).where(ReviewCandidateCheckpoint.run_id.in_(run_ids))
         )
         await self._session.execute(
             delete(ContextPayload).where(

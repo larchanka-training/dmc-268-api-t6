@@ -283,7 +283,7 @@ Committed regression inventory #213 (наличие теста не заменя
    `test_policy_snapshot_integrity_postgres.py`, `test_run_policy_snapshot_origin_postgres.py`,
    `test_context_manifests_postgres.py`, `test_llm_verify_trace_postgres.py`,
    `test_rules_md_e2e_postgres.py`, `test_rules_md_e2e_applied_postgres.py`,
-   `test_snapshot_path_e2e_postgres.py`,
+   `test_snapshot_path_e2e_postgres.py`, `test_snapshot_path_e2e_rag_postgres.py`,
    `test_context_manifests_migration.py` (upgrade, downgrade и повторный upgrade `context_manifests`),
    `test_run_context_origin_postgres.py` (поздние оплаченные конвенции не пишут историю контекста
    завершённого run), `test_run_policy_context_origin_postgres.py` (чтения политики и контекста
