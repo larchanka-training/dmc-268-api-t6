@@ -30,7 +30,9 @@ every line costs tokens and shapes the review.
 
 - The first line names what to change: the paths and the masks. Change them, then delete that line.
 - Delete each rule your project does not follow. A rule about a helper or a folder you do not have
-  can produce false findings.
+  can produce false findings. In `security-baseline`, drop sections irrelevant to your architecture
+  (such as `LLM prompts` if your service does not call LLMs, or `Input schemas` if you do not use
+  schema libraries like Pydantic or Zod) to save prompt tokens.
 - Write your own rules the way the templates do: what is required, where, why, and
   `Report … as a security|correctness|performance|readability problem`. In a small
   [A/B run](../../docs/test-plan/RULES_MD_TEST_REPORT.md) on review prompt v5 (5 constraint cases,
@@ -57,9 +59,9 @@ templates pasted together as they are fail every run with `policy_ignore_block_d
 | --- | --- | --- |
 | `go` | 2112 | 1130 |
 | `python-fastapi` | 2467 | 1302 |
-| `security-baseline` | 2061 | 1080 |
+| `security-baseline` | 6520 | 3045 |
 | `typescript-react` | 2113 | 1137 |
-| Largest stack + `security-baseline` | 4270 | 2207 |
+| Largest stack + `security-baseline` | 8729 | 4188 |
 
 Tokens are the service's estimate of the block the model sees, at 3 characters per token. That
 block marks up every line, so the number is about 60 % above an estimate from the size of the file.
