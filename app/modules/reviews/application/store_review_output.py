@@ -22,6 +22,7 @@ from app.modules.reviews.application.queue_messages import ReviewPublishPointer,
 from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
     InvalidReviewOutput,
+    NoModelAnswer,
     RuleLineRef,
     VerifiedReviewOutput,
     _as_json_object,
@@ -29,9 +30,6 @@ from app.modules.reviews.application.review_output import (
     empty_review_output,
     parse_review_output,
     parse_review_output_v2,
-)
-from app.modules.reviews.application.review_output import (
-    NoModelAnswer as NoModelAnswer,
 )
 from app.modules.reviews.application.run_coverage import CoverageItem, CoverageStatus, RunCoverage
 from app.modules.reviews.application.run_failures import LEASE, RunFailure

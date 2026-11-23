@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import RunState
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
-from app.modules.reviews.application.store_review_output import NoModelAnswer, StoreReviewOutput
+from app.modules.reviews.application.review_output import NoModelAnswer
+from app.modules.reviews.application.store_review_output import StoreReviewOutput
 from app.modules.reviews.infrastructure.models import Run, RunAction
 from app.modules.reviews.infrastructure.review_output_unit_of_work import (
     SqlAlchemyReviewOutputUnitOfWork,
