@@ -137,16 +137,19 @@ _NOT_IMPORTED_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-_QUALIFIED_IMPORT_TAIL = re.compile(
+_QUALIFIED_NON_IN_TAIL = re.compile(
     r"^\s*(?:"
     r"from\b"
     r"|as\s+(?:a\s+)?values?\b"
     r"|at\s+runtime\b"
     r"|for\s+runtime\b"
     r"|in\s+runtime\b"
-    r"|in\s+(?:another|other)\s+files?\b"
-    r"|in\s+[`'\"]?(?P<target>[a-zA-Z0-9_./\-]+\.[a-zA-Z0-9]+)[`'\"]?"
     r")",
+    re.IGNORECASE,
+)
+
+_IN_TARGET_TAIL = re.compile(
+    r"^\s*in\s+(?:the\s+)?[`'\"]?(?P<target>[a-zA-Z0-9_./\-]+(?:\s+(?:file|files|tool|tools|function|method|handler|endpoint))?)[`'\"]?",
     re.IGNORECASE,
 )
 
@@ -170,6 +173,12 @@ _COMPARATIVE_OTHER_TOOLS_PATTERN = re.compile(
 )
 
 
+class TryCatchSpan(NamedTuple):
+    in_try: bool
+    try_start: int | None = None
+    try_end: int | None = None
+
+
 class ClaimSyntaxInspector(Protocol):
     """Port for syntax inspection of non-Python source files."""
 
@@ -186,7 +195,7 @@ class ClaimSyntaxInspector(Protocol):
         language: AstLanguage,
         source: bytes,
         target_line: int,
-    ) -> tuple[bool, int | None, int | None] | None: ...
+    ) -> tuple[bool, int | None, int | None] | TryCatchSpan | None: ...
 
 
 class ClaimAuditResult(NamedTuple):
@@ -341,14 +350,25 @@ def _audit_import_claim(
 
     claimed_symbols: list[str] = []
     file_name = file_path.rsplit("/", 1)[-1].lower()
+    this_file_targets = {
+        file_path.lower(),
+        file_name,
+        "this",
+        "this file",
+        "current file",
+    }
     for match in matches:
         tail = text[match.end() :]
-        q = _QUALIFIED_IMPORT_TAIL.search(tail)
-        if q:
-            target = q.groupdict().get("target")
-            if target and target.lower() in {file_path.lower(), file_name}:
-                pass
-            else:
+        if _QUALIFIED_NON_IN_TAIL.search(tail):
+            continue
+
+        in_match = _IN_TARGET_TAIL.search(tail)
+        if in_match:
+            target = (in_match.group("target") or "").strip().lower()
+            is_local = target in this_file_targets or target.endswith(
+                ("tool", "tools", "function", "method", "handler", "endpoint")
+            )
+            if not is_local:
                 continue
 
         line_start = text.rfind("\n", 0, match.start())
@@ -396,11 +416,13 @@ def _audit_try_catch_claim(
     if not _NO_TRY_CATCH_PATTERN.search(text):
         return ClaimAuditResult(status="supported")
 
-    in_try_result = _is_line_in_try_body(file_path, language, source_bytes, line, claim_syntax)
-    if in_try_result is None:
+    result = _is_line_in_try_body(file_path, language, source_bytes, line, claim_syntax)
+    if result is None:
         return ClaimAuditResult(status="supported")
 
-    in_try, start_line, end_line = in_try_result
+    in_try = result.in_try if isinstance(result, TryCatchSpan) else result[0]
+    start_line = result.try_start if isinstance(result, TryCatchSpan) else result[1]
+    end_line = result.try_end if isinstance(result, TryCatchSpan) else result[2]
     if in_try:
         span_label = f"lines {start_line}-{end_line}" if start_line and end_line else "a try block"
         return ClaimAuditResult(
@@ -485,10 +507,13 @@ def _audit_comparative_external_claim(
     is_tool_claim = bool(re.search(r"\bother\s+tools\b", text, re.IGNORECASE))
     identifier_re = re.compile(rf"(?<![A-Za-z0-9_$]){re.escape(param)}(?![A-Za-z0-9_$])")
     matched_external = False
+    has_tool_block = False
     for ref in external_refs:
         snippet = context_blocks.get(ref.block_id)
         if snippet is None:
             continue
+        if _is_tool_path(snippet.path):
+            has_tool_block = True
         if is_tool_claim and not _is_tool_path(snippet.path):
             continue
         if snippet.lines:
@@ -500,9 +525,6 @@ def _audit_comparative_external_claim(
             if cited and identifier_re.search(cited):
                 matched_external = True
                 break
-        elif identifier_re.search(snippet.text):
-            matched_external = True
-            break
 
     if matched_external:
         return ClaimAuditResult(status="supported")
@@ -516,25 +538,13 @@ def _audit_comparative_external_claim(
         )
         return ClaimAuditResult(status="supported")
 
-    has_tool_block = False
-    for ref in external_refs:
-        snip = context_blocks.get(ref.block_id)
-        if snip is not None and _is_tool_path(snip.path):
-            has_tool_block = True
-            break
     if is_tool_claim and not has_tool_block:
-        return ClaimAuditResult(
-            status="insufficient_context",
-            reason=(
-                f"Claim asserts other tools use '{param}' "
-                "but cited external blocks are not tool files"
-            ),
+        reason = (
+            f"Claim asserts other tools use '{param}' but cited external blocks are not tool files"
         )
-
-    return ClaimAuditResult(
-        status="insufficient_context",
-        reason=f"Claim asserts other tools/files use '{param}' but cited external blocks omit it",
-    )
+    else:
+        reason = f"Claim asserts other tools/files use '{param}' but cited external blocks omit it"
+    return ClaimAuditResult(status="insufficient_context", reason=reason)
 
 
 def _extract_comparative_param(text: str) -> str | None:
@@ -576,13 +586,18 @@ def _is_line_in_try_body(
     source_bytes: bytes,
     target_line: int,
     claim_syntax: ClaimSyntaxInspector | None,
-) -> tuple[bool, int | None, int | None] | None:
+) -> TryCatchSpan | None:
     if len(source_bytes) > MAX_SOURCE_BYTES or target_line < 1:
         return None
     if language == AstLanguage.PYTHON:
         return _is_python_line_in_try_body(file_path, source_bytes, target_line)
     if language in TS_JS_LANGUAGES and claim_syntax is not None:
-        return claim_syntax.is_line_in_try_body(file_path, language, source_bytes, target_line)
+        res = claim_syntax.is_line_in_try_body(file_path, language, source_bytes, target_line)
+        if res is None:
+            return None
+        if isinstance(res, TryCatchSpan):
+            return res
+        return TryCatchSpan(in_try=res[0], try_start=res[1], try_end=res[2])
     return None
 
 
@@ -626,7 +641,7 @@ def _parse_python_imports(file_path: str, source_bytes: bytes) -> set[str] | Non
         node = stack.pop()
         if _is_type_checking_guard(node):
             continue
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        if isinstance(node, _PYTHON_FUNCTION_BOUNDARIES):
             continue
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -647,21 +662,22 @@ def _parse_python_imports(file_path: str, source_bytes: bytes) -> set[str] | Non
     return symbols
 
 
-def _python_node_span(node: ast.AST) -> tuple[int, int]:
-    lineno = int(getattr(node, "lineno", 0) or 0)
-    end_lineno = int(getattr(node, "end_lineno", None) or lineno)
-    col_offset = int(getattr(node, "col_offset", 0) or 0)
-    return (end_lineno - lineno, -col_offset)
-
-
 def _is_python_line_in_try_body(
     file_path: str,
     source_bytes: bytes,
     target_line: int,
-) -> tuple[bool, int | None, int | None] | None:
+) -> TryCatchSpan | None:
     tree = _parse_python_ast(file_path, source_bytes)
     if tree is None:
         return None
+
+    lines = source_bytes.splitlines()
+    if target_line < 1 or target_line > len(lines):
+        return TryCatchSpan(in_try=False)
+
+    target_raw_line = lines[target_line - 1]
+    stripped = target_raw_line.lstrip()
+    first_col = len(target_raw_line) - len(stripped)
 
     parents: dict[ast.AST, ast.AST] = {}
     candidates: list[ast.AST] = []
@@ -680,18 +696,28 @@ def _is_python_line_in_try_body(
             stack.append(child)
 
     if not candidates:
-        return (False, None, None)
+        return TryCatchSpan(in_try=False)
 
-    candidates.sort(key=_python_node_span)
+    def _node_distance(node: ast.AST) -> tuple[int, int, int]:
+        lineno = int(getattr(node, "lineno", 0) or 0)
+        end_lineno = int(getattr(node, "end_lineno", None) or lineno)
+        col_offset = int(getattr(node, "col_offset", 0) or 0)
+        return (
+            abs(lineno - target_line),
+            abs(col_offset - first_col),
+            end_lineno - lineno,
+        )
+
+    candidates.sort(key=_node_distance)
 
     curr: ast.AST | None = candidates[0]
     while curr is not None:
         if isinstance(curr, _PYTHON_FUNCTION_BOUNDARIES):
-            return (False, None, None)
+            return TryCatchSpan(in_try=False)
         if isinstance(curr, (ast.Try, ast.TryStar)) and curr.handlers and curr.body:
             body_end = max(stmt.end_lineno or stmt.lineno for stmt in curr.body)
             if curr.lineno <= target_line <= body_end:
-                return (True, curr.lineno, body_end)
+                return TryCatchSpan(in_try=True, try_start=curr.lineno, try_end=body_end)
         curr = parents.get(curr)
 
-    return (False, None, None)
+    return TryCatchSpan(in_try=False)

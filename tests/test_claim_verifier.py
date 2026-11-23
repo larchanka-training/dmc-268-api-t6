@@ -473,7 +473,17 @@ def test_swapi_films_modified_hunk_rejects_false_import_and_try_catch_with_l3_co
     assert all(status == "contradicted" for _, status, _ in rejected)
 
 
-def test_try_catch_check_excludes_catch_and_finally_clauses_and_try_finally() -> None:
+@pytest.mark.parametrize(
+    ("path", "line", "title", "body"),
+    [
+        ("src/tools/films.ts", 111, "Unhandled error", "Called without a try/catch block."),
+        ("src/tools/tf.ts", 5, "Unhandled cleanup", "done() lacks a try/catch."),
+        ("src/tools/tf.ts", 3, "Uncaught work()", "work() runs without a try/catch handler."),
+    ],
+)
+def test_try_catch_check_excludes_catch_and_finally_clauses_and_try_finally(
+    path: str, line: int, title: str, body: str
+) -> None:
     """Only caught try bodies count; catch/finally and uncaught try...finally stay supported."""
     films_cf = _hunk_changed_file(
         "src/tools/films.ts", {111: ("added", "return toErrorResult(error);")}
@@ -485,7 +495,7 @@ def test_try_catch_check_excludes_catch_and_finally_clauses_and_try_finally() ->
         path="src/tools/tf.ts",
         status="added",
         lines=tuple(
-            DiffLine(i, "added", line) for i, line in enumerate(try_finally_ts.splitlines(), 1)
+            DiffLine(i, "added", ln) for i, ln in enumerate(try_finally_ts.splitlines(), 1)
         ),
     )
     ctx = _context(
@@ -493,44 +503,38 @@ def test_try_catch_check_excludes_catch_and_finally_clauses_and_try_finally() ->
         context_blocks=(_full_file_block("src/tools/films.ts", SWAPI_FILMS_TS),),
     )
 
-    in_catch = _candidate(
-        "c-in-catch",
-        _finding(line=111, title="Unhandled error", body="Called without a try/catch block."),
-    )
-    in_finally = _candidate(
-        "c-in-finally",
-        _finding(
-            path="src/tools/tf.ts",
-            line=5,
-            title="Unhandled cleanup",
-            body="done() lacks a try/catch.",
-        ),
-    )
-    in_try_finally = _candidate(
-        "c-try-finally",
-        _finding(
-            path="src/tools/tf.ts",
-            line=3,
-            title="Uncaught work()",
-            body="work() runs without a try/catch handler.",
-        ),
-    )
+    cand = _candidate("c-test", _finding(path=path, line=line, title=title, body=body))
     supported, rejected = filter_verified_candidates(
-        candidates=(in_catch, in_finally, in_try_finally),
-        decisions=(
-            _supported_decision(in_catch),
-            _supported_decision(in_finally),
-            _supported_decision(in_try_finally),
-        ),
+        candidates=(cand,),
+        decisions=(_supported_decision(cand),),
         context=ctx,
         claim_syntax=INSPECTOR,
     )
 
     assert rejected == []
-    assert [c.candidate_id for c in supported] == ["c-in-catch", "c-in-finally", "c-try-finally"]
+    assert [c.candidate_id for c in supported] == ["c-test"]
 
 
-def test_ts_aliased_imports_and_module_path_complaints() -> None:
+@pytest.mark.parametrize(
+    ("title", "body", "expected_status"),
+    [
+        ("McpErr is not imported", "`McpErr` is used without importing.", "contradicted"),
+        ("McpError is not imported", "McpError is aliased elsewhere.", "supported"),
+        (
+            "Wrong import subpath",
+            "Import ErrorCode from '@modelcontextprotocol/sdk/server/mcp.js' instead.",
+            "supported",
+        ),
+        (
+            "Wrong import module",
+            "ErrorCode is not imported from '@modelcontextprotocol/sdk/server/mcp.js'.",
+            "supported",
+        ),
+    ],
+)
+def test_ts_aliased_imports_and_module_path_complaints(
+    title: str, body: str, expected_status: str
+) -> None:
     """Only local bindings count; remediation and wrong-source complaints are not suppressed."""
     aliased_ts = (
         b'import { ErrorCode, McpError as McpErr } from "@modelcontextprotocol/sdk/types.js";\n'
@@ -538,48 +542,9 @@ def test_ts_aliased_imports_and_module_path_complaints() -> None:
         b"  throw new McpErr(ErrorCode.InternalError, 'boom');\n"
         b"}\n"
     )
-
-    # Claim about the alias 'McpErr' is contradicted; claim about unaliased 'McpError' is not.
-    alias_false = _finding(
-        path="src/a.ts",
-        line=3,
-        title="McpErr is not imported",
-        body="`McpErr` is used without importing.",
-    )
-    orig_missing = _finding(
-        path="src/a.ts",
-        line=3,
-        title="McpError is not imported",
-        body="McpError is aliased elsewhere.",
-    )
-    remediation_only = _finding(
-        path="src/a.ts",
-        line=3,
-        title="Wrong import subpath",
-        body="Import ErrorCode from '@modelcontextprotocol/sdk/server/mcp.js' instead.",
-    )
-    wrong_source = _finding(
-        path="src/a.ts",
-        line=3,
-        title="Wrong import module",
-        body="ErrorCode is not imported from '@modelcontextprotocol/sdk/server/mcp.js'.",
-    )
-
+    finding = _finding(path="src/a.ts", line=3, title=title, body=body)
     assert (
-        audit_candidate_claim(alias_false, aliased_ts, claim_syntax=INSPECTOR).status
-        == "contradicted"
-    )
-    assert (
-        audit_candidate_claim(orig_missing, aliased_ts, claim_syntax=INSPECTOR).status
-        == "supported"
-    )
-    assert (
-        audit_candidate_claim(remediation_only, aliased_ts, claim_syntax=INSPECTOR).status
-        == "supported"
-    )
-    assert (
-        audit_candidate_claim(wrong_source, aliased_ts, claim_syntax=INSPECTOR).status
-        == "supported"
+        audit_candidate_claim(finding, aliased_ts, claim_syntax=INSPECTOR).status == expected_status
     )
 
 
@@ -627,7 +592,9 @@ def test_try_catch_stops_at_nested_function_boundaries_for_ts_and_python() -> No
         b"try:\n"
         b"    def inner():\n"
         b"        boom()\n"
-        b"    fn = lambda x: bad(x)\n"
+        b"    fn = lambda x: (\n"
+        b"        bad(x)\n"
+        b"    )\n"
         b"    sync_call()\n"
         b"except Exception:\n"
         b"    pass\n"
@@ -640,13 +607,13 @@ def test_try_catch_stops_at_nested_function_boundaries_for_ts_and_python() -> No
     )
     f_py_lambda = _finding(
         path="app/a.py",
-        line=4,
+        line=5,
         title="Uncaught bad",
         body="bad(x) runs without a surrounding try/except.",
     )
     f_py_sync = _finding(
         path="app/a.py",
-        line=5,
+        line=7,
         title="Uncaught sync_call",
         body="sync_call() runs without a surrounding try/except.",
     )
@@ -656,43 +623,47 @@ def test_try_catch_stops_at_nested_function_boundaries_for_ts_and_python() -> No
     assert audit_candidate_claim(f_py_sync, py_source).status == "contradicted"
 
 
-def test_import_type_and_type_checking_are_not_treated_as_runtime_value_imports() -> None:
-    """Type-only imports and TYPE_CHECKING/local in Python do not contradict missing claims."""
+@pytest.mark.parametrize(
+    ("symbol", "expected_status"),
+    [
+        ("TypeOnly", "supported"),
+        ("InnerType", "supported"),
+        ("RealVal", "contradicted"),
+    ],
+)
+def test_ts_import_type_is_not_treated_as_runtime_value_import(
+    symbol: str, expected_status: str
+) -> None:
+    """TypeScript type-only imports do not count as runtime value bindings."""
     ts_source = (
         b"import type { TypeOnly } from './types';\n"
         b"import { type InnerType, RealVal } from './vals';\n"
         b"export function run(): void {}\n"
     )
-    f_type_only = _finding(
+    finding = _finding(
         path="src/a.ts",
         line=3,
-        title="TypeOnly is not imported",
-        body="`TypeOnly` is not imported.",
+        title=f"{symbol} is not imported",
+        body=f"`{symbol}` is not imported.",
     )
-    f_inner_type = _finding(
-        path="src/a.ts",
-        line=3,
-        title="InnerType is not imported",
-        body="`InnerType` is not imported.",
-    )
-    f_real_val = _finding(
-        path="src/a.ts",
-        line=3,
-        title="RealVal is not imported",
-        body="`RealVal` is not imported.",
+    assert (
+        audit_candidate_claim(finding, ts_source, claim_syntax=INSPECTOR).status == expected_status
     )
 
-    assert (
-        audit_candidate_claim(f_type_only, ts_source, claim_syntax=INSPECTOR).status == "supported"
-    )
-    assert (
-        audit_candidate_claim(f_inner_type, ts_source, claim_syntax=INSPECTOR).status == "supported"
-    )
-    assert (
-        audit_candidate_claim(f_real_val, ts_source, claim_syntax=INSPECTOR).status
-        == "contradicted"
-    )
 
+@pytest.mark.parametrize(
+    ("symbol", "expected_status"),
+    [
+        ("TypeOnlyMod", "supported"),
+        ("TypeOnlySym", "supported"),
+        ("local_mod", "supported"),
+        ("runtime_val", "contradicted"),
+    ],
+)
+def test_python_type_checking_and_local_imports_are_not_runtime_imports(
+    symbol: str, expected_status: str
+) -> None:
+    """Python TYPE_CHECKING and local imports do not count as module runtime value bindings."""
     py_source = (
         b"from typing import TYPE_CHECKING\n"
         b"if TYPE_CHECKING:\n"
@@ -702,77 +673,58 @@ def test_import_type_and_type_checking_are_not_treated_as_runtime_value_imports(
         b"    import local_mod\n"
         b"import runtime_val\n"
     )
-    f_py_mod = _finding(
+    finding = _finding(
         path="app/a.py",
         line=7,
-        title="TypeOnlyMod is not imported",
-        body="`TypeOnlyMod` is not imported.",
+        title=f"{symbol} is not imported",
+        body=f"`{symbol}` is not imported.",
     )
-    f_py_sym = _finding(
-        path="app/a.py",
-        line=7,
-        title="TypeOnlySym is not imported",
-        body="`TypeOnlySym` is not imported.",
-    )
-    f_py_local = _finding(
-        path="app/a.py",
-        line=7,
-        title="local_mod is not imported",
-        body="`local_mod` is not imported.",
-    )
-    f_py_val = _finding(
-        path="app/a.py",
-        line=7,
-        title="runtime_val is not imported",
-        body="`runtime_val` is not imported.",
-    )
-
-    assert audit_candidate_claim(f_py_mod, py_source).status == "supported"
-    assert audit_candidate_claim(f_py_sym, py_source).status == "supported"
-    assert audit_candidate_claim(f_py_local, py_source).status == "supported"
-    assert audit_candidate_claim(f_py_val, py_source).status == "contradicted"
+    assert audit_candidate_claim(finding, py_source).status == expected_status
 
 
-def test_qualified_not_imported_claims_are_not_contradicted() -> None:
+@pytest.mark.parametrize(
+    ("title", "body", "expected_status"),
+    [
+        (
+            "RealVal is not imported as a value",
+            "`RealVal` is not imported as a value.",
+            "supported",
+        ),
+        (
+            "RealVal is not imported at runtime",
+            "`RealVal` is not imported at runtime.",
+            "supported",
+        ),
+        (
+            "RealVal in other files",
+            "`RealVal` is not imported in handler.ts.",
+            "supported",
+        ),
+        (
+            "RealVal in test file",
+            "RealVal is not imported in the test file.",
+            "supported",
+        ),
+        (
+            "RealVal in other dir",
+            "RealVal is not imported in src/tools/people.",
+            "supported",
+        ),
+        (
+            "RealVal is not imported",
+            "`RealVal` is not imported.",
+            "contradicted",
+        ),
+    ],
+)
+def test_qualified_not_imported_claims_are_not_contradicted(
+    title: str, body: str, expected_status: str
+) -> None:
     """Claims qualified with 'as a value', 'at runtime', or other files are not contradicted."""
     ts_source = b"import { RealVal } from './vals';\nexport function run() {}\n"
-    f_as_value = _finding(
-        path="src/a.ts",
-        line=2,
-        title="RealVal is not imported as a value",
-        body="`RealVal` is not imported as a value.",
-    )
-    f_at_runtime = _finding(
-        path="src/a.ts",
-        line=2,
-        title="RealVal is not imported at runtime",
-        body="`RealVal` is not imported at runtime.",
-    )
-    f_other_file = _finding(
-        path="src/a.ts",
-        line=2,
-        title="RealVal in other files",
-        body="`RealVal` is not imported in handler.ts.",
-    )
-    f_unconditional = _finding(
-        path="src/a.ts",
-        line=2,
-        title="RealVal is not imported",
-        body="`RealVal` is not imported.",
-    )
-
+    finding = _finding(path="src/a.ts", line=2, title=title, body=body)
     assert (
-        audit_candidate_claim(f_as_value, ts_source, claim_syntax=INSPECTOR).status == "supported"
-    )
-    assert (
-        audit_candidate_claim(f_at_runtime, ts_source, claim_syntax=INSPECTOR).status == "supported"
-    )
-    assert (
-        audit_candidate_claim(f_other_file, ts_source, claim_syntax=INSPECTOR).status == "supported"
-    )
-    assert (
-        audit_candidate_claim(f_unconditional, ts_source, claim_syntax=INSPECTOR).status
-        == "contradicted"
+        audit_candidate_claim(finding, ts_source, claim_syntax=INSPECTOR).status == expected_status
     )
 
 
@@ -906,8 +858,41 @@ def test_swapi_comparative_id_or_url_checks_cited_external_block_contents() -> N
     ]
 
 
-def test_python_jsx_go_and_bounds_handling(caplog: pytest.LogCaptureFixture) -> None:
-    """Verify .py/.pyi AST checks, SyntaxError logging, .jsx support, .go skip, and bounds."""
+def test_python_pyi_ast_audit_contradicts_imported_symbol() -> None:
+    """Python .pyi files are audited for imported symbols via AST."""
+    py_source = b"from pkg import Client as ApiClient\n"
+    finding = _finding(
+        path="app/svc.pyi",
+        line=1,
+        title="Missing import for ApiClient",
+        body="Missing import.",
+    )
+    assert audit_candidate_claim(finding, py_source).status == "contradicted"
+
+
+def test_python_try_except_body_contradicts_unhandled_claim() -> None:
+    """Python try/except blocks contradict unhandled error claims inside try body."""
+    py_source = (
+        b"def run():\n    try:\n        call_api()\n    except ValueError:\n        recover()\n"
+    )
+    finding = _finding(
+        path="app/svc.py",
+        line=3,
+        title="No try/except around call_api",
+        body="No handler.",
+    )
+    assert audit_candidate_claim(finding, py_source).status == "contradicted"
+
+
+@pytest.mark.parametrize(
+    ("line", "title"),
+    [
+        (6, "No try/except in recover"),
+        (8, "No try/except in cleanup"),
+    ],
+)
+def test_python_try_except_catch_and_finally_lines_remain_supported(line: int, title: str) -> None:
+    """Lines in Python except and finally clauses are not treated as inside try body."""
     py_source = (
         b"from pkg import Client as ApiClient\n"
         b"def run():\n"
@@ -918,91 +903,113 @@ def test_python_jsx_go_and_bounds_handling(caplog: pytest.LogCaptureFixture) -> 
         b"    finally:\n"
         b"        cleanup()\n"
     )
+    finding = _finding(
+        path="app/svc.py",
+        line=line,
+        title=title,
+        body="Uncaught error.",
+    )
+    assert audit_candidate_claim(finding, py_source).status == "supported"
 
-    assert (
-        audit_candidate_claim(
-            _finding(
-                path="app/svc.pyi",
-                line=4,
-                title="Missing import for ApiClient",
-                body="Missing import.",
-            ),
-            py_source,
-        ).status
-        == "contradicted"
-    )
-    assert (
-        audit_candidate_claim(
-            _finding(
-                path="app/svc.py", line=4, title="No try/except around call_api", body="No handler."
-            ),
-            py_source,
-        ).status
-        == "contradicted"
-    )
-    # catch and finally lines must not be marked as inside try body
-    assert (
-        audit_candidate_claim(
-            _finding(
-                path="app/svc.py", line=6, title="No try/except in recover", body="Uncaught error."
-            ),
-            py_source,
-        ).status
-        == "supported"
-    )
-    assert (
-        audit_candidate_claim(
-            _finding(
-                path="app/svc.py", line=8, title="No try/except in cleanup", body="Uncaught error."
-            ),
-            py_source,
-        ).status
-        == "supported"
-    )
 
+def test_jsx_import_audit_contradicts_imported_symbol() -> None:
+    """JSX files are audited via Tree-sitter for imported symbols."""
     jsx_src = b"import { Widget } from './w';\nexport const App = () => <Widget />;\n"
-    assert (
-        audit_candidate_claim(
-            _finding(
-                path="src/App.jsx", line=2, title="Widget is not imported", body="Missing Widget."
-            ),
-            jsx_src,
-            claim_syntax=INSPECTOR,
-        ).status
-        == "contradicted"
+    finding = _finding(
+        path="src/App.jsx",
+        line=2,
+        title="Widget is not imported",
+        body="Missing Widget.",
     )
+    assert audit_candidate_claim(finding, jsx_src, claim_syntax=INSPECTOR).status == "contradicted"
 
+
+def test_go_unsupported_language_fails_open_as_supported() -> None:
+    """Unsupported languages like Go fail open with supported status."""
     go_src = b"package main\nfunc f() {}\n"
-    assert (
-        audit_candidate_claim(
-            _finding(path="main.go", line=2, title="fmt is not imported", body="Missing fmt."),
-            go_src,
-            claim_syntax=INSPECTOR,
-        ).status
-        == "supported"
+    finding = _finding(
+        path="main.go",
+        line=2,
+        title="fmt is not imported",
+        body="Missing fmt.",
     )
+    assert audit_candidate_claim(finding, go_src, claim_syntax=INSPECTOR).status == "supported"
 
+
+def test_python_syntax_error_fails_open_and_logs_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Python syntax errors fail open as supported and log a warning."""
     caplog.set_level(logging.WARNING)
     bad_py = b"def broken(:\n"
-    assert (
-        audit_candidate_claim(
-            _finding(path="app/bad.py", line=1, title="Foo is not imported", body="Missing Foo."),
-            bad_py,
-        ).status
-        == "supported"
+    finding = _finding(
+        path="app/bad.py",
+        line=1,
+        title="Foo is not imported",
+        body="Missing Foo.",
     )
+    assert audit_candidate_claim(finding, bad_py).status == "supported"
     assert any("Python AST parse failed" in rec.message for rec in caplog.records)
 
+
+def test_oversized_source_file_fails_open_as_supported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Source files exceeding MAX_SOURCE_BYTES fail open and log a warning."""
+    caplog.set_level(logging.WARNING)
     oversized = b"x = 1\n" + b"a" * MAX_SOURCE_BYTES
-    assert (
-        audit_candidate_claim(
-            _finding(path="src/big.ts", line=1, title="Foo is not imported", body="Missing Foo."),
-            oversized,
-            claim_syntax=INSPECTOR,
-        ).status
-        == "supported"
+    finding = _finding(
+        path="src/big.ts",
+        line=1,
+        title="Foo is not imported",
+        body="Missing Foo.",
     )
+    assert audit_candidate_claim(finding, oversized, claim_syntax=INSPECTOR).status == "supported"
     assert any("exceeds" in rec.message for rec in caplog.records)
+
+
+def test_python_lambda_in_call_argument_does_not_disable_try_body_check() -> None:
+    """A trailing lambda in a call argument does not prevent enclosing try detection."""
+    py_source = b"try:\n    x = sorted(items, key=lambda i: i.k)\nexcept Exception:\n    pass\n"
+    finding = _finding(
+        path="app/a.py",
+        line=2,
+        title="Call not in try/except",
+        body="sorted(...) call is not wrapped in a try/except.",
+    )
+    assert audit_candidate_claim(finding, py_source).status == "contradicted"
+
+
+def test_comparative_claim_with_empty_ranges_or_no_lines_fails_as_insufficient_context() -> None:
+    """Empty line map fails as insufficient context and avoids whole-block searches."""
+    from app.modules.reviews.application.claim_verifier import ContextBlockSnippet
+
+    finding = _finding(
+        path="src/tools/starships.ts",
+        line=6,
+        title="Inconsistent parameter naming",
+        body="Other tools use `idOrUrl`.",
+        evidence_refs=[
+            EvidenceRef(
+                block_id="b-empty-lines",
+                start_line=1,
+                end_line=5,
+            ),
+        ],
+    )
+    snippets = {
+        "b-empty-lines": ContextBlockSnippet(
+            path="src/tools/other.ts",
+            lines={},
+            text="function test() { const idOrUrl = 1; }\n",
+        ),
+    }
+    result = audit_candidate_claim(
+        finding,
+        b"const x = 1;\n",
+        context_blocks=snippets,
+    )
+    assert result.status == "insufficient_context"
 
 
 def test_iterative_try_walk_handles_deep_nesting_and_modified_without_full_file() -> None:

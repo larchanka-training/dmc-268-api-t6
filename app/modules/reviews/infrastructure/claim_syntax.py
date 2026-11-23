@@ -28,6 +28,9 @@ from app.modules.reviews.application.ast_symbols import (
     TS_JS_LANGUAGES,
     AstLanguage,
 )
+from app.modules.reviews.application.claim_verifier import (
+    TryCatchSpan,
+)
 from app.modules.reviews.infrastructure.tree_sitter_facts import (
     _grammar,
 )
@@ -140,7 +143,7 @@ class TreeSitterClaimSyntaxInspector:
         language: AstLanguage,
         source: bytes,
         target_line: int,
-    ) -> tuple[bool, int | None, int | None] | None:
+    ) -> TryCatchSpan | None:
         """Check whether ``target_line`` is in a caught ``try`` body, bounded by functions."""
         if language not in TS_JS_LANGUAGES or target_line < 1:
             return None
@@ -158,7 +161,7 @@ class TreeSitterClaimSyntaxInspector:
         target_row = target_line - 1
         lines = source.splitlines()
         if target_row < 0 or target_row >= len(lines):
-            return (False, None, None)
+            return TryCatchSpan(in_try=False)
 
         line = lines[target_row]
         col = len(line) - len(line.lstrip())
@@ -179,14 +182,14 @@ class TreeSitterClaimSyntaxInspector:
                 return None
             if curr.type in _FUNCTION_BOUNDARY_TYPES:
                 # Code inside nested function/callback/lambda is not caught by outer try block
-                return (False, None, None)
+                return TryCatchSpan(in_try=False)
             if curr.type == "try_statement":
                 span = _matched_try_span(curr, target_row)
                 if span is not None:
-                    return (True, span[0], span[1])
+                    return TryCatchSpan(in_try=True, try_start=span[0], try_end=span[1])
             curr = curr.parent
 
-        return (False, None, None)
+        return TryCatchSpan(in_try=False)
 
     def _within_source_bounds(self, path: str, source: bytes) -> bool:
         if len(source) > self._max_source_bytes:

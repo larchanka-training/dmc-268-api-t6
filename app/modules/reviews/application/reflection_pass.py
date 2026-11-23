@@ -1207,12 +1207,6 @@ def filter_verified_candidates(
                 context_blocks=context_blocks,
             )
             if audit.status != "supported":
-                _LOGGER.info(
-                    "Candidate %s dropped by claim audit (%s): %s",
-                    cand.candidate_id,
-                    audit.status,
-                    audit.reason,
-                )
                 rejected.append(
                     (cand, audit.status, audit.reason or "Candidate claim contradicted")
                 )
