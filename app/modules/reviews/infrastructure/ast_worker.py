@@ -13,9 +13,13 @@ from __future__ import annotations
 import base64
 import json
 import math
-import resource
 import sys
 import time
+
+try:
+    import resource
+except ImportError:
+    resource = None  # type: ignore[assignment]
 
 from app.modules.reviews.application.ast_symbols import (
     MAX_PARSE_CPU_SECONDS_PER_FILE,
@@ -39,6 +43,8 @@ def _disable_core_dumps() -> None:
     SIGXCPU from the CPU limit dumps core by default, and so does a parser crash. The hard
     limit goes to zero too, since the worker never needs a core.
     """
+    if resource is None:
+        return
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
@@ -48,6 +54,8 @@ def _limit_memory() -> None:
     The current size is read from ``/proc``, which only Linux has. Elsewhere (a developer
     machine) the cap is skipped: the parent still stops a worker that does not answer.
     """
+    if resource is None:
+        return
     try:
         with open("/proc/self/statm", encoding="ascii") as statm:
             current = int(statm.read().split()[0]) * resource.getpagesize()
@@ -78,6 +86,8 @@ def _limit_cpu() -> None:
     the soft limit the kernel sends SIGXCPU, which ends the worker; the parent handles that
     like any worker that died.
     """
+    if resource is None:
+        return
     _, hard = resource.getrlimit(resource.RLIMIT_CPU)
     soft = _cpu_soft_limit(time.process_time())
     if hard != resource.RLIM_INFINITY:

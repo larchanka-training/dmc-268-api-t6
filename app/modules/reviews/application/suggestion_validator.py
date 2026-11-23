@@ -80,7 +80,7 @@ async def preload_suggestion_blobs(
     blobs: dict[str, bytes | None] = {}
     for finding in output.findings:
         if (
-            finding.suggestion is None
+            not finding.suggestion
             or finding.path in blobs
             or language_for_path(finding.path) is None
         ):

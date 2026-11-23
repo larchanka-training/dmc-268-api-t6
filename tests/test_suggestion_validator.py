@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import logging
 from dataclasses import replace
@@ -10,10 +11,13 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+import tree_sitter_python
+from tree_sitter import Language, Parser
 
 from app.modules.reviews.application.ast_symbols import (
     MAX_SOURCE_BYTES,
     AstLanguage,
+    SuggestionParser,
     SuggestionRejectionReason,
     SuggestionValidationRequest,
     SuggestionValidationResult,
@@ -43,7 +47,10 @@ from app.modules.reviews.application.suggestion_validator import (
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
 from app.modules.reviews.infrastructure.blob_cache import InMemoryBlobCache
 from app.modules.reviews.infrastructure.suggestion_ast import (
+    _BEFORE_STATS_CACHE,
+    _get_before_stats,
     apply_suggestion_to_text,
+    count_syntax_errors,
     validate_suggestion_tree,
 )
 from tests.verifier_pipeline_fakes import InProcessSuggestionParser
@@ -711,3 +718,95 @@ class TestValidatorAllNineReasonsAndCaplog:
             )
         assert res.findings[0].suggestion == "  return 2;"
         assert not [r for r in caplog.records if "suggestion_validator" in r.name]
+
+    def test_count_syntax_errors_counts_missing_node_without_error_nodes(self) -> None:
+        p = Parser()
+        p.language = Language(tree_sitter_python.language())
+        tree = p.parse(b"def f(: pass\n")
+        nodes = []
+        stack = [tree.root_node]
+        while stack:
+            cur = stack.pop()
+            nodes.append(cur)
+            stack.extend(cur.children)
+        assert not any(n.is_error for n in nodes)
+        assert any(n.is_missing for n in nodes)
+        assert count_syntax_errors(tree.root_node) == 1
+
+    def test_empty_suggestion_does_not_call_parser_or_load_blobs(self) -> None:
+        code = "export function f(): number {\n  return 1;\n}\n"
+        diff_map = _diff_map_for("src/a.ts")
+        cache = InMemoryBlobCache()
+        asyncio.run(cache.put(BlobCacheKey(_REPO_ID, _BLOB_SHA), code, ttl=timedelta(hours=1)))
+        output = _output("src/a.ts", 2, "")
+        preloaded = asyncio.run(
+            preload_suggestion_blobs(output, diff_map=diff_map, blob_cache=cache)
+        )
+        assert preloaded == {}
+
+        class _RecordingParser(SuggestionParser):
+            def __init__(self) -> None:
+                self.seen_requests: list[object] = []
+
+            async def validate_suggestions(
+                self, requests: tuple[SuggestionValidationRequest, ...]
+            ) -> dict[str, SuggestionValidationResult]:
+                self.seen_requests.extend(requests)
+                return {}
+
+            async def aclose(self) -> None:
+                pass
+
+        parser = _RecordingParser()
+        res = asyncio.run(
+            validate_review_suggestions(
+                output,
+                diff_map=diff_map,
+                preloaded_blobs=preloaded,
+                parser=parser,
+                run_id=_RUN_ID,
+            )
+        )
+        assert parser.seen_requests == []
+        assert res.findings[0].suggestion == ""
+
+    def test_before_stats_cache_avoids_redundant_parsing_for_same_file(self) -> None:
+        _BEFORE_STATS_CACHE.clear()
+        source = b"def f():\n    return 1\n"
+        orig_text = source.decode("utf-8")
+
+        class _CountingParser:
+            def __init__(self, inner: Parser) -> None:
+                self.inner = inner
+                self.parse_calls = 0
+
+            def parse(self, b: bytes) -> object:
+                self.parse_calls += 1
+                return self.inner.parse(b)
+
+        p = Parser()
+        p.language = Language(tree_sitter_python.language())
+        counting = _CountingParser(p)
+
+        stats1 = _get_before_stats(counting, AstLanguage.PYTHON, source, orig_text)  # type: ignore[arg-type]
+        assert counting.parse_calls == 1
+
+        stats2 = _get_before_stats(counting, AstLanguage.PYTHON, source, orig_text)  # type: ignore[arg-type]
+        assert counting.parse_calls == 1
+        assert stats1 == stats2
+
+    def test_python_suggestion_syntax_error_not_fatal_if_tree_sitter_reports_no_increase(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        code = b"def f():\n    return 1\n"
+        suggestion = "    return 2"
+        real_parse = ast.parse
+
+        def mock_parse(text: str, *args: object, **kwargs: object) -> ast.AST:
+            if "return 2" in text:
+                raise SyntaxError("simulated future python syntax")
+            return real_parse(text)
+
+        monkeypatch.setattr(ast, "parse", mock_parse)
+        res = validate_suggestion_tree(AstLanguage.PYTHON, code, 2, 2, suggestion)
+        assert res.is_valid is True

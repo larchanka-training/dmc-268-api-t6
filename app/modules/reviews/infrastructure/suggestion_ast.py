@@ -159,11 +159,6 @@ def count_duplicate_nested_conditions(root: Node) -> int:
     return count
 
 
-def check_duplicate_nested_condition(root: Node, sugg_start: int, sugg_end: int) -> bool:
-    """Legacy helper returning True if any duplicate nested condition exists."""
-    return count_duplicate_nested_conditions(root) > 0
-
-
 _BEFORE_STATS_CACHE: dict[tuple[AstLanguage, bytes], tuple[int, int, bool]] = {}
 
 
@@ -227,13 +222,13 @@ def validate_suggestion_tree(
             detail=f"Tree-sitter parse failed: {exc}",
         )
 
-    new_valid = True
+    py_exc: Exception | None = None
     if language is AstLanguage.PYTHON:
         try:
             ast.parse(new_text)
         except (SyntaxError, ValueError, MemoryError, RecursionError) as exc:
-            new_valid = False
-            if orig_valid:
+            py_exc = exc
+            if orig_valid and isinstance(exc, IndentationError):
                 return SuggestionValidationResult(
                     is_valid=False,
                     reason=SuggestionRejectionReason.SYNTAX_ERROR,
@@ -250,18 +245,21 @@ def validate_suggestion_tree(
             detail=f"Tree-sitter parse failed: {exc}",
         )
 
-    if language is not AstLanguage.PYTHON or not (orig_valid and new_valid):
-        errors_after = count_syntax_errors(tree_after.root_node)
-
-        if errors_after > errors_before:
-            return SuggestionValidationResult(
-                is_valid=False,
-                reason=SuggestionRejectionReason.SYNTAX_ERROR,
-                detail=(
-                    f"Suggestion introduces syntax errors: "
-                    f"{errors_after} errors after vs {errors_before} before"
-                ),
+    errors_after = count_syntax_errors(tree_after.root_node)
+    if errors_after > errors_before:
+        detail = (
+            f"Python syntax error after applying suggestion: {py_exc}"
+            if py_exc is not None
+            else (
+                f"Suggestion introduces syntax errors: "
+                f"{errors_after} errors after vs {errors_before} before"
             )
+        )
+        return SuggestionValidationResult(
+            is_valid=False,
+            reason=SuggestionRejectionReason.SYNTAX_ERROR,
+            detail=detail,
+        )
 
     dups_after = count_duplicate_nested_conditions(tree_after.root_node)
     if dups_after > dups_before:
