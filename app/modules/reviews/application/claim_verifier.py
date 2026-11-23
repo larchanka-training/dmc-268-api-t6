@@ -26,9 +26,10 @@ Scope and explicit boundaries (issue #445):
        outside deterministic AST audit scope.
 - Parser safety and performance bounds:
   - Synchronous C-parsers (CPython ``ast.parse`` and Tree-sitter C extension) run in-process on
-    already in-memory source buffers bounded by pre-flight ``MAX_SOURCE_BYTES`` (512 KiB) checks,
-    returning fail-open with logging on memory or syntax errors.
-  - AST traversals are bound by monotonic deadlines (``MAX_PARSE_CPU_SECONDS_PER_FILE``).
+    already in-memory source buffers bounded by pre-flight ``MAX_SOURCE_BYTES`` (262_144 bytes,
+    256 KiB) checks, returning fail-open with logging on memory or syntax errors.
+  - In the Python AST branch, the source size limit is the sole bound; in the Tree-sitter branch,
+    traversals are additionally bound by monotonic deadlines (``MAX_PARSE_CPU_SECONDS_PER_FILE``).
   - ``MAX_PARSER_MEMORY_BYTES`` governs the separate background ``ast_worker`` subprocess.
 - Explicitly outside deterministic audit scope: logical assertions without single-block
   syntactic truth (such as ``"accepts at most one parameter"`` / ``"exactly one"``) and AST
@@ -432,24 +433,29 @@ def _audit_try_catch_claim(
     return ClaimAuditResult(status="supported")
 
 
-_PRIMARY_DEFECT_TITLE_KEYWORDS = frozenset(
-    {
-        "ssrf",
-        "injection",
-        "vulnerability",
-        "vulnerable",
-        "cve",
-        "overflow",
-        "unhandled",
-        "crash",
-        "leak",
-        "dos",
-        "rce",
-        "auth",
-        "security",
-        "sanitization",
-        "bypass",
-    }
+_PRIMARY_DEFECT_TITLE_PATTERNS = (
+    "ssrf",
+    "injection",
+    "vulnerability",
+    "vulnerable",
+    "cve",
+    "overflow",
+    "unhandled",
+    "crash",
+    "leak",
+    "dos",
+    "rce",
+    "auth",
+    "authentication",
+    "authorization",
+    "security",
+    "sanitization",
+    "bypass",
+)
+
+_PRIMARY_DEFECT_TITLE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(k) for k in sorted(_PRIMARY_DEFECT_TITLE_PATTERNS)) + r")\b",
+    re.IGNORECASE,
 )
 
 
@@ -461,8 +467,7 @@ def _is_tool_path(path: str | None) -> bool:
 
 
 def _is_primary_defect_finding(finding: ReviewFindingV2) -> bool:
-    title_lower = finding.title.lower()
-    return any(kw in title_lower for kw in _PRIMARY_DEFECT_TITLE_KEYWORDS)
+    return _PRIMARY_DEFECT_TITLE_RE.search(finding.title) is not None
 
 
 def _audit_comparative_external_claim(
@@ -527,15 +532,6 @@ def _audit_comparative_external_claim(
                 break
 
     if matched_external:
-        return ClaimAuditResult(status="supported")
-
-    if _is_primary_defect_finding(finding):
-        _LOGGER.info(
-            "Retaining primary defect candidate %s:%s despite unverified comparative claim '%s'",
-            finding.path,
-            finding.line,
-            param,
-        )
         return ClaimAuditResult(status="supported")
 
     if is_tool_claim and not has_tool_block:

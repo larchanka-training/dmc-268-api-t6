@@ -14,6 +14,7 @@ import pytest
 from app.modules.reviews.application.ast_symbols import MAX_SOURCE_BYTES
 from app.modules.reviews.application.claim_verifier import (
     ClaimAuditResult,
+    ContextBlockSnippet,
     audit_candidate_claim,
     collect_context_blocks,
     extract_full_source_bytes,
@@ -62,7 +63,8 @@ REPO_ID = UUID("00000000-0000-0000-0000-000000004451")
 RUN_ID = UUID("00000000-0000-0000-0000-000000004452")
 INSPECTOR = TreeSitterClaimSyntaxInspector()
 
-# Authentic excerpt structure from larchanka/swapi-mcp-example#3 (commit 8bc8b5d) src/tools/films.ts
+# Synthetic excerpt structure based on larchanka/swapi-mcp-example#3
+# (commit 8bc8b5d) src/tools/films.ts
 SWAPI_FILMS_TS = "\n".join(
     [
         'import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";',
@@ -213,6 +215,7 @@ SWAPI_FILMS_TS = "\n".join(
     ]
 )
 
+# Synthetic fixture for comparative tool citation tests (not authentic SWAPI source)
 SWAPI_VEHICLES_TS = "\n".join(
     [
         'import { z } from "zod";',
@@ -1051,7 +1054,7 @@ def test_iterative_try_walk_handles_deep_nesting_and_modified_without_full_file(
 
 
 def test_ac3_true_findings_and_out_of_scope_logic_remain_supported() -> None:
-    """Authentic SWAPI security/coverage findings and out-of-scope logical claims pass audit."""
+    """SWAPI security/coverage findings and out-of-scope logical claims pass audit."""
     ctx = _context(
         changed_files=(
             ChangedFile(
@@ -1117,7 +1120,7 @@ def test_ac3_true_findings_and_out_of_scope_logic_remain_supported() -> None:
             ],
         ),
     )
-    # Authentic test error branch findings from swapi-mcp-example#3
+    # Test error branch findings from swapi-mcp-example#3
     test_search_people_err = _candidate(
         "c-test-api",
         _finding(
@@ -1488,3 +1491,46 @@ def test_python_try_header_line_is_recognized_as_enclosed() -> None:
     )
     res = audit_candidate_claim(finding, py_source)
     assert res.status == "contradicted"
+
+
+def test_inconsistent_resource_parameter_naming_is_not_treated_as_primary_defect() -> None:
+    """Title with substring 'rce' (in 'resource') does not trigger primary defect bypass."""
+    finding = _finding(
+        path="src/tools/films.ts",
+        line=100,
+        title="Inconsistent resource parameter naming",
+        body="Other tools use idOrUrl parameter.",
+        evidence_refs=[
+            EvidenceRef(block_id=file_block_id("src/tools/films.ts"), start_line=100, end_line=105)
+        ],
+    )
+    res = audit_candidate_claim(finding, SWAPI_FILMS_TS.encode("utf-8"), claim_syntax=INSPECTOR)
+    assert res.status == "insufficient_context"
+
+
+def test_primary_defect_finding_with_bad_external_ref_is_not_bypassed() -> None:
+    """When external references are present but omit param, primary defect does not bypass."""
+    other_block = ContextBlockSnippet(
+        path="src/tools/vehicles.ts",
+        text="export const x = 1;",
+        lines={1: "export const x = 1;"},
+    )
+    bid = file_block_id("src/tools/vehicles.ts")
+    finding = _finding(
+        path="src/tools/films.ts",
+        line=100,
+        title="SSRF vulnerability in fetchFilm",
+        body="Other tools use idOrUrl parameter.",
+        evidence_refs=[
+            EvidenceRef(block_id=file_block_id("src/tools/films.ts"), start_line=100, end_line=105),
+            EvidenceRef(block_id=bid, start_line=1, end_line=1),
+        ],
+    )
+    res = audit_candidate_claim(
+        finding,
+        SWAPI_FILMS_TS.encode("utf-8"),
+        claim_syntax=INSPECTOR,
+        context_blocks={bid: other_block},
+    )
+    assert res.status == "insufficient_context"
+    assert "omit it" in (res.reason or "")

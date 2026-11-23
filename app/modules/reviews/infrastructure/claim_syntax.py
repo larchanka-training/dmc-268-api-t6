@@ -6,12 +6,12 @@ In-process design justification:
 - Bounded operations: Performs localized, deterministic AST queries: extracting
   top-level import binding names and walking the ancestor chain of a single target line
   for enclosing try/catch blocks.
-- Safety boundaries: Guarded by `MAX_SOURCE_BYTES` (512 KiB) before parsing, and
+- Safety boundaries: Guarded by `MAX_SOURCE_BYTES` (262_144 bytes, 256 KiB) before parsing, and
   monotonic CPU deadlines (`MAX_PARSE_CPU_SECONDS_PER_FILE`) during AST traversals.
 - Subprocess rationale: Spawning an external `ast_worker` subprocess or IPC serialization
   for every candidate finding in the reflection pass introduces IPC round-trip latency
   and process scheduling overhead, while parsing already in-memory buffers with C
-  tree-sitter bindings executes synchronously in sub-millisecond time. Tree-sitter's
+  tree-sitter bindings executes synchronously without IPC overhead. Tree-sitter's
   C parser handles memory internally and errors are caught safely fail-open.
 """
 
