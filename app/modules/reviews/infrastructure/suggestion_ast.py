@@ -246,7 +246,8 @@ def validate_suggestion_tree(
         )
 
     errors_after = count_syntax_errors(tree_after.root_node)
-    if errors_after > errors_before:
+    ast_confirms_valid = language is AstLanguage.PYTHON and orig_valid and py_exc is None
+    if errors_after > errors_before and not ast_confirms_valid:
         detail = (
             f"Python syntax error after applying suggestion: {py_exc}"
             if py_exc is not None

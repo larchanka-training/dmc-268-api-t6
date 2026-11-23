@@ -145,6 +145,8 @@ def _handle(line: str) -> dict[str, object]:
 
 
 def main() -> None:
+    if resource is None:
+        sys.stderr.write("resource module unavailable; running without OS limits\n")
     _disable_core_dumps()
     for language in AstLanguage:
         _grammar(language)
