@@ -15,6 +15,9 @@ from app.common.infrastructure.db.enums import LedgerKind
 from app.modules.auth.application.scope import AuthScope
 from app.modules.auth.infrastructure.current_user import SqlAlchemyCurrentUserRepository
 from app.modules.billing.infrastructure.models import CreditLedger
+from app.modules.integrations.gitlab.infrastructure.connection_store import (
+    SqlAlchemyGitLabConnectionStore,
+)
 from app.modules.repositories.infrastructure.models import ProviderInstallation
 from app.modules.reviews.infrastructure.metrics_summary import SqlAlchemyMetricsSummary
 from app.modules.workspaces.application.delete_workspace import (
@@ -71,6 +74,7 @@ def test_delete_workspace_postgres_forfeits_balance_and_records_tombstone(
                     reason="seed_grant",
                 )
             )
+            assert await SqlAlchemyGitLabConnectionStore(session).workspace_exists(WS_A) is True
 
         # 2. Execute forfeit and mark_deleted through real UnitOfWork and Store
         async with SqlAlchemyDeleteWorkspaceUnitOfWork(session_factory) as uow:
@@ -85,6 +89,7 @@ def test_delete_workspace_postgres_forfeits_balance_and_records_tombstone(
 
         # 3. Verify ledger balance = 0 and adjustment entry
         async with session_factory() as session:
+            assert await SqlAlchemyGitLabConnectionStore(session).workspace_exists(WS_A) is False
             store = SqlAlchemyDeleteWorkspaceStore(session)
             ws_after = await store.get_workspace_for_deletion(WS_A)
             assert ws_after is not None
