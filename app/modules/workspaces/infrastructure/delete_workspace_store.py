@@ -41,8 +41,8 @@ class SqlAlchemyDeleteWorkspaceStore(DeleteWorkspaceStore):
         return WorkspaceRecord(id=row.id, name=row.name, status=row.status)
 
     async def is_owner(self, workspace_id: UUID, user_id: int) -> bool:
+        """Fail closed until DB-backed Owner roles (#373, ADR 0002 §11.2, ADR 0003 §3.1) land."""
         del workspace_id, user_id
-        # Stub: role verification deferred to #373 (#545 scope agreement with tech lead)
         return False
 
     async def get_balance(self, workspace_id: UUID) -> Decimal:

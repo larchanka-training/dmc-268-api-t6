@@ -8,7 +8,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.common.infrastructure.db.enums import LedgerKind
@@ -35,7 +35,7 @@ from app.modules.workspaces.infrastructure.models import (
     Workspace,
 )
 from tests.delete_workspace_fakes import FakePaymentGateway
-from tests.portal_postgres import WS_A, WS_B, Env
+from tests.portal_postgres import INSTALL_B, WS_A, WS_B, Env
 
 pytest_plugins = ("tests.portal_postgres",)
 pytestmark = pytest.mark.integration
@@ -254,32 +254,16 @@ def test_oauth_link_after_deletion_does_not_resurrect_workspace(
         engine = portal_env.engine()
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-        installation_id = 998877
         user_id = 42
 
+        # Seed INSTALL_B with account_external_id and metadata for OAuth linking
         async with session_factory.begin() as session:
-            session.add(
-                Workspace(
-                    id=WS_B,
-                    name="Test Workspace B",
-                    status=WorkspaceStatus.ACTIVE,
-                    daily_budget_usd=Decimal("0"),
-                )
-            )
-            session.add(
-                ProviderInstallation(
-                    id=uuid4(),
-                    workspace_id=WS_B,
-                    provider="github",
-                    external_id=installation_id,
+            await session.execute(
+                update(ProviderInstallation)
+                .where(ProviderInstallation.id == INSTALL_B)
+                .values(
                     account_external_id=123,
-                    account_login="org-test",
-                )
-            )
-            session.add(
-                GitHubUserWorkspaceAccess(
-                    github_user_id=user_id,
-                    workspace_id=WS_B,
+                    provider_metadata={"account_login": "org-test"},
                 )
             )
 
@@ -291,11 +275,12 @@ def test_oauth_link_after_deletion_does_not_resurrect_workspace(
         await use_case.execute(
             workspace_id=WS_B,
             user_id=user_id,
-            confirmation_name="Test Workspace B",
+            confirmation_name="W",
         )
 
+        # Case 1: Same installation.id (reinstall/relink after workspace deletion)
         installation_snapshot = GitHubInstallation(
-            id=installation_id,
+            id=18,
             account_external_id=123,
             account_login="org-test",
         )
@@ -318,13 +303,41 @@ def test_oauth_link_after_deletion_does_not_resurrect_workspace(
             ).all()
             assert len(access_for_deleted) == 0
 
-            inst_deleted = (
+            access_for_new = (
                 await session.scalars(
-                    select(ProviderInstallation).where(ProviderInstallation.workspace_id == WS_B)
+                    select(GitHubUserWorkspaceAccess).where(
+                        GitHubUserWorkspaceAccess.workspace_id == linked_ws_id,
+                        GitHubUserWorkspaceAccess.github_user_id == user_id,
+                    )
                 )
-            ).first()
-            assert inst_deleted is not None
-            assert inst_deleted.deleted_at is not None
+            ).all()
+            assert len(access_for_new) == 1
+
+        # Case 2: New installation.id with same account_external_id (new installation OAuth)
+        new_installation_snapshot = GitHubInstallation(
+            id=998877,
+            account_external_id=123,
+            account_login="org-test",
+        )
+        async with session_factory() as session:
+            link_store = SqlAlchemyGitHubInstallationLinkStore(session)
+            ws_case2_id = await link_store.link(
+                user_id=user_id,
+                installation=new_installation_snapshot,
+            )
+            await session.commit()
+
+            assert ws_case2_id != WS_B
+            assert ws_case2_id != linked_ws_id
+
+            access_for_deleted2 = (
+                await session.scalars(
+                    select(GitHubUserWorkspaceAccess).where(
+                        GitHubUserWorkspaceAccess.workspace_id == WS_B
+                    )
+                )
+            ).all()
+            assert len(access_for_deleted2) == 0
 
         await engine.dispose()
 

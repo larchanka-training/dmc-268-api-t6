@@ -10,9 +10,11 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
-from app.bootstrap.reviews_api import get_delete_workspace
+from app.bootstrap.reviews_api import _UnconfiguredPaymentGateway, get_delete_workspace
 from app.main import app
 from app.modules.workspaces.application.delete_workspace import (
     DeleteWorkspace,
@@ -403,9 +405,6 @@ def test_delete_workspace_http_401_no_token() -> None:
 
 
 def test_get_delete_workspace_provider_503_without_resources() -> None:
-    from fastapi import HTTPException
-    from starlette.requests import Request
-
     dummy_app = type("App", (), {"state": type("State", (), {"reviews_api_resources": None})()})()
     request = Request({"type": "http", "app": dummy_app})
 
@@ -441,7 +440,6 @@ async def test_delete_workspace_real_provider_contract_validates_before_payment_
         is_owner_val=True,
     )
     uow = FakeDeleteWorkspaceUnitOfWork(store)
-    from app.bootstrap.reviews_api import _UnconfiguredPaymentGateway
 
     use_case = DeleteWorkspace(
         uow_factory=lambda: uow,
@@ -456,6 +454,9 @@ async def test_delete_workspace_real_provider_contract_validates_before_payment_
             confirmation_name="Acme",
             user_id=42,
         )
+    assert uow.committed is False
+    assert store.deleted is None
+    assert store.forfeited is None
 
     # 2. Non-owner raises NotWorkspaceOwner (403), NOT NotImplementedError
     store.is_owner_val = False
@@ -465,6 +466,9 @@ async def test_delete_workspace_real_provider_contract_validates_before_payment_
             confirmation_name="Acme",
             user_id=42,
         )
+    assert uow.committed is False
+    assert store.deleted is None
+    assert store.forfeited is None
     store.is_owner_val = True
 
     # 3. Name mismatch raises WorkspaceNameMismatch (422), NOT NotImplementedError
@@ -474,11 +478,18 @@ async def test_delete_workspace_real_provider_contract_validates_before_payment_
             confirmation_name="Wrong Name",
             user_id=42,
         )
+    assert uow.committed is False
+    assert store.deleted is None
+    assert store.forfeited is None
 
-    # 4. When checks pass it reaches ensure_configured() and raises NotImplementedError (500)
+    # 4. When checks pass it reaches ensure_configured() and raises NotImplementedError
+    # (500 until #372 lands)
     with pytest.raises(NotImplementedError):
         await use_case.execute(
             workspace_id=ws_id,
             confirmation_name="Acme",
             user_id=42,
         )
+    assert uow.committed is False
+    assert store.deleted is None
+    assert store.forfeited is None

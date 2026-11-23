@@ -165,20 +165,37 @@ class SqlAlchemyGitHubInstallationLinkStore:
                 ),
             )
             if created_installation_id is None:
-                if archive_workspace is None:
-                    await self._session.delete(workspace)
-                    await self._session.flush()
-                workspace_id = cast(
-                    UUID | None,
-                    await self._session.scalar(
-                        select(ProviderInstallation.workspace_id).where(
+                existing_active_ws = await self._session.scalar(
+                    select(ProviderInstallation.workspace_id)
+                    .join(Workspace, Workspace.id == ProviderInstallation.workspace_id)
+                    .where(
+                        ProviderInstallation.provider == "github",
+                        ProviderInstallation.external_id == installation.id,
+                        ProviderInstallation.deleted_at.is_(None),
+                        Workspace.status != WorkspaceStatus.DELETED,
+                    )
+                )
+                if existing_active_ws is not None:
+                    if archive_workspace is None:
+                        await self._session.delete(workspace)
+                        await self._session.flush()
+                    workspace_id = existing_active_ws
+                else:
+                    target_ws = archive_workspace or workspace.id
+                    await self._session.execute(
+                        update(ProviderInstallation)
+                        .where(
                             ProviderInstallation.provider == "github",
                             ProviderInstallation.external_id == installation.id,
                         )
-                    ),
-                )
-                if workspace_id is None:
-                    raise RuntimeError("concurrent GitHub installation link disappeared")
+                        .values(
+                            workspace_id=target_ws,
+                            deleted_at=None,
+                            account_external_id=installation.account_external_id,
+                            provider_metadata={"account_login": installation.account_login},
+                        )
+                    )
+                    workspace_id = target_ws
             else:
                 workspace_id = archive_workspace or workspace.id
 

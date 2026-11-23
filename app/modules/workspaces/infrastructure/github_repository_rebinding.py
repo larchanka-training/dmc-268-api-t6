@@ -15,6 +15,8 @@ from app.modules.repositories.infrastructure.rules_status import request_rules_r
 from app.modules.reviews.infrastructure.models import CodeChange, Run
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.workspaces.application.link_github_installations import GitHubInstallation
+from app.modules.workspaces.domain.status import WorkspaceStatus
+from app.modules.workspaces.infrastructure.models import Workspace
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,7 +34,12 @@ class SqlAlchemyGitHubRepositoryRebinding:
             (
                 await self._session.scalars(
                     select(ProviderInstallation)
-                    .where(ProviderInstallation.provider == "github", or_(*owners))
+                    .join(Workspace, Workspace.id == ProviderInstallation.workspace_id)
+                    .where(
+                        ProviderInstallation.provider == "github",
+                        or_(*owners),
+                        Workspace.status != WorkspaceStatus.DELETED,
+                    )
                     .order_by(ProviderInstallation.external_id)
                     .with_for_update(key_share=True)
                     .execution_options(populate_existing=True)
