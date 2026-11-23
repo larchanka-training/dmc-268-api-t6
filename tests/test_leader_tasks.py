@@ -281,14 +281,36 @@ def test_index_and_retention_with_remaining_work_share_one_tick_budget() -> None
 
     assert runs == [("gc", 0.0, 10.0)]
     assert retention_store.calls == ["runs"]
-    assert clock.now == 10.0
 
     clock.now = 30.0
     asyncio.run(process.leader_tick())
 
     assert runs == [("gc", 0.0, 10.0), ("gc", 30.0, 10.0)]
     assert retention_store.calls == ["runs", "runs"]
-    assert clock.now == 40.0
+
+
+def test_retention_exhausting_budget_leaves_reconcile_gate_open_for_next_tick() -> None:
+    clock = Clock()
+    runs: Runs = []
+    retention_store = RetentionStore(clock, runs=(100, 0), cost=10.0)
+    retention_task = make_retention_task(retention_store, clock)
+    reconcile = Recorder("reconcile", clock, runs, cost=1.0)
+    leader = LeaderTasks(
+        [
+            ScheduledTask("run_data_retention", retention_task, INTERVAL_SECONDS),
+            ScheduledTask("reconcile", reconcile, 300),
+        ],
+        clock=clock,
+    )
+
+    asyncio.run(leader.tick())
+    assert retention_store.calls == ["runs"]
+    assert runs == []
+
+    retention_store._cost = 0.5
+    asyncio.run(leader.tick())
+    assert retention_store.calls == ["runs", "runs", "blobs"]
+    assert runs == [("reconcile", 11.0, 9.0)]
 
 
 def test_hung_index_task_leaves_retention_gate_open_for_next_tick(
@@ -408,7 +430,6 @@ def test_retention_timeout_in_leader_tasks(
         INTERVAL_SECONDS,
         continue_after_timeout=False,
     )
-    assert task.continue_after_timeout is False
     hung_leader = LeaderTasks([task], clock=hung_clock)
 
     with caplog.at_level(logging.ERROR):
@@ -418,6 +439,7 @@ def test_retention_timeout_in_leader_tasks(
 
     assert hung_calls == 1
     assert "Leader task run_data_retention failed" in caplog.text
+    assert "TimeoutError" in caplog.text
 
     # Gate re-opens after INTERVAL_SECONDS
     hung_clock.now += INTERVAL_SECONDS

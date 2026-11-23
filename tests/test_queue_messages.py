@@ -720,20 +720,24 @@ def test_a_cancelled_leader_tick_skips_the_index_tasks() -> None:
 
 
 @pytest.mark.parametrize(
-    ("app", "names"),
+    ("app", "names", "expected"),
     [
         # Without the GitHub App `index_consumer` yields None: converge, GC and the TTL
         # purge only touch the database.
-        ({}, ["converge", "gc", "ttl"]),
+        ({}, ["converge", "gc", "ttl"], ["converge", "gc", "ttl", "run_data_retention"]),
         (
             {"GITHUB_APP_ID": "1", "GITHUB_APP_PRIVATE_KEY": "key"},
             ["converge", "dispatch", "gc", "ttl", "reconcile"],
+            ["converge", "dispatch", "gc", "ttl", "run_data_retention", "reconcile"],
         ),
     ],
     ids=["without-app", "with-app"],
 )
 def test_run_worker_hands_the_index_leader_tasks_to_the_worker_process(
-    monkeypatch: pytest.MonkeyPatch, app: dict[str, str], names: list[str]
+    monkeypatch: pytest.MonkeyPatch,
+    app: dict[str, str],
+    names: list[str],
+    expected: list[str],
 ) -> None:
     settings = WorkerSettings.from_environment(
         {
@@ -770,9 +774,6 @@ def test_run_worker_hands_the_index_leader_tasks_to_the_worker_process(
     assert (composed["github"] is None) == (not app)
     leader = composed["leader_tasks"]
     assert isinstance(leader, LeaderTasks)
-    expected = [name for name in names if name != "reconcile"] + ["run_data_retention"]
-    if "reconcile" in names:
-        expected.append("reconcile")
     assert [task.name for task in leader.tasks] == expected
     retention_task = next(task for task in leader.tasks if task.name == "run_data_retention")
     assert isinstance(retention_task.task, PurgeExpiredRunData)

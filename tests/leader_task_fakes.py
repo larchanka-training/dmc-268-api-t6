@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from app.common.application.leader_tasks import LeaderTasks, ScheduledTask
-from app.worker import WorkerProcess
+
+if TYPE_CHECKING:
+    from app.worker import WorkerProcess
 
 type Runs = list[tuple[str, float, float]]
 
@@ -79,9 +81,13 @@ def worker_process(
     stub: StubLeader | None = None,
     clock: Callable[[], float] | None = None,
 ) -> WorkerProcess:
+    from app.worker import WorkerProcess
+
     leader = stub or StubLeader()
     if isinstance(leader_tasks, LeaderTasks):
         tasks = leader_tasks
+        if clock is not None:
+            tasks._clock = clock
     elif clock is not None:
         tasks = LeaderTasks(leader_tasks, clock=clock)
     else:

@@ -1202,7 +1202,9 @@ async def _run_worker(
                 delays=delays,
                 # Order inside the shared 10s tick budget (#556): converge, dispatch, GC,
                 # TTL and hourly `run_data_retention` run first; `reconcile` runs last on
-                # remaining headroom (ADR 0001 §4-§6).
+                # remaining headroom (ADR 0001 §4-§6). During a large initial retention backlog
+                # (remains=True), retention consumes tick headroom, deferring reconcile until
+                # backlog drain is complete.
                 leader_tasks=LeaderTasks(
                     _order_leader_tasks(
                         [
