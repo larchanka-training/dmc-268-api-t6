@@ -12,6 +12,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -158,6 +159,19 @@ def test_jwt_tokens_are_scrubbed() -> None:
             "sk-abcdef1234567890",
             'Truncated key without scheme: Authorization: "***',
         ),
+        (
+            (
+                "API key without scheme with continued text: "
+                "Authorization: sk-abcdef1234567890 status=401"
+            ),
+            "sk-abcdef1234567890",
+            "API key without scheme with continued text: Authorization: ***",
+        ),
+        (
+            'Quoted key without scheme with space: Authorization: "sk-abc12345 foo"',
+            "sk-abc12345",
+            'Quoted key without scheme with space: Authorization: "***"',
+        ),
     ],
 )
 def test_authorization_headers_are_scrubbed(
@@ -177,6 +191,41 @@ def test_auth_quoted_pattern_redos_prevention(quote: str) -> None:
     formatter = JsonFormatter("test-service")
     entry = _format_record(formatter, payload)
     assert "***" in entry["message"]
+
+
+def test_auth_scrubbing_idempotence() -> None:
+    """Already-scrubbed authorization headers must remain unchanged and idempotent."""
+    formatter = JsonFormatter("test-service")
+    for raw in [
+        "Authorization: Bearer ***",
+        "Authorization: ***",
+        'Authorization: "***"',
+        'Authorization: "Bearer ***"',
+        "Authorization: Digest ***",
+        "Authorization: AWS4-HMAC-SHA256 ***",
+    ]:
+        entry1 = _format_record(formatter, raw)
+        entry2 = _format_record(formatter, entry1["message"])
+        assert entry1["message"] == raw
+        assert entry2["message"] == raw
+
+
+def test_auth_quoted_pattern_redos_spaces_prevention() -> None:
+    """Repeated spaces in unclosed quotes or after schemes must not cause backtracking."""
+    formatter = JsonFormatter("test-service")
+    payload1 = 'Authorization: "a' + " " * 20000 + 'x\n"'
+    t0 = time.perf_counter()
+    entry1 = _format_record(formatter, payload1)
+    duration1 = time.perf_counter() - t0
+    assert duration1 < 0.2
+    assert "***" in entry1["message"]
+
+    payload2 = 'Authorization: "Bearer ' + " " * 20000 + 'x\n"'
+    t0 = time.perf_counter()
+    entry2 = _format_record(formatter, payload2)
+    duration2 = time.perf_counter() - t0
+    assert duration2 < 0.2
+    assert "***" in entry2["message"]
 
 
 def test_configured_process_secrets_cached_at_init_and_non_secrets_preserved(

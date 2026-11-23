@@ -10,10 +10,10 @@ library or a later span cannot widen the boundary by accident. An exception leav
 as its type and its frames only (``safe_stack``), on spans and in logs alike: its message can
 quote a payload. Log records carry the formatted message (never their ``extra`` fields);
 ``JsonFormatter`` scrubs GitHub tokens, JWTs, ``Authorization`` credentials (schemes
-``Bearer``, ``Basic``, ``token``, ``Digest``, ``Negotiate`` and arbitrary schemes, unquoted
-values without scheme up to the end of the line, and quoted header values), and single-line
-configured process secret env values collected at init (multi-line PEM blocks are not
-scrubbed line-by-line).
+``Bearer``, ``Basic``, ``token``, ``Digest``, ``Negotiate``, ``AWS4-HMAC-SHA256``,
+``Hawk``, unquoted values without scheme up to the end of the line, and quoted header
+values), and single-line configured process secret env values collected at init (top-level
+string values from JSON dictionaries; multi-line PEM blocks are not scrubbed line-by-line).
 """
 
 from __future__ import annotations
@@ -110,7 +110,7 @@ def bind_run_id(run_id: UUID | str) -> Iterator[None]:
 
 # --- logs -----------------------------------------------------------------------------------
 
-_AUTH_SCHEMES = r"(?:Bearer|Basic|token|Digest|Negotiate|[A-Za-z0-9_-]+)[ \t]+"
+_AUTH_SCHEMES = r"(?:Bearer|Basic|token|Digest|Negotiate|AWS4-HMAC-SHA256|Hawk)[ \t]++"
 _AUTH_QUOTED_PATTERN = re.compile(
     r"""(?i)(["']?Authorization["']?\s*[:=]\s*)"""
     rf"""(?:(")(?:({_AUTH_SCHEMES}))?[^\r\n"\\]*(?:\\.[^\r\n"\\]*)*"|"""
@@ -121,7 +121,7 @@ _AUTH_FALLBACK_PATTERN = re.compile(
     r"""(?:"""
     rf"""(")(?:({_AUTH_SCHEMES}))?[^\r\n"]*$|"""
     rf"""(')(?:({_AUTH_SCHEMES}))?[^\r\n']*$|"""
-    rf"""(?:({_AUTH_SCHEMES}))?(?!\*\*\*(?:$|[\r\n]))[^\s"'][^\r\n]*"""
+    rf"""(?:({_AUTH_SCHEMES}))?[^\s"'][^\r\n]*"""
     r""")"""
 )
 _GITHUB_TOKEN_PATTERN = re.compile(
@@ -157,6 +157,10 @@ class ConfiguredSecrets(NamedTuple):
 
 
 def _parse_json_dict_secrets(trimmed: str, env_name: str) -> ConfiguredSecrets:
+    """Parse configured JSON dictionary secrets.
+
+    Обходятся только строковые значения верхнего уровня, формат keyring по docs/SECRETS.md плоский.
+    """
     if not trimmed.startswith("{"):
         return ConfiguredSecrets((), ())
     try:
