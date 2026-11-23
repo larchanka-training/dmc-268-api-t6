@@ -240,6 +240,7 @@ def test_exception_and_trace_metadata_ac3_ac5(
         trace.get_tracer("test.log.scrub").start_as_current_span("test-span"),
         bind_run_id(run_id),
     ):
+        ctx = trace.get_current_span().get_span_context()
         try:
             raise ValueError(f"Connection failed using {token} and {llm_val}")
         except ValueError as exc:
@@ -258,8 +259,8 @@ def test_exception_and_trace_metadata_ac3_ac5(
     assert entry["level"] == "ERROR"
     assert entry["run_id"] == str(run_id)
     assert entry["error_type"] == "ValueError"
-    assert len(entry["trace_id"]) == 32
-    assert len(entry["span_id"]) == 16
+    assert entry["trace_id"] == format(ctx.trace_id, "032x")
+    assert entry["span_id"] == format(ctx.span_id, "016x")
     assert "exc_info" in entry
     assert "ValueError" in entry["exc_info"]
     assert "***" in entry["message"]
