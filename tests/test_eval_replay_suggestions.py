@@ -209,7 +209,10 @@ def test_reconstruct_head_file_contents_git_apply_failure_records_warning(tmp_pa
     base = case_dir / "base"
     base.mkdir(parents=True)
     (base / "file.txt").write_text("line 1\nline 2\n", encoding="utf-8")
-    bad_patch = "--- a/file.txt\n+++ b/file.txt\n@@ -1,2 +1,2 @@\n-nonexistent line\n+replacement\n"
+    bad_patch = (
+        "--- a/file.txt\n+++ b/file.txt\n"
+        "@@ -1,2 +1,2 @@\n-wrong line\n line 2\n+replacement\n line 2\n"
+    )
     (case_dir / "diff.patch").write_text(bad_patch, encoding="utf-8")
     record = {
         "id": "FAIL-01",
@@ -220,8 +223,8 @@ def test_reconstruct_head_file_contents_git_apply_failure_records_warning(tmp_pa
     files = reconstruct_head_file_contents(case_dir, record, warnings=warnings)
     assert files == {}
     assert len(warnings) == 1
-    assert "case FAIL-01: " in warnings[0]
-    assert "patch failed" in warnings[0].lower() or "error" in warnings[0].lower()
+    assert warnings[0].startswith("case FAIL-01: ")
+    assert "file.txt" in warnings[0]
 
 
 def test_reconstruct_head_missing_base_or_patch_warning(tmp_path: Path) -> None:
@@ -238,6 +241,21 @@ def test_reconstruct_head_missing_base_or_patch_warning(tmp_path: Path) -> None:
     assert files == {}
     assert len(warnings) == 1
     assert "case MISSING-01: base directory or patch file missing" in warnings[0]
+
+
+def test_reconstruct_head_non_string_base_or_patch_path_warning(tmp_path: Path) -> None:
+    """When base_path or patch_path is not a string, a warning is recorded."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir(parents=True)
+    record = {
+        "id": "NONSTR-01",
+        "base_path": 123,
+        "patch_path": None,
+    }
+    warnings: list[str] = []
+    files = reconstruct_head_file_contents(case_dir, record, warnings=warnings)
+    assert files == {}
+    assert warnings == ["case NONSTR-01: base_path or patch_path missing"]
 
 
 def test_reconstruct_head_missing_apply_directory_warning(tmp_path: Path) -> None:
@@ -259,4 +277,5 @@ def test_reconstruct_head_missing_apply_directory_warning(tmp_path: Path) -> Non
     files = reconstruct_head_file_contents(case_dir, record, warnings=warnings)
     assert files == {}
     assert len(warnings) == 1
-    assert "case NO-DIR-01:" in warnings[0]
+    assert warnings[0].startswith("case NO-DIR-01: ")
+    assert "nonexistent_subdir/file.txt" in warnings[0]

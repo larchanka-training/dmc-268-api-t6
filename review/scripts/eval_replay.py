@@ -795,19 +795,11 @@ def reconstruct_head_file_contents(
         patch,
         apply_directory=apply_directory if isinstance(apply_directory, str) else None,
         check_only=False,
-        prefix="replay-head-",
     )
     if applied.returncode != 0:
         if warnings is not None:
             err_msg = applied.stderr.strip() or applied.stdout.strip() or "git apply failed"
             warnings.append(f"case {case_id}: {err_msg}")
-        return {}
-    if isinstance(apply_directory, str) and apply_directory and not files:
-        if warnings is not None:
-            warnings.append(
-                f"case {case_id}: apply_directory {apply_directory!r} "
-                "not found in reconstructed tree"
-            )
         return {}
     return files
 

@@ -137,14 +137,13 @@ def apply_case_patch(
     *,
     apply_directory: str | None = None,
     check_only: bool = False,
-    prefix: str = "dataset-case-",
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, bytes]]:
     """Apply a unified patch onto a copy of ``base``, optionally checking only.
 
     Returns ``(completed_process, file_bytes_by_relative_posix_path)``.
     When ``check_only=True`` or when git apply fails, the second tuple element is empty.
     """
-    with tempfile.TemporaryDirectory(prefix=prefix) as tmp:
+    with tempfile.TemporaryDirectory() as tmp:
         workdir = Path(tmp) / "worktree"
         shutil.copytree(base, workdir)
         command = ["git"]
@@ -157,6 +156,9 @@ def apply_case_patch(
             command.append("--whitespace=nowarn")
         if isinstance(apply_directory, str) and apply_directory:
             command.append(f"--directory={apply_directory}")
+        # GIT_CEILING_DIRECTORIES prevents git from walking above the temporary tree
+        # to find an enclosing repository, which would cause git apply to evaluate
+        # against the parent index rather than the isolated temporary worktree.
         env = {**_git_env(), "GIT_CEILING_DIRECTORIES": tmp}
         applied = subprocess.run(
             [*command, str(patch)],
@@ -174,15 +176,6 @@ def apply_case_patch(
             if isinstance(apply_directory, str) and apply_directory
             else workdir
         )
-        if not source_root.is_dir():
-            applied = subprocess.CompletedProcess(
-                applied.args,
-                1,
-                stdout=applied.stdout,
-                stderr=f"apply_directory {apply_directory!r} is not a directory in worktree",
-            )
-            return applied, {}
-
         files = {
             path.relative_to(source_root).as_posix(): path.read_bytes()
             for path in source_root.rglob("*")

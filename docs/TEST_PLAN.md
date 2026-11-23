@@ -162,11 +162,11 @@ Replay считает те же первые ответы в двух колон
   1. Файл отсутствует в реконструированном дереве головы (`file_contents is None` или `path not in file_contents`).
   2. Некорректные координаты строк: нецелый `line` или нецелый `start_line` (`isinstance(..., bool)` или `not isinstance(..., int)`).
   3. Неподдерживаемый язык файла (`language_for_path(path) is None`).
-  4. Не-UTF-8 байты файла (`UnicodeEncodeError` при кодировании).
-  5. Размер файла превышает `MAX_SOURCE_BYTES` (64 КБ).
+  4. `str`-содержимое файла, не кодируемое в UTF-8 (суррогаты, `UnicodeEncodeError` при кодировании).
+  5. Размер файла превышает `MAX_SOURCE_BYTES` (256 КБ, 262 144 байта).
   6. Инфраструктурные сбои анализатора: `NON_UTF8` или `WORKER_ERROR` из `validate_suggestion_tree`.
 - **`valid`**: предложение успешно применилось к исходному файлу и прошло Tree-sitter-валидацию (`validate_suggestion_tree` возвращает `is_valid=True`, синтаксис корректен, дубликаты условий не внесены).
-- **`invalid`**: синтаксическая ошибка после наложения (`SYNTAX_ERROR`), дублирование условий (`DUPLICATE_NESTED_CONDITION`), либо ошибка наложения замены на файл (`APPLICATION_FAILED`). Неверная реконструкция головы переводит предложения с `APPLICATION_FAILED` в `invalid`, поэтому точность реконструкции критична для расчёта `share`.
+- **`invalid`**: синтаксическая ошибка после наложения (`SYNTAX_ERROR`), дублирование условий (`DUPLICATE_CONDITION`), либо ошибка наложения замены на файл (`APPLICATION_FAILED`). Неверная реконструкция головы переводит предложения с `APPLICATION_FAILED` в `invalid`, поэтому точность реконструкции критична для расчёта `share`.
 
 Исторические baselines и замеры корпуса — в [test-plan/eval-baselines.md](test-plan/eval-baselines.md#327-метрика-корректности-suggestion-на-зафиксированном-baseline-446).
 

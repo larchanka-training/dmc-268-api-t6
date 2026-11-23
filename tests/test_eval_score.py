@@ -802,3 +802,16 @@ def test_score_cases_suggestion_worker_error_counts_as_unchecked(
     )
     report = score_cases([sc])
     assert report["suggestions"] == {"total": 0, "valid": 0, "unchecked": 1, "share": None}
+
+
+def test_score_cases_application_failed_counts_as_invalid() -> None:
+    # line=999 is past EOF of a 2-line file, triggering APPLICATION_FAILED from
+    # apply_suggestion_to_text.
+    pred = {**finding(path="src/a.ts", line=999), "suggestion": "export const y = 2;"}
+    sc = case(
+        predictions=[pred],
+        file_contents={"src/a.ts": "export const x = 1;\nexport const z = 3;\n"},
+        added_by_path={"src/a.ts": {999}},
+    )
+    report = score_cases([sc])
+    assert report["suggestions"] == {"total": 1, "valid": 0, "unchecked": 0, "share": 0.0}
