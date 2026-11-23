@@ -51,7 +51,7 @@ from app.modules.reviews.application.run_delivery import RunDeliveryPointer
 from app.modules.reviews.application.try_enqueue_webhook_run import TryEnqueueWebhookRun
 from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from app.webhook_worker import WebhookReplayProvider
-from tests.telemetry_fakes import _reset_global_provider
+from tests.telemetry_fakes import reset_global_tracer_provider
 from tests.test_queue_messages import RUN, Delivery, pending
 from tests.test_review_run_worker import FakeRun, handler
 
@@ -73,7 +73,7 @@ def _texts(span: ReadableSpan) -> str:
 
 
 def test_without_an_endpoint_tracing_stays_off_and_nothing_is_exported() -> None:
-    _reset_global_provider()
+    reset_global_tracer_provider()
     try:
         assert configure_tracing("worker", {}) is None
         assert configure_tracing("worker", {"OTEL_EXPORTER_OTLP_ENDPOINT": "  "}) is None
@@ -81,7 +81,7 @@ def test_without_an_endpoint_tracing_stays_off_and_nothing_is_exported() -> None
         with telemetry.tracer().start_as_current_span("noop") as span:
             assert not span.get_span_context().is_valid
     finally:
-        _reset_global_provider()
+        reset_global_tracer_provider()
 
 
 def test_with_an_endpoint_spans_go_to_the_otlp_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -95,7 +95,7 @@ def test_with_an_endpoint_spans_go_to_the_otlp_path(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter", Exporter
     )
-    _reset_global_provider()
+    reset_global_tracer_provider()
     try:
         provider = configure_tracing("api", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318/"})
         assert provider is not None
@@ -103,7 +103,7 @@ def test_with_an_endpoint_spans_go_to_the_otlp_path(monkeypatch: pytest.MonkeyPa
         assert provider.resource.attributes["service.name"] == "api"
         telemetry.shutdown_tracing(provider)
     finally:
-        _reset_global_provider()
+        reset_global_tracer_provider()
 
 
 # --- data boundary ----------------------------------------------------------------------------
@@ -550,7 +550,7 @@ ERRORS = pytest.mark.parametrize(
 def wired() -> Iterator[Callable[[], list[ReadableSpan]]]:
     """``configure_tracing`` as the services call it, with an in-memory exporter behind it."""
     exporter = InMemorySpanExporter()
-    _reset_global_provider()
+    reset_global_tracer_provider()
     provider = configure_tracing("worker", {}, exporter=exporter)
     assert provider is not None
 
@@ -560,7 +560,7 @@ def wired() -> Iterator[Callable[[], list[ReadableSpan]]]:
 
     yield exported
     provider.shutdown()
-    _reset_global_provider()
+    reset_global_tracer_provider()
 
 
 def test_the_production_exporter_drops_attributes_outside_the_allowlist(

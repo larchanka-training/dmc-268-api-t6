@@ -85,7 +85,7 @@ def test_jwt_tokens_are_scrubbed() -> None:
         (
             "Sending request with Authorization: Bearer raw-secret-value-123 to endpoint",
             "raw-secret-value-123",
-            "Sending request with Authorization: Bearer *** to endpoint",
+            "Sending request with Authorization: Bearer ***",
         ),
         (
             "Basic auth header: Authorization: Basic dXNlcjpwYXNzd29yZA==",
@@ -100,7 +100,7 @@ def test_jwt_tokens_are_scrubbed() -> None:
         (
             'Quoted scheme payload: {"Authorization": "Digest username=\\"x\\", response=\\"y\\""}',
             "response=",
-            'Quoted scheme payload: {"Authorization": "***"}',
+            'Quoted scheme payload: {"Authorization": "Digest ***"}',
         ),
         (
             "API key without scheme: Authorization: sk-abcdef1234567890",
@@ -113,9 +113,35 @@ def test_jwt_tokens_are_scrubbed() -> None:
             "Unquoted Digest auth: Authorization: Digest ***",
         ),
         (
+            (
+                'Unquoted Digest multi-param: Authorization: Digest username="u", '
+                'realm="r", nonce="n", response="abc123"'
+            ),
+            "response=",
+            "Unquoted Digest multi-param: Authorization: Digest ***",
+        ),
+        (
+            (
+                "AWS4 unquoted auth: Authorization: AWS4-HMAC-SHA256 Credential=AKIA/2026, "
+                "SignedHeaders=host, Signature=deadbeef"
+            ),
+            "deadbeef",
+            "AWS4 unquoted auth: Authorization: AWS4-HMAC-SHA256 ***",
+        ),
+        (
+            'Hawk unquoted auth: Authorization: Hawk id="x", mac="y"',
+            "id=",
+            "Hawk unquoted auth: Authorization: Hawk ***",
+        ),
+        (
             "Unquoted Negotiate auth: Authorization: Negotiate YII1234567890",
             "YII1234567890",
             "Unquoted Negotiate auth: Authorization: Negotiate ***",
+        ),
+        (
+            "Multiline with scheme and trailing line: Authorization: Bearer\nnext line",
+            "Bearer\nnext",
+            "Multiline with scheme and trailing line: Authorization: ***\nnext line",
         ),
         (
             'Truncated unclosed double quote: Authorization: "Bearer secret-payload-val',

@@ -19,9 +19,6 @@ def reset_global_tracer_provider() -> None:
     trace._TRACER_PROVIDER = None
 
 
-_reset_global_provider = reset_global_tracer_provider
-
-
 @pytest.fixture
 def spans() -> Iterator[InMemorySpanExporter]:
     """The exporter behind redaction, as production wires it."""
