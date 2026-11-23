@@ -23,7 +23,7 @@
 | Задача | Что открыть |
 | --- | --- |
 | Инкрементальный Run: активный прогон, scope дельты, coverage v2 и целостность | [INC §6.4](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#64-судьба-активного-run-при-synchronize-решение-доведение-до-публикации-и-снятие-противоречия-с-t15), [INC §6.5](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#65-определение-базы-разницы-diff-base-selection) |
-| Причины fallback, вердикт и QA инкремента | [INC §6.2](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#62-расширение-модели-данных-run-и-ddl-alembic), [INC §6.8](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#68-формирование-вердикта-check-run-и-агрегация-сохраняющихся-дефектов), [INC §6.9](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#69-сквозная-матрица-сценариев-для-регрессионного-тестирования-qa-qa-inc-01--qa-inc-28) |
+| Причины fallback, вердикт и QA инкремента | [INC §6.2](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#62-расширение-модели-данных-run-и-ddl-alembic), [INC §6.8](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#68-формирование-вердикта-check-run-и-агрегация-сохраняющихся-дефектов), [INC §6.9](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md#69-сквозная-матрица-сценариев-для-регрессионного-тестирования-qa-qa-inc-01--qa-inc-31) |
 | Как устроен код сейчас: от вебхука до опубликованного ревью | [ARCHITECTURE.md](ARCHITECTURE.md), целевая раскладка — [SD §4](SYSTEM_DESIGN.md#4-c4--уровень-2-контейнеры) |
 | Добавить или изменить `error_code` | [PIPELINE §6](PIPELINE_SPEC.md#6-каталог-error_code), [PIPELINE §5](PIPELINE_SPEC.md#5-сбои-и-деградация) |
 | Новая фаза или `tool` в `run_actions`, правка трейса | [PIPELINE §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions), [SD §6.2](SYSTEM_DESIGN.md#62-прогон-быстрый-путь) |
