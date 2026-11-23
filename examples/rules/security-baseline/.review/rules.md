@@ -70,20 +70,21 @@ from the token header, and must forbid `none`. Validation must verify `exp`, `is
 claims. A token verified by a service other than its issuer must be signed asymmetrically
 (`RS256` or `Ed25519`, never shared symmetric `HS256`), with the private key kept only
 by the issuing service. Refresh tokens for public clients must use rotation (one-time use)
-or sender-constraining (RFC 9700 §2.2.2). When DPoP (RFC 9449) is used, report a DPoP proof
-accepted without verifying its signature in the `DPoP` header as a security problem.
-Report a violation as a security problem.
+or sender-constraining (RFC 9700 §2.2.2). When DPoP (RFC 9449) is used, verifying the
+signature in the `DPoP` header is required. Report a violation as a security problem.
 
 ## Webhooks
 
 A webhook signature is verified over the raw bytes, before the body is parsed, with a
-constant-time comparison (such as `hmac.compare_digest` or `crypto.timingSafeEqual`). Report
-anything else as a security problem. GitHub signatures are verified with `X-Hub-Signature-256`.
-Replay protection: if the provider signs a timestamp header, reject deliveries older than
-the provider's tolerance window. GitHub does not sign a timestamp header; a repeated
-`X-GitHub-Delivery` is a redeliver: it is handled idempotently, not dropped before the first
-handling completes. Report a handler lacking signature verification or replay protection as a
-security problem.
+constant-time comparison (such as `hmac.compare_digest` or `crypto.timingSafeEqual`).
+GitHub signatures are verified with `X-Hub-Signature-256`. Replay protection: if the provider
+signs a timestamp header, reject deliveries older than the provider's tolerance window.
+GitHub sends no timestamp header: a repeated `X-GitHub-Delivery` is a redeliver, so the
+handler keys its work on that id and handles a repeat idempotently, not dropping it before
+the first handling completes. Report a handler that skips the signature check, verifies it
+after parsing the body or without a constant-time comparison, or ignores the signed
+timestamp or the `X-GitHub-Delivery` id where the provider supplies one, as a security
+problem.
 
 ## Cryptography
 
