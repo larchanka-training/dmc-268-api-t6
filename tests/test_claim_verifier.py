@@ -246,6 +246,7 @@ SWAPI_STARSHIPS_TS = "\n".join(
     ]
 )
 
+# Synthetic fixture representing swapi api-client snippets for audit testing
 SWAPI_API_CLIENT_TS = "\n".join(
     [
         "export class SwapiClient {",
@@ -551,79 +552,127 @@ def test_ts_aliased_imports_and_module_path_complaints(
     )
 
 
-def test_try_catch_stops_at_nested_function_boundaries_for_ts_and_python() -> None:
-    """Enclosing try/catch checks stop at nested function/lambda/callback boundaries."""
-    ts_source = (
-        b"try {\n"
-        b"  items.forEach(async (x) => {\n"
-        b"    await f(x);\n"
-        b"  });\n"
-        b"  function inner() {\n"
-        b"    boom();\n"
-        b"  }\n"
-        b"  syncWork();\n"
-        b"} catch (err) {\n"
-        b"  console.error(err);\n"
-        b"}\n"
-    )
-    # Inside callback / inner function: outer try does not catch runtime throws
-    f_cb = _finding(
-        path="src/a.ts",
-        line=3,
-        title="Uncaught async call",
-        body="await f(x) lacks a try/catch handler.",
-    )
-    f_inner = _finding(
-        path="src/a.ts",
-        line=6,
-        title="Uncaught boom",
-        body="boom() runs without a try/catch.",
-    )
-    # Direct try statement body child: enclosed
-    f_sync = _finding(
-        path="src/a.ts",
-        line=8,
-        title="Uncaught syncWork",
-        body="syncWork() runs without a try/catch.",
-    )
+_TS_NESTED_BOUNDARY_SOURCE = (
+    b"try {\n"
+    b"  items.forEach(async (x) => {\n"
+    b"    await f(x);\n"
+    b"  });\n"
+    b"  function inner() {\n"
+    b"    boom();\n"
+    b"  }\n"
+    b"  syncWork();\n"
+    b"} catch (err) {\n"
+    b"  console.error(err);\n"
+    b"}\n"
+)
 
-    assert audit_candidate_claim(f_cb, ts_source, claim_syntax=INSPECTOR).status == "supported"
-    assert audit_candidate_claim(f_inner, ts_source, claim_syntax=INSPECTOR).status == "supported"
-    assert audit_candidate_claim(f_sync, ts_source, claim_syntax=INSPECTOR).status == "contradicted"
+_PY_NESTED_BOUNDARY_SOURCE = (
+    b"try:\n"
+    b"    def inner():\n"
+    b"        boom()\n"
+    b"    fn = lambda x: (\n"
+    b"        bad(x)\n"
+    b"    )\n"
+    b"    sync_call()\n"
+    b"except Exception:\n"
+    b"    pass\n"
+)
 
-    py_source = (
-        b"try:\n"
-        b"    def inner():\n"
-        b"        boom()\n"
-        b"    fn = lambda x: (\n"
-        b"        bad(x)\n"
-        b"    )\n"
-        b"    sync_call()\n"
-        b"except Exception:\n"
-        b"    pass\n"
-    )
-    f_py_inner = _finding(
-        path="app/a.py",
-        line=3,
-        title="Uncaught boom",
-        body="boom() is not wrapped in a try/except.",
-    )
-    f_py_lambda = _finding(
-        path="app/a.py",
-        line=5,
-        title="Uncaught bad",
-        body="bad(x) runs without a surrounding try/except.",
-    )
-    f_py_sync = _finding(
-        path="app/a.py",
-        line=7,
-        title="Uncaught sync_call",
-        body="sync_call() runs without a surrounding try/except.",
-    )
+_PY_SINGLE_LINE_LAMBDA_SOURCE = b"try:\n    fn = lambda x: bad(x)\nexcept Exception:\n    pass\n"
 
-    assert audit_candidate_claim(f_py_inner, py_source).status == "supported"
-    assert audit_candidate_claim(f_py_lambda, py_source).status == "supported"
-    assert audit_candidate_claim(f_py_sync, py_source).status == "contradicted"
+
+@pytest.mark.parametrize(
+    ("finding", "source", "expected_status"),
+    [
+        (
+            _finding(
+                path="src/a.ts",
+                line=3,
+                title="Uncaught async call",
+                body="await f(x) lacks a try/catch handler.",
+            ),
+            _TS_NESTED_BOUNDARY_SOURCE,
+            "supported",
+        ),
+        (
+            _finding(
+                path="src/a.ts",
+                line=6,
+                title="Uncaught boom",
+                body="boom() runs without a try/catch.",
+            ),
+            _TS_NESTED_BOUNDARY_SOURCE,
+            "supported",
+        ),
+        (
+            _finding(
+                path="src/a.ts",
+                line=8,
+                title="Uncaught syncWork",
+                body="syncWork() runs without a try/catch.",
+            ),
+            _TS_NESTED_BOUNDARY_SOURCE,
+            "contradicted",
+        ),
+        (
+            _finding(
+                path="app/a.py",
+                line=3,
+                title="Uncaught boom",
+                body="boom() is not wrapped in a try/except.",
+            ),
+            _PY_NESTED_BOUNDARY_SOURCE,
+            "supported",
+        ),
+        (
+            _finding(
+                path="app/a.py",
+                line=5,
+                title="Uncaught bad",
+                body="bad(x) runs without a surrounding try/except.",
+            ),
+            _PY_NESTED_BOUNDARY_SOURCE,
+            "supported",
+        ),
+        (
+            _finding(
+                path="app/a.py",
+                line=7,
+                title="Uncaught sync_call",
+                body="sync_call() runs without a surrounding try/except.",
+            ),
+            _PY_NESTED_BOUNDARY_SOURCE,
+            "contradicted",
+        ),
+        (
+            _finding(
+                path="app/a.py",
+                line=2,
+                title="Uncaught bad",
+                body="bad(x) runs without a surrounding try/except.",
+            ),
+            _PY_SINGLE_LINE_LAMBDA_SOURCE,
+            "contradicted",
+        ),
+    ],
+    ids=[
+        "ts_async_callback_supported",
+        "ts_inner_function_supported",
+        "ts_sync_work_contradicted",
+        "py_inner_function_supported",
+        "py_multiline_lambda_supported",
+        "py_sync_call_contradicted",
+        "py_single_line_lambda_enclosing_statement_limitation",
+    ],
+)
+def test_try_catch_stops_at_nested_function_boundaries_for_ts_and_python(
+    finding: ReviewFindingV2, source: bytes, expected_status: str
+) -> None:
+    """Enclosing try/catch checks stop at nested function boundaries.
+
+    Includes single-line lambda assignment limitation.
+    """
+    assert audit_candidate_claim(finding, source, claim_syntax=INSPECTOR).status == expected_status
 
 
 @pytest.mark.parametrize(
@@ -711,6 +760,21 @@ def test_python_type_checking_and_local_imports_are_not_runtime_imports(
         (
             "RealVal in other dir",
             "RealVal is not imported in src/tools/people.",
+            "supported",
+        ),
+        (
+            "RealVal in the people tool",
+            "RealVal is not imported in the people tool.",
+            "supported",
+        ),
+        (
+            "RealVal in other tools",
+            "RealVal is not imported in other tools.",
+            "supported",
+        ),
+        (
+            "RealVal in the test handler",
+            "RealVal is not imported in the test handler.",
             "supported",
         ),
         (
@@ -985,8 +1049,6 @@ def test_python_lambda_in_call_argument_does_not_disable_try_body_check() -> Non
 
 def test_comparative_claim_with_empty_ranges_or_no_lines_fails_as_insufficient_context() -> None:
     """Empty line map fails as insufficient context and avoids whole-block searches."""
-    from app.modules.reviews.application.claim_verifier import ContextBlockSnippet
-
     finding = _finding(
         path="src/tools/starships.ts",
         line=6,
@@ -1015,8 +1077,8 @@ def test_comparative_claim_with_empty_ranges_or_no_lines_fails_as_insufficient_c
     assert result.status == "insufficient_context"
 
 
-def test_iterative_try_walk_handles_deep_nesting_and_modified_without_full_file() -> None:
-    """Deeply nested expressions do not hit RecursionError; sparse modified hunks fail open."""
+def test_iterative_try_walk_handles_deep_nesting() -> None:
+    """Deeply nested expressions do not hit RecursionError."""
     deep_expr = "(" * 2500 + "work()" + ")" * 2500
     deep_ts = (
         f"function run() {{\n  try {{\n    {deep_expr};\n  }} catch (e) {{\n    log(e);\n  }}\n}}\n"
@@ -1030,7 +1092,9 @@ def test_iterative_try_walk_handles_deep_nesting_and_modified_without_full_file(
         == "contradicted"
     )
 
-    # Sparse modified hunk (starts at L93) without L3 full_file: never fabricate fake L1 source!
+
+def test_sparse_modified_file_without_full_file_fails_open_as_insufficient_context() -> None:
+    """Sparse modified hunks without L3 full_file fail open as insufficient context."""
     sparse_cf = _hunk_changed_file("src/tools/films.ts", {93: ("added", "const x = 1;")})
     sparse_ctx = _context(changed_files=(sparse_cf,))
     assert extract_full_source_bytes(sparse_ctx, "src/tools/films.ts") is None
@@ -1424,27 +1488,30 @@ def test_execute_review_run_drops_false_claims_while_retaining_valid_findings() 
     assert len(no_ast_findings) == 3
 
 
-def test_multi_symbol_import_claims() -> None:
+@pytest.mark.parametrize(
+    ("source", "expected_status"),
+    [
+        (
+            b'import { ErrorCode } from "sdk";\nexport function f() {}\n',
+            "supported",
+        ),
+        (
+            b'import { ErrorCode, McpError } from "sdk";\nexport function f() {}\n',
+            "contradicted",
+        ),
+    ],
+    ids=["one_symbol_imported_supported", "both_symbols_imported_contradicted"],
+)
+def test_multi_symbol_import_claims(source: bytes, expected_status: str) -> None:
     """'A and B are not imported' is contradicted ONLY if both A and B are imported."""
-    # Source only imports ErrorCode, McpError is missing
-    source_one = b'import { ErrorCode } from "sdk";\nexport function f() {}\n'
-    # Source imports both
-    source_both = b'import { ErrorCode, McpError } from "sdk";\nexport function f() {}\n'
-
     finding = _finding(
         path="src/tools.ts",
         line=5,
         title="Missing imports",
         body="`McpError` and `ErrorCode` are not imported.",
     )
-
-    # When only ErrorCode is imported, claim is partially true -> supported (retained)
-    res_one = audit_candidate_claim(finding, source_one, claim_syntax=INSPECTOR)
-    assert res_one.status == "supported"
-
-    # When both are imported, claim is contradicted -> dropped
-    res_both = audit_candidate_claim(finding, source_both, claim_syntax=INSPECTOR)
-    assert res_both.status == "contradicted"
+    res = audit_candidate_claim(finding, source, claim_syntax=INSPECTOR)
+    assert res.status == expected_status
 
 
 def test_comparative_framework_name_without_quotes_remains_supported() -> None:

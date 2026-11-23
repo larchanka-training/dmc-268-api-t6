@@ -34,6 +34,14 @@ Scope and explicit boundaries (issue #445):
 - Explicitly outside deterministic audit scope: logical assertions without single-block
   syntactic truth (such as ``"accepts at most one parameter"`` / ``"exactly one"``) and AST
   checks on modified files lacking an ``L3 full_file`` block.
+- Limitations:
+  - Primary defect heuristic: ``_PRIMARY_DEFECT_TITLE_RE`` uses title keywords (param, parameter,
+    naming, typo, convention, etc.); comparative claims lacking these title keywords are not
+    filtered by primary defect logic.
+  - Single-line lambdas: single-line lambda definitions (e.g. ``fn = lambda x: bad(x)``) or arrow
+    functions on a single line within a ``try`` block match the enclosing assignment/statement and
+    are considered protected by ``try`` (verdict ``contradicted``), while multi-line forms correctly
+    recognize nested function boundaries (verdict ``supported``).
 """
 
 from __future__ import annotations
@@ -196,7 +204,7 @@ class ClaimSyntaxInspector(Protocol):
         language: AstLanguage,
         source: bytes,
         target_line: int,
-    ) -> tuple[bool, int | None, int | None] | TryCatchSpan | None: ...
+    ) -> TryCatchSpan | None: ...
 
 
 class ClaimAuditResult(NamedTuple):
@@ -351,13 +359,18 @@ def _audit_import_claim(
 
     claimed_symbols: list[str] = []
     file_name = file_path.rsplit("/", 1)[-1].lower()
+    base_name = file_name.rsplit(".", 1)[0]
     this_file_targets = {
         file_path.lower(),
         file_name,
+        base_name,
         "this",
         "this file",
         "current file",
+        "this module",
+        "current module",
     }
+    source_text = source_bytes.decode("utf-8", errors="replace")
     for match in matches:
         tail = text[match.end() :]
         if _QUALIFIED_NON_IN_TAIL.search(tail):
@@ -366,9 +379,15 @@ def _audit_import_claim(
         in_match = _IN_TARGET_TAIL.search(tail)
         if in_match:
             target = (in_match.group("target") or "").strip().lower()
-            is_local = target in this_file_targets or target.endswith(
-                ("tool", "tools", "function", "method", "handler", "endpoint")
-            )
+            is_local = target in this_file_targets
+            if not is_local:
+                m_tool = re.match(r"^(?:the\s+)?([A-Za-z0-9_$]+)\s+tools?$", target)
+                if m_tool:
+                    tool_ident = m_tool.group(1)
+                    if tool_ident not in {"other", "another", "each", "all"}:
+                        is_local = bool(
+                            re.search(rf"\b{re.escape(tool_ident)}\b", source_text, re.IGNORECASE)
+                        )
             if not is_local:
                 continue
 
@@ -421,11 +440,12 @@ def _audit_try_catch_claim(
     if result is None:
         return ClaimAuditResult(status="supported")
 
-    in_try = result.in_try if isinstance(result, TryCatchSpan) else result[0]
-    start_line = result.try_start if isinstance(result, TryCatchSpan) else result[1]
-    end_line = result.try_end if isinstance(result, TryCatchSpan) else result[2]
-    if in_try:
-        span_label = f"lines {start_line}-{end_line}" if start_line and end_line else "a try block"
+    if result.in_try:
+        span_label = (
+            f"lines {result.try_start}-{result.try_end}"
+            if result.try_start and result.try_end
+            else "a try block"
+        )
         return ClaimAuditResult(
             status="contradicted",
             reason=f"Line {line} is enclosed by {span_label} with catch/except in {file_path}",
@@ -588,12 +608,7 @@ def _is_line_in_try_body(
     if language == AstLanguage.PYTHON:
         return _is_python_line_in_try_body(file_path, source_bytes, target_line)
     if language in TS_JS_LANGUAGES and claim_syntax is not None:
-        res = claim_syntax.is_line_in_try_body(file_path, language, source_bytes, target_line)
-        if res is None:
-            return None
-        if isinstance(res, TryCatchSpan):
-            return res
-        return TryCatchSpan(in_try=res[0], try_start=res[1], try_end=res[2])
+        return claim_syntax.is_line_in_try_body(file_path, language, source_bytes, target_line)
     return None
 
 
