@@ -119,22 +119,34 @@ class SqlAlchemyGitHubInstallationLinkStore:
         )
         return tuple(result.all())
 
-    async def link(self, user_id: int, installation: GitHubInstallation) -> UUID:
-        archive_workspace = await SqlAlchemyGitHubRepositoryRebinding(
-            self._session
-        ).archived_workspace(installation)
-        existing = await self._session.scalar(
-            select(ProviderInstallation.workspace_id)
-            .join(Workspace, Workspace.id == ProviderInstallation.workspace_id)
-            .where(
-                ProviderInstallation.provider == "github",
-                ProviderInstallation.external_id == installation.id,
-                ProviderInstallation.deleted_at.is_(None),
-                Workspace.status != WorkspaceStatus.DELETED,
+    async def _get_installation_workspace(
+        self, external_id: int
+    ) -> tuple[UUID, WorkspaceStatus] | None:
+        row = (
+            await self._session.execute(
+                select(ProviderInstallation.workspace_id, Workspace.status)
+                .join(Workspace, Workspace.id == ProviderInstallation.workspace_id)
+                .where(
+                    ProviderInstallation.provider == "github",
+                    ProviderInstallation.external_id == external_id,
+                )
             )
-        )
-        workspace_id = existing
-        if workspace_id is None:
+        ).first()
+        if row is None:
+            return None
+        return (row.workspace_id, row.status)
+
+    async def link(self, user_id: int, installation: GitHubInstallation) -> UUID | None:
+        existing = await self._get_installation_workspace(installation.id)
+        if existing is not None:
+            ws_id, ws_status = existing
+            if ws_status == WorkspaceStatus.DELETED:
+                return None
+            workspace_id = ws_id
+        else:
+            archive_workspace = await SqlAlchemyGitHubRepositoryRebinding(
+                self._session
+            ).archived_workspace(installation)
             workspace = Workspace(
                 id=uuid4(),
                 name=f"GitHub: {installation.account_login}"[:255],
@@ -165,37 +177,16 @@ class SqlAlchemyGitHubInstallationLinkStore:
                 ),
             )
             if created_installation_id is None:
-                existing_active_ws = await self._session.scalar(
-                    select(ProviderInstallation.workspace_id)
-                    .join(Workspace, Workspace.id == ProviderInstallation.workspace_id)
-                    .where(
-                        ProviderInstallation.provider == "github",
-                        ProviderInstallation.external_id == installation.id,
-                        ProviderInstallation.deleted_at.is_(None),
-                        Workspace.status != WorkspaceStatus.DELETED,
-                    )
-                )
-                if existing_active_ws is not None:
-                    if archive_workspace is None:
-                        await self._session.delete(workspace)
-                        await self._session.flush()
-                    workspace_id = existing_active_ws
-                else:
-                    target_ws = archive_workspace or workspace.id
-                    await self._session.execute(
-                        update(ProviderInstallation)
-                        .where(
-                            ProviderInstallation.provider == "github",
-                            ProviderInstallation.external_id == installation.id,
-                        )
-                        .values(
-                            workspace_id=target_ws,
-                            deleted_at=None,
-                            account_external_id=installation.account_external_id,
-                            provider_metadata={"account_login": installation.account_login},
-                        )
-                    )
-                    workspace_id = target_ws
+                if archive_workspace is None:
+                    await self._session.delete(workspace)
+                    await self._session.flush()
+                conflicted = await self._get_installation_workspace(installation.id)
+                if conflicted is None:
+                    raise RuntimeError("concurrent GitHub installation link disappeared")
+                conflicted_ws_id, conflicted_status = conflicted
+                if conflicted_status == WorkspaceStatus.DELETED:
+                    return None
+                workspace_id = conflicted_ws_id
             else:
                 workspace_id = archive_workspace or workspace.id
 

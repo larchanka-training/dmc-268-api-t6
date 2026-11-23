@@ -41,7 +41,7 @@ class SqlAlchemyGitHubRepositoryRebinding:
                         Workspace.status != WorkspaceStatus.DELETED,
                     )
                     .order_by(ProviderInstallation.external_id)
-                    .with_for_update(key_share=True)
+                    .with_for_update(key_share=True, of=ProviderInstallation)
                     .execution_options(populate_existing=True)
                 )
             ).all()

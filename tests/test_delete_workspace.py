@@ -432,22 +432,20 @@ def test_get_delete_workspace_provider_503_without_resources() -> None:
     assert exc_info.value.detail == "Database is not configured"
 
 
-def test_delete_workspace_http_503_when_database_not_configured_without_override() -> None:
+def test_delete_workspace_http_503_when_database_not_configured_without_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     ws_id = uuid4()
     app.dependency_overrides.pop(get_delete_workspace, None)
     client = authenticated_test_client(app, workspace_ids=[ws_id], user_id=42)
-    old_resources = getattr(app.state, "reviews_api_resources", None)
-    try:
-        app.state.reviews_api_resources = None
-        resp = client.request(
-            "DELETE",
-            f"/api/workspaces/{ws_id}",
-            json={"confirmation_name": "Acme"},
-        )
-        assert resp.status_code == 503
-        assert resp.json()["detail"] == "Database is not configured"
-    finally:
-        app.state.reviews_api_resources = old_resources
+    monkeypatch.setattr(app.state, "reviews_api_resources", None, raising=False)
+    resp = client.request(
+        "DELETE",
+        f"/api/workspaces/{ws_id}",
+        json={"confirmation_name": "Acme"},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "Database is not configured"
 
 
 @pytest.mark.anyio
