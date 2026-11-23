@@ -267,7 +267,7 @@ jobs:
         run: uv run ruff format --check .
 
       - name: mypy
-        run: uv run mypy .
+        run: uv run mypy . .github/scripts/check_pr_hygiene.py
 
       - name: Unit tests (zero skips)
         # ReviewOutput schema and the gateway's answer parse path: 100% lines and branches (#33).

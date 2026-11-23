@@ -60,7 +60,12 @@ Sub-agents are spawned with the harness's sub-agent tool; for each harness see
 - **Select the first incomplete task** from the todo list.
 - **Spawn the `development` subagent** to implement that task.
 - The `development` agent must:
-  - Operate incrementally, writing a failing unit test first.
+  - Avoid editing files owned by another open PR without commenting there (`AGENTS.md`).
+  - Operate incrementally, writing a failing test first against genuine production code paths
+    with spec-derived assertions (never mock out the unit under test; do not pass unverified
+    artifacts—such as reports, datasets, or model responses—off as genuine, while spec-defined
+    test fixtures and stubs are allowed; verify permissive license before copying third-party code
+    or datasets).
   - Implement only enough code to pass the test.
   - Verify compile checks and execution results.
   - Mark the task done in the local todo list.
@@ -87,8 +92,13 @@ Sub-agents are spawned with the harness's sub-agent tool; for each harness see
   - Review `git status`, then stage per the pull-request skill (explicit paths for new files,
     `git add -u` for tracked; never `git add .`). Never stage the plan or the todo list:
     `docs/plans/` stays out of every commit and of the pull request (no `git add -f`).
-  - Commit files using the Conventional Commits syntax and push to origin.
-  - Execute `gh pr create` with standard metadata titles/descriptions to open the pull request.
+  - Verify overlapping open PRs have a heads-up comment (`AGENTS.md`), and all AC
+    are verified.
+  - Commit files using Conventional Commits (subject ≤72 chars, zero closing keywords) and
+    push to origin.
+  - Execute `gh pr create` following `.github/pull_request_template.md` (`What` / `Why` /
+    `How to verify` / `Refs`, `Before merge` checklist, title ≤72 chars, `Refs #N` / `Refs owner/repo#N`,
+    zero closing keywords).
   - Return the direct URL link to the pull request.
 
 ## Exit Criteria
