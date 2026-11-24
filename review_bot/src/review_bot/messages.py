@@ -72,9 +72,9 @@ def _chunk_messages(
     age_after: timedelta | None,
     *,
     max_len: int = TELEGRAM_MAX_MESSAGE_LEN,
-) -> list[tuple[str, list[Item]]]:
+) -> list[tuple[list[tuple[str, list[str]]], list[Item]]]:
     groups = _grouped_blocks(items, team, aliases, now, age_after)
-    chunks: list[tuple[str, list[Item]]] = []
+    chunks: list[tuple[list[tuple[str, list[str]]], list[Item]]] = []
     current_blocks: list[tuple[str, list[str]]] = []
     current_items: list[Item] = []
 
@@ -85,24 +85,34 @@ def _chunk_messages(
             else:
                 candidate = [*current_blocks, (name, [line])]
             if current_items and len(_render_chunk(header, candidate)) > max_len:
-                chunks.append((_render_chunk(header, current_blocks), current_items))
+                chunks.append((current_blocks, current_items))
                 current_blocks = [(name, [line])]
                 current_items = [item]
             else:
                 current_blocks = candidate
                 current_items.append(item)
     if current_items:
-        chunks.append((_render_chunk(header, current_blocks), current_items))
+        chunks.append((current_blocks, current_items))
     return chunks
 
 
 def batch_messages(
     items: Sequence[Item], team: Sequence[Member], aliases: Mapping[str, str], now: datetime
 ) -> list[tuple[str, list[Item]]]:
-    count = len({(i.pr.repo, i.pr.number) for i in items})
-    return _chunk_messages(
-        BATCH_HEADER.format(count=count), items, team, aliases, now, age_after=None
+    total_count = len({(i.pr.repo, i.pr.number) for i in items})
+    raw_chunks = _chunk_messages(
+        BATCH_HEADER.format(count=total_count), items, team, aliases, now, age_after=None
     )
+    return [
+        (
+            _render_chunk(
+                BATCH_HEADER.format(count=len({(i.pr.repo, i.pr.number) for i in chunk_items})),
+                blocks,
+            ),
+            chunk_items,
+        )
+        for blocks, chunk_items in raw_chunks
+    ]
 
 
 def digest_messages(
@@ -113,28 +123,13 @@ def digest_messages(
     digest_time: str,
     age_after: timedelta,
 ) -> list[tuple[str, list[Item]]]:
-    return _chunk_messages(
-        DIGEST_HEADER.format(time=digest_time), items, team, aliases, now, age_after=age_after
-    )
-
-
-def batch_message(
-    items: Sequence[Item], team: Sequence[Member], aliases: Mapping[str, str], now: datetime
-) -> str:
-    return "\n\n".join(text for text, _ in batch_messages(items, team, aliases, now))
-
-
-def digest_message(
-    items: Sequence[Item],
-    team: Sequence[Member],
-    aliases: Mapping[str, str],
-    now: datetime,
-    digest_time: str,
-    age_after: timedelta,
-) -> str:
-    return "\n\n".join(
-        text for text, _ in digest_messages(items, team, aliases, now, digest_time, age_after)
-    )
+    header = DIGEST_HEADER.format(time=digest_time)
+    return [
+        (_render_chunk(header, blocks), chunk_items)
+        for blocks, chunk_items in _chunk_messages(
+            header, items, team, aliases, now, age_after=age_after
+        )
+    ]
 
 
 def mine_message(

@@ -143,12 +143,6 @@ class Store:
         ).fetchall()
         return {row["reviewer"]: _request(row) for row in rows}
 
-    def has_requests(self, repo: str, number: int) -> bool:
-        row = self._db.execute(
-            "SELECT 1 FROM requests WHERE repo = ? AND number = ? LIMIT 1", (repo, number)
-        ).fetchone()
-        return row is not None
-
     def put_request(self, request: Request) -> None:
         self._db.execute(
             "INSERT INTO requests (repo, number, reviewer, login, round, status, queued_at,"

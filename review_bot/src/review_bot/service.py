@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -181,12 +181,21 @@ class Bot:
                     continue
                 if self.store.assign_done(pr.repo, pr.number):
                     continue
-                chosen = self._assign_one(repo, pr, load, now)
+                removed = frozenset(
+                    key for key, req in tracked.items() if req.status is Status.REMOVED
+                )
+                chosen = self._assign_one(repo, pr, load, now, excluded=removed)
                 if chosen is not None:
                     load[chosen] += 1
 
     def _assign_one(
-        self, repo: Repo, pr: PullRequest, load: Counter[str], now: datetime
+        self,
+        repo: Repo,
+        pr: PullRequest,
+        load: Counter[str],
+        now: datetime,
+        *,
+        excluded: Collection[str] = (),
     ) -> str | None:
         try:
             reviewed = any(
@@ -202,7 +211,9 @@ class Bot:
                 self.store.mark_assign_done(pr.repo, pr.number)
             return None
         last = self.store.get_meta(META_LAST_ASSIGNED)
-        for member in selection.candidates(self.settings.team, pr.author, load, last):
+        for member in selection.candidates(
+            self.settings.team, pr.author, load, last, excluded=excluded
+        ):
             try:
                 self.github.request_reviewer(repo.owner, repo.name, pr.number, member.github)
             except ReviewerRejected:
@@ -266,12 +277,14 @@ class Bot:
 
     # sending
 
-    def _send_marked(self, chunks: list[tuple[str, list[Item]]]) -> bool:
+    def _send_marked(self, chunks: list[tuple[str, list[Item]]]) -> tuple[int, bool]:
         """Mark unnotified chunk items notified, then send each chunk.
 
-        Only a refusal by Telegram (nothing delivered for that chunk) unmarks the chunk's
-        newly marked items; already-notified items and transport errors keep their marks.
+        Returns ``(delivered_chunks, all_succeeded)``. Only a refusal by Telegram
+        (nothing delivered for that chunk) unmarks the chunk's newly marked items;
+        already-notified items and transport errors keep their marks.
         """
+        delivered = 0
         for text, chunk_items in chunks:
             fresh = [i for i in chunk_items if not i.request.notified]
             keys: list[Key] = [
@@ -287,17 +300,19 @@ class Bot:
                     with self.store.transaction():
                         self.store.set_notified(keys, False)
                 log.warning("message not sent, retry next poll: %s", error)
-                return False
+                return delivered, False
             except TelegramError as error:
                 log.warning("message delivery unknown, not repeated: %s", error)
-        return True
+            delivered += 1
+        return delivered, True
 
     def _batch(self, now: datetime) -> None:
         queue = self.queue()
         if not self.should_send(queue, now):
             return
         chunks = messages.batch_messages(queue, self.settings.team, self._aliases, now)
-        if self._send_marked(chunks):
+        _, ok = self._send_marked(chunks)
+        if ok:
             log.info("batch sent: %d lines in %d message(s)", len(queue), len(chunks))
 
     def _digest(self, now: datetime) -> bool:
@@ -324,11 +339,19 @@ class Bot:
             limits.digest_at.strftime("%H:%M"),
             limits.age_shown_after,
         )
-        if not self._send_marked(chunks):
+        delivered, ok = self._send_marked(chunks)
+        if delivered == 0 and not ok:
             return False
         with self.store.transaction():
             self.store.set_meta(META_DIGEST_DATE, today)
-        log.info("digest sent: %d lines in %d message(s)", len(items), len(chunks))
+        if ok:
+            log.info("digest sent: %d lines in %d message(s)", len(items), len(chunks))
+        else:
+            log.warning(
+                "digest partially sent: %d/%d chunk(s), date marked to avoid repeats",
+                delivered,
+                len(chunks),
+            )
         return True
 
     # Telegram commands

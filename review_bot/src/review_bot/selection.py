@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 
 from review_bot.config import Member
 
 
 def candidates(
-    team: Sequence[Member], author: str, load: Mapping[str, int], last: str | None
+    team: Sequence[Member],
+    author: str,
+    load: Mapping[str, int],
+    last: str | None,
+    excluded: Collection[str] = (),
 ) -> list[Member]:
     """Team members in the order to try: lowest load first; among equals, the member after the
-    last assigned one (team order, wrapping) first. The author is never a candidate."""
-    pool = [member for member in team if member.key != author.lower()]
+    last assigned one (team order, wrapping) first. The author and excluded members are skipped."""
+    excluded_keys = {key.lower() for key in excluded} | {author.lower()}
+    pool = [member for member in team if member.key not in excluded_keys]
     if not pool:
         return []
     keys = [member.key for member in team]

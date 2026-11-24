@@ -148,7 +148,7 @@ def test_pr_whose_only_reviewer_is_removed_without_review_gets_a_new_reviewer(
     run(h, 1)
     assert len(h.github.requested_log) == 1
     assert h.github.requested_log[0][:2] == (API, 1)
-    assert h.github.requested_log[0][2] != OUTSIDER
+    assert h.github.requested_log[0][2] not in (ALICE, OUTSIDER)
 
 
 # AC4: re-request after a review
@@ -314,9 +314,9 @@ def test_large_queue_of_60_prs_splits_within_limit_and_tracks_partial_delivery(
     delivered = "\n".join(h.telegram.texts)
     for number in range(1, 61):
         assert f"api#{number} " in delivered
+    count_before_quiet = len(h.telegram.texts)
     run(h, 180)
-    count_after_quiet = len(h.telegram.texts)
-    assert count_after_quiet >= 2
+    assert len(h.telegram.texts) == count_before_quiet
 
 
 def test_large_queue_partial_chunk_rejection_retries_only_undelivered_chunk(
@@ -340,6 +340,32 @@ def test_large_queue_partial_chunk_rejection_retries_only_undelivered_chunk(
     assert len(h.telegram.texts) == 2
     assert "api#1 " not in h.telegram.texts[1]
     assert "api#60 " in h.telegram.texts[1]
+
+
+def test_digest_partial_chunk_rejection_marks_date_and_does_not_repeat_first_chunk(
+    h: Harness,
+) -> None:
+    at_berlin(h, 17, 55)
+    for number in range(1, 61):
+        h.github.open(
+            API,
+            number,
+            author=OUTSIDER,
+            title=f"Long digest pull request padding for limit testing #{number:02d}",
+            reviewers=(BOB,),
+        )
+    h.tick()
+    assert h.telegram.texts == []
+    at_berlin(h, 18, 0)
+    h.telegram.reject_after = 1
+    h.tick()
+    assert len(h.telegram.texts) == 1
+    assert h.telegram.texts[0].startswith("🌙 Висит без ревью к 18:00\n\n")
+    h.telegram.reject_after = None
+    for minute in range(1, 6):
+        at_berlin(h, 18, minute)
+        h.tick()
+    assert len(h.telegram.texts) == 1
 
 
 def test_a_failed_poll_changes_nothing(h: Harness) -> None:

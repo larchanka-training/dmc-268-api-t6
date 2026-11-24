@@ -10,3 +10,4 @@ def test_candidates_order_by_load_then_round_robin_and_skip_the_author() -> None
     assert [m.key for m in candidates(team, "x", {}, "a")] == ["b", "c", "a"]
     assert [m.key for m in candidates(team, "x", {"b": 1}, "a")] == ["c", "a", "b"]
     assert [m.key for m in candidates(team, "B", {}, "a")] == ["c", "a"]
+    assert [m.key for m in candidates(team, "x", {}, "a", excluded=("b",))] == ["c", "a"]
