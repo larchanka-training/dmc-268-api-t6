@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -15,11 +16,22 @@ from app.common.infrastructure.db.enums import LedgerKind
 from app.modules.auth.application.scope import AuthScope
 from app.modules.auth.infrastructure.current_user import SqlAlchemyCurrentUserRepository
 from app.modules.billing.infrastructure.models import CreditLedger
+from app.modules.integrations.gitlab.application.request_credentials import (
+    BoundGitLabTarget,
+)
 from app.modules.integrations.gitlab.infrastructure.connection_store import (
     SqlAlchemyGitLabConnectionStore,
 )
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
+from app.modules.reviews.application.determine_ci_eligibility import (
+    CandidateMiss,
+    CiWaitMode,
+    EligibilityCandidate,
+    WebhookRunIdentity,
+)
+from app.modules.reviews.application.project_github_pull_request import PullRequestState
 from app.modules.reviews.infrastructure.metrics_summary import SqlAlchemyMetricsSummary
+from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunStore
 from app.modules.workspaces.application.delete_workspace import (
     DeleteWorkspace,
     DeleteWorkspaceStore,
@@ -252,6 +264,33 @@ def test_delete_workspace_use_case_execute_postgres(
     asyncio.run(exercise())
 
 
+async def _seed_and_delete_ws_b(
+    session_factory: async_sessionmaker,
+    user_id: int,
+) -> None:
+    # Seed INSTALL_B with account_external_id and metadata for OAuth linking
+    async with session_factory.begin() as session:
+        await session.execute(
+            update(ProviderInstallation)
+            .where(ProviderInstallation.id == INSTALL_B)
+            .values(
+                account_external_id=123,
+                provider_metadata={"account_login": "org-test"},
+            )
+        )
+
+    gateway = FakePaymentGateway()
+    use_case = DeleteWorkspace(
+        uow_factory=lambda: _OwnerOverridingUnitOfWork(session_factory),
+        payment_gateway=gateway,
+    )
+    await use_case.execute(
+        workspace_id=WS_B,
+        user_id=user_id,
+        confirmation_name="W",
+    )
+
+
 def test_oauth_link_after_deletion_does_not_resurrect_workspace(
     portal_env: Env,
 ) -> None:
@@ -260,28 +299,7 @@ def test_oauth_link_after_deletion_does_not_resurrect_workspace(
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
         user_id = 42
-
-        # Seed INSTALL_B with account_external_id and metadata for OAuth linking
-        async with session_factory.begin() as session:
-            await session.execute(
-                update(ProviderInstallation)
-                .where(ProviderInstallation.id == INSTALL_B)
-                .values(
-                    account_external_id=123,
-                    provider_metadata={"account_login": "org-test"},
-                )
-            )
-
-        gateway = FakePaymentGateway()
-        use_case = DeleteWorkspace(
-            uow_factory=lambda: _OwnerOverridingUnitOfWork(session_factory),
-            payment_gateway=gateway,
-        )
-        await use_case.execute(
-            workspace_id=WS_B,
-            user_id=user_id,
-            confirmation_name="W",
-        )
+        await _seed_and_delete_ws_b(session_factory, user_id)
 
         # Same installation.id (reinstall/relink after deletion):
         # rejects and does not resurrect workspace
@@ -357,28 +375,7 @@ def test_oauth_link_with_new_installation_id_after_deletion_creates_new_workspac
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
         user_id = 42
-
-        # Seed INSTALL_B with account_external_id and metadata for OAuth linking
-        async with session_factory.begin() as session:
-            await session.execute(
-                update(ProviderInstallation)
-                .where(ProviderInstallation.id == INSTALL_B)
-                .values(
-                    account_external_id=123,
-                    provider_metadata={"account_login": "org-test"},
-                )
-            )
-
-        gateway = FakePaymentGateway()
-        use_case = DeleteWorkspace(
-            uow_factory=lambda: _OwnerOverridingUnitOfWork(session_factory),
-            payment_gateway=gateway,
-        )
-        await use_case.execute(
-            workspace_id=WS_B,
-            user_id=user_id,
-            confirmation_name="W",
-        )
+        await _seed_and_delete_ws_b(session_factory, user_id)
 
         # Directly link new installation.id with same account_external_id
         # (isolated without case 1 preceding it)
@@ -416,6 +413,92 @@ def test_oauth_link_with_new_installation_id_after_deletion_creates_new_workspac
                 )
             ).all()
             assert len(access_for_new) == 1
+
+        await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_lock_gitlab_rejects_deleted_workspace_postgres(
+    portal_env: Env,
+) -> None:
+    async def exercise() -> None:
+        engine = portal_env.engine()
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        # 1. Mark WS_A deleted
+        async with SqlAlchemyDeleteWorkspaceUnitOfWork(session_factory) as uow:
+            await uow.store.mark_deleted(WS_A, user_id=42)
+            await uow.commit()
+
+        # 2. SqlAlchemyWebhookRunStore._lock_gitlab rejects deleted workspace on Postgres
+        async with session_factory() as session:
+            webhook_store = SqlAlchemyWebhookRunStore(session)
+            target = BoundGitLabTarget(
+                origin_provider_installation_id=uuid4(),
+                workspace_id=WS_A,
+                repository_id=uuid4(),
+                instance_origin="https://gitlab.com",
+                project_id=123,
+                credential_generation=1,
+            )
+            with patch(
+                "app.modules.reviews.infrastructure.webhook_runs.read_gitlab_eligibility_target",
+                new=AsyncMock(return_value=target),
+            ):
+                miss_gl = await webhook_store._lock_gitlab(uuid4())
+                assert miss_gl == CandidateMiss.MISSING_INSTALLATION
+
+        await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_lock_bitbucket_rejects_deleted_workspace_postgres(
+    portal_env: Env,
+) -> None:
+    async def exercise() -> None:
+        engine = portal_env.engine()
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        # 1. Mark WS_A deleted
+        async with SqlAlchemyDeleteWorkspaceUnitOfWork(session_factory) as uow:
+            await uow.store.mark_deleted(WS_A, user_id=42)
+            await uow.commit()
+
+        # 2. SqlAlchemyWebhookRunStore._lock_bitbucket rejects deleted workspace on Postgres
+        async with session_factory() as session:
+            webhook_store = SqlAlchemyWebhookRunStore(session)
+            identity = WebhookRunIdentity(
+                provider="bitbucket",
+                origin_provider_installation_id=uuid4(),
+                workspace_id=WS_A,
+                repository_id=uuid4(),
+                repository_external_id=12345,
+                repository_uuid=uuid4(),
+                credential_generation=1,
+                binding_generation=1,
+                webhook_generation=1,
+            )
+            candidate = EligibilityCandidate(
+                code_change_id=uuid4(),
+                installation_external_id=12345,
+                repository_full_name="org/repo",
+                head_sha="deadbeef",
+                state=PullRequestState.OPEN,
+                repository_enabled=True,
+                ai_review_labeled=True,
+                ai_review_labeled_at=None,
+                head_first_seen_at=None,
+                wait_for_ci=CiWaitMode.NEVER,
+                identity=identity,
+            )
+            with patch(
+                "app.modules.reviews.infrastructure.webhook_runs.read_bitbucket_eligibility_candidate",
+                new=AsyncMock(return_value=candidate),
+            ):
+                miss_bb = await webhook_store._lock_bitbucket(uuid4())
+                assert miss_bb == CandidateMiss.MISSING_INSTALLATION
 
         await engine.dispose()
 

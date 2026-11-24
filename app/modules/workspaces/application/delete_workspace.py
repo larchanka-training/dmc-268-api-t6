@@ -109,7 +109,7 @@ class DeleteWorkspace:
 
         # External Stripe cancellation MUST run outside any DB transaction (AGENTS.md, ADR 0003 §5).
         # Accepted risk (#550): if payment gateway raises after commit, subscription is not
-        # cancelled inline; retry returns 404. Outbox / retry reconciliation is tracked under #551.
+        # cancelled inline; retry returns 404. Outbox / retry reconciliation is tracked under #372.
         await self._payment_gateway.cancel_subscription(
             workspace_id,
             idempotency_key=f"ws-delete-sub:{workspace_id}",

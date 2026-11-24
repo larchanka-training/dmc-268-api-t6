@@ -5,10 +5,8 @@ Covers authorization, name confirmation, balance forfeiture, and subscription ca
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable, Iterator
 from decimal import Decimal
-from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
@@ -18,22 +16,6 @@ from starlette.requests import Request
 
 from app.bootstrap.reviews_api import _UnconfiguredPaymentGateway, get_delete_workspace
 from app.main import app
-from app.modules.integrations.gitlab.application.request_credentials import (
-    BoundGitLabTarget,
-)
-from app.modules.integrations.gitlab.infrastructure.connection_store import (
-    SqlAlchemyGitLabConnectionStore,
-)
-from app.modules.reviews.application.determine_ci_eligibility import (
-    CiWaitMode,
-    EligibilityCandidate,
-    WebhookRunIdentity,
-)
-from app.modules.reviews.application.project_github_pull_request import PullRequestState
-from app.modules.reviews.application.try_enqueue_webhook_run import CandidateMiss
-from app.modules.reviews.infrastructure.webhook_runs import (
-    SqlAlchemyWebhookRunStore,
-)
 from app.modules.workspaces.application.delete_workspace import (
     DeleteWorkspace,
     DeleteWorkspaceResult,
@@ -509,84 +491,3 @@ async def test_delete_workspace_real_provider_contract_validates_before_payment_
     assert uow.committed is False
     assert store.deleted is None
     assert store.forfeited is None
-
-
-def test_deleted_workspace_rejected_by_gitlab_and_bitbucket_lock_and_connection_store() -> None:
-    async def exercise() -> None:
-        deleted_ws_id = uuid4()
-        captured_statements: list[str] = []
-
-        session = AsyncMock()
-
-        async def mock_scalar(stmt: object) -> object:
-            stmt_str = str(stmt)
-            captured_statements.append(stmt_str)
-            # If the statement checks that status != 'deleted', return None
-            if (
-                "workspaces.status != " in stmt_str
-                or "workspaces.status IS DISTINCT FROM" in stmt_str
-            ):
-                return None
-            return deleted_ws_id
-
-        session.scalar.side_effect = mock_scalar
-
-        # 1. SqlAlchemyGitLabConnectionStore.workspace_exists rejects deleted workspace
-        gitlab_store = SqlAlchemyGitLabConnectionStore(session)
-        assert await gitlab_store.workspace_exists(deleted_ws_id) is False
-        assert any("workspaces.status != " in s for s in captured_statements)
-
-        # 2. SqlAlchemyWebhookRunStore._lock_gitlab rejects deleted workspace
-        captured_statements.clear()
-        webhook_store = SqlAlchemyWebhookRunStore(session)
-        target = BoundGitLabTarget(
-            origin_provider_installation_id=uuid4(),
-            workspace_id=deleted_ws_id,
-            repository_id=uuid4(),
-            instance_origin="https://gitlab.com",
-            project_id=123,
-            credential_generation=1,
-        )
-        with patch(
-            "app.modules.reviews.infrastructure.webhook_runs.read_gitlab_eligibility_target",
-            new=AsyncMock(return_value=target),
-        ):
-            miss_gl = await webhook_store._lock_gitlab(uuid4())
-            assert miss_gl == CandidateMiss.MISSING_INSTALLATION
-            assert any("workspaces.status != " in s for s in captured_statements)
-
-        # 3. SqlAlchemyWebhookRunStore._lock_bitbucket rejects deleted workspace
-        captured_statements.clear()
-        identity = WebhookRunIdentity(
-            provider="bitbucket",
-            origin_provider_installation_id=uuid4(),
-            workspace_id=deleted_ws_id,
-            repository_id=uuid4(),
-            repository_external_id=12345,
-            repository_uuid=uuid4(),
-            credential_generation=1,
-            binding_generation=1,
-            webhook_generation=1,
-        )
-        candidate = EligibilityCandidate(
-            code_change_id=uuid4(),
-            installation_external_id=12345,
-            repository_full_name="org/repo",
-            head_sha="deadbeef",
-            state=PullRequestState.OPEN,
-            repository_enabled=True,
-            ai_review_labeled=True,
-            ai_review_labeled_at=None,
-            head_first_seen_at=None,
-            wait_for_ci=CiWaitMode.NEVER,
-            identity=identity,
-        )
-        with patch(
-            "app.modules.reviews.infrastructure.webhook_runs.read_bitbucket_eligibility_candidate",
-            new=AsyncMock(return_value=candidate),
-        ):
-            miss_bb = await webhook_store._lock_bitbucket(uuid4())
-            assert miss_bb == CandidateMiss.MISSING_INSTALLATION
-            assert any("workspaces.status != " in s for s in captured_statements)
-
-    asyncio.run(exercise())
