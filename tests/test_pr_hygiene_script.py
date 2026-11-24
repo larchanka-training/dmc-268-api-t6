@@ -749,7 +749,10 @@ def test_event_path_forbidden_with_body_or_body_file(tmp_path: Path) -> None:
 
 def test_merge_commit_at_head_without_github_actions_defaults_to_origin_main(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
     repo = tmp_path / "merge_repo"
     repo.mkdir()
     env = {

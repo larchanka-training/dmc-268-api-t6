@@ -23,7 +23,8 @@ links, no `Impact:` blocks) — this file ships to any team using this stack.
 
 ## Pull requests
 
-- Title: conventional (`type(scope): summary`), ≤72 characters.
+- Title: conventional (`type(scope): summary`; the scope is optional, one lowercase name of
+  `[a-z0-9._/-]`), ≤72 characters.
 - Overlap check: before opening or updating a PR, check open PRs touching the same files
   or same issue/part (`gh pr list --state open --limit 200 --json number,title,headRefName,files`);
   post a heads-up comment on overlapping PRs (`AGENTS.md`) and document overlap in `What`.

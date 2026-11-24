@@ -80,8 +80,8 @@ metadata:
      every commit subject ≤72 characters, zero closing keywords (`Closes`/`Fixes`/`Resolves`
      with `#N` or `owner/repo#N`) across title, body, and commit messages, and zero
      Development-panel links; run
-     `python3 .github/scripts/check_pr_hygiene.py --title "<title>" --body-file <file> --rev-range origin/main..HEAD [--draft]`
-     (in `api` repo: `uv run --no-project python .github/scripts/check_pr_hygiene.py ...`).
+     `uv run --no-project python .github/scripts/check_pr_hygiene.py --title "<title>" --body-file <file> --rev-range origin/main..HEAD [--draft]`
+     (in `ui` repo without `uv`: `python3 .github/scripts/check_pr_hygiene.py --title "<title>" --body-file <file> --rev-range origin/main..HEAD [--draft]`).
    - Every issue reference uses `Refs #N` / `Refs owner/repo#N` — never a closing keyword,
      and never link the PR in the Development panel; the tech lead closes the issue after
      checking its AC (`docs/CONTRIBUTING.md`).
