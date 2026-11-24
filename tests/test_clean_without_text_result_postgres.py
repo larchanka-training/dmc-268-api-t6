@@ -31,10 +31,10 @@ from app.modules.reviews.application.review_ignore import (
     apply_ignore,
     parse_review_ignore,
 )
-from app.modules.reviews.application.review_output import VerifiedReviewOutput
+from app.modules.reviews.application.review_output import NoModelAnswer, VerifiedReviewOutput
 from app.modules.reviews.application.run_coverage import project_run_coverage, snapshot_vcs_file
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
-from app.modules.reviews.application.store_review_output import NoModelAnswer, StoreReviewOutput
+from app.modules.reviews.application.store_review_output import StoreReviewOutput
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsPullRequest
 from app.modules.reviews.infrastructure.models import (
     Comment,

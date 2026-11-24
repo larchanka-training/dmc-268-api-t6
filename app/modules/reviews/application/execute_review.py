@@ -22,7 +22,7 @@ from app.modules.reviews.application.findings_post_processor import (
     FindingsPostProcessor,
     ProcessedFinding,
 )
-from app.modules.reviews.application.llm import LlmCallFailed
+from app.modules.reviews.application.llm import LlmCallFailed, LlmErrorCode
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import CallManifest, PolicySnapshot
 from app.modules.reviews.application.prompt_budget import (
@@ -60,6 +60,7 @@ from app.modules.reviews.application.review_context import (
 from app.modules.reviews.application.review_output import (
     DroppedCandidateRecord,
     InvalidReviewOutput,
+    NoModelAnswer,
     ReviewFinding,
     ReviewFindingV2,
     ReviewOutputHandler,
@@ -69,10 +70,9 @@ from app.modules.reviews.application.review_output import (
     validate_v2_coordinates,
 )
 from app.modules.reviews.application.review_path import ReviewBinding, snapshot_for_review
-from app.modules.reviews.application.run_failures import RunFailure
+from app.modules.reviews.application.run_failures import RunFailure, classify_failure
 from app.modules.reviews.application.store_review_output import (
     AcceptedReviewCheckpoint,
-    NoModelAnswer,
 )
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 
@@ -439,7 +439,20 @@ class ExecuteReviewRun:
                     run_id,
                 )
                 saved = None
-        reply = None if saved is not None else await self._model.draft_review(context=context)
+        try:
+            reply = None if saved is not None else await self._model.draft_review(context=context)
+        except (LlmCallFailed, RunFailure) as exc:
+            failure = classify_failure(exc)
+            if failure.error_code != LlmErrorCode.CONTEXT_OVERFLOW.value:
+                raise
+            _LOGGER.warning(
+                "Review context overflow run_id=%s code=%s; publishing incomplete coverage",
+                run_id,
+                failure.error_code,
+                exc_info=exc,
+            )
+            incomplete = incomplete_review_paths(changed_files, ())
+            return await self._publisher.execute(run_id, NoModelAnswer(incomplete_paths=incomplete))
         if saved is not None:
             model_output = VerifiedReviewOutput(
                 saved.output, incomplete_paths=saved.incomplete_paths

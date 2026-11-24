@@ -240,7 +240,15 @@ inventory по-прежнему вызывает модель. Zero-LLM no-text 
 с #497 ч.3; legacy (≤ v3) публикует тот же набор как summary-only `no_reviewable_files`.
 Summary-only с нулём вызовов модели — текущий жизненный цикл, не будущий:
 стадия останавливается до RAG, conventions, ревью и verifier и публикует
-`NoModelAnswer`; coverage partial, verdict null.
+`NoModelAnswer`; coverage partial, verdict null. Если обязательные блоки (system, policy,
+service defaults) вмещаются в `send_budget` ревью и соблюдён mandatory-бюджет verifier, но после отбора
+`fit_review_context` не вмещается ни один проверяемый файл или возникает
+`llm_context_overflow` ревью-вызова, модель повторно не вызывается (при 0 вместившихся файлов
+запрос провайдеру не уходит): ревью-вызов деградирует в публикацию `NoModelAnswer` без вызова
+verifier и `change_summary` (#461 Ч.1). Непроверенные пути помечаются `review_input_incomplete`
+в `finalize_run_coverage`, `coverage` становится `partial` (или `none` для legacy-прогона без
+проверяемых файлов), `verdict = null`, `runs.state = succeeded` (`runs.error_code = null`),
+check-run — `neutral`, а тело ревью перечисляет пропущенные файлы и причину по-русски.
 
 **Текущий snapshot-путь после #435** (один `context.build` до conventions): `policy.load → vcs.fetch_diff → context.build → [context.rag] → [llm.call… conventions] → llm.repo_conventions → llm.call… review → llm.review_output → candidate review.postprocess → [llm.call… verifier → llm.verify] → review.finalize → review.publish_start (T8) → github|gitlab|bitbucket.publish_review`. Verifier блок условный по числу кандидатов; backend-only идёт от `context.build` к `review.finalize` без модели.
 
@@ -529,7 +537,7 @@ Fallback-модель — вторая модель шлюза с тем же st
 | 402 | HTTP 402 от модели | тот же запрос не повторяется, ключи не ротируются | fallback 1 раз, если настроен и помещается в контекст; если последний ответ — 402, retry прогона нет | `failed`, `llm_payment_required` после первой попытки | `neutral` «AI-ревью не выполнено» + текст §6; ревью нет | `failed` + `errorCode`; каждый вызов — `llm.call` |
 | 5xx / соединение | HTTP 5xx, отказ или обрыв соединения | 2 повтора: 2 с, 8 с (+ jitter до 1 с) | fallback 1 раз, retry прогона | `failed`, `llm_unavailable` | то же | то же |
 | Невалидный или нестрогий JSON | не JSON; вывод обрезан по длине; нарушена `review-output.schema.json` или семантика §9 (`InvalidReviewOutput`) | тот же запрос не повторяется | 1 repair-вызов той же модели с ошибками валидатора, затем fallback 1 раз; если repair-переписка (ответ модели + ошибки) не помещается в лимит контекста, repair пропускается и сразу идёт fallback с исходным запросом; retry прогона нет | `failed`, `llm_invalid_output` | то же | то же; ответ модели — в `response` записи `llm.call` |
-| Переполнение контекста | предварительный подсчёт > лимита, HTTP 400 о длине или 413 | тот же размер не повторяется | Сокращается только необязательный контекст по CONTEXT_AND_VERIFICATION_SPEC §4.1; новый вызов требует новый manifest и свободный слот. Документы политики, обязательный verifier envelope и ID не усекаются | `failed`, `llm_context_overflow`, `policy_prompt_budget_exceeded` либо `verification_context_overflow` по причине; retry нет | `neutral`, без ревью | `failed` + `errorCode` |
+| Переполнение контекста | предварительный подсчёт > лимита, HTTP 400 о длине или 413 | тот же размер не повторяется | Сокращается только необязательный контекст по CONTEXT_AND_VERIFICATION_SPEC §4.1; обязательный системный промпт, defaults и документы политики не усекаются (при их превышении — сразу `policy_prompt_budget_exceeded` до обращения к модели). При `llm_context_overflow` ревью-вызова при вместившихся system/defaults/policy ревью деградирует в `succeeded` с частичным покрытием (partial coverage, §2, #461) | деградация в `succeeded` при `llm_context_overflow` ревью-вызова при вместившихся system/defaults/policy (§2, #461); `failed` с `policy_prompt_budget_exceeded` (если не помещается обязательный промпт), `llm_context_overflow` (на conventions) либо `verification_context_overflow`; retry нет | `neutral` с частичным ревью при деградации (#461); `neutral` без ревью при `failed` | `succeeded` с partial coverage при деградации (#461); `failed` + `errorCode` при `failed` |
 | Бюджет прогона | spent + next + обязательный резерв превышают лимит (§4.5) | вызов не делается | сокращение необязательного контекста | `failed`, `verification_budget_exceeded`, если обязательные стадии не помещаются; общая ошибка legacy/прочего бюджета — `budget_exceeded`. Deep может публиковать только уже сохранённый подтверждённый FinalReviewResult | `neutral`; непроверенных кандидатов нет | сохранённые coverage/ошибка |
 | Дедлайн | нет окна вызова и downstream резерва; истёк watchdog (§3) | вызов не делается; watchdog прерывает работу | — | `failed`, `verification_deadline_exceeded` при admission, `deadline_exceeded` при общем watchdog | `neutral`, без непроверенной публикации | `failed` + `errorCode` |
 
@@ -665,7 +673,7 @@ Legacy marker `<!-- ai-review findings_hash=… -->` не используетс
 | `llm_payment_required` | `failed` | LLM | fallback, если настроен; ротации ключей, повтора той же модели и retry прогона нет | AI-ревью временно недоступно. |
 | `llm_unavailable` | `failed` | LLM | да | Провайдер модели недоступен. |
 | `llm_invalid_output` | `failed` | LLM | repair и fallback; прогон — нет | Модель вернула ответ не по контракту. |
-| `llm_context_overflow` | `failed` | LLM | сокращение только необязательного контекста по §5.1; прогон — нет | PR не помещается в контекст модели. |
+| `llm_context_overflow` | `failed` вне ревью (на ревью-вызове деградирует в `succeeded` по §2) | LLM | сокращение необязательного контекста по §5.1 и CONTEXT_AND_VERIFICATION_SPEC §4.1; деградация ревью-вызова регламентируется §2 (Refs #461); вне ревью — прогон не повторяется | Деградация ревью-вызова описана в §2; для `failed` (`conventions` / исторических записей): PR не помещается в контекст модели. |
 | `budget_exceeded` | `failed` | локальный бюджет Run (§4.5) | нет | Превышен лимит стоимости прогона. |
 | `deadline_exceeded` | `failed` | время | нет | Прогон не уложился в лимит времени. |
 | `diff_fetch_failed` | `failed` | GitHub | да: прогон | Не удалось получить дифф из GitHub. |

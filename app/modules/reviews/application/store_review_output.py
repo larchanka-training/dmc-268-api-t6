@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -16,18 +16,18 @@ from app.modules.reviews.application.findings_post_processor import (
     ProcessedFinding,
     ProcessedReviewOutput,
     finalize_stored_review_body,
-    summary_from_result,
 )
 from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH, CallManifest
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, ReviewPublishQueue
 from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
     InvalidReviewOutput,
-    ReviewOutput,
+    NoModelAnswer,
     RuleLineRef,
     VerifiedReviewOutput,
     _as_json_object,
     coerce_dropped_findings,
+    empty_review_output,
     parse_review_output,
     parse_review_output_v2,
 )
@@ -133,26 +133,6 @@ def _claimed(guard: PublishingGuard | None, worker_id: str, attempt: int) -> boo
         and not guard.cancel_requested
         and guard.head_current
     )
-
-
-class NoModelAnswer(Mapping[str, object]):
-    """The backend result of a run that made no model call: a marker, never an answer.
-
-    A snapshot-path change without analysable text (coverage none, #130 F5, or no-text
-    partial, CVS §2.2) and a summary-only stop are finished without the review model. It is
-    stored as any result, but nothing is parsed, no ``llm.review_output`` is written, and
-    the post-processor's backend summary is the only one. Empty, so the inline
-    ``PublishReviewOutput`` refuses it as an invalid answer.
-    """
-
-    def __getitem__(self, key: str) -> object:
-        raise KeyError(key)
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(())
-
-    def __len__(self) -> int:
-        return 0
 
 
 def hashed_findings(processed: ProcessedReviewOutput) -> tuple[HashedFinding, ...]:
@@ -368,16 +348,7 @@ class StoreReviewOutput:
         if parsed is None:
             # No findings to process. The post-processor replaces this summary with its own
             # backend summary of the same result, the only one stored.
-            parsed = ReviewOutput(
-                findings=[],
-                summary=summary_from_result(
-                    (),
-                    (),
-                    coverage,
-                    summary_reason=context.summary_reason if context.summary_only else None,
-                    name_summary_only=context.summary_only,
-                ),
-            )
+            parsed = empty_review_output(context, coverage)
         threshold_to_use = (
             effective_threshold if effective_threshold is not None else context.severity_threshold
         )
@@ -398,7 +369,9 @@ class StoreReviewOutput:
             coverage=coverage,
             summary_only=context.summary_only,
             incomplete_paths=(
-                raw_output.incomplete_paths if isinstance(raw_output, VerifiedReviewOutput) else ()
+                raw_output.incomplete_paths
+                if isinstance(raw_output, (VerifiedReviewOutput, NoModelAnswer))
+                else ()
             ),
             summary_reason=context.summary_reason,
             change_summary=verified.change_summary if verified is not None else (),

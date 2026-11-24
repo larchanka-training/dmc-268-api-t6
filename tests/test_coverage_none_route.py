@@ -36,8 +36,8 @@ from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
     ReviewContextStage,
 )
+from app.modules.reviews.application.review_output import NoModelAnswer
 from app.modules.reviews.application.run_failures import RunCancelled, RunSkipped
-from app.modules.reviews.application.store_review_output import NoModelAnswer
 from app.modules.reviews.application.vcs_diff import VcsFile
 from app.modules.reviews.infrastructure.blob_cache import InMemoryBlobCache
 from tests.test_coverage_none_classification import (

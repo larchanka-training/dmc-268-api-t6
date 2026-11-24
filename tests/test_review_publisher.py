@@ -81,11 +81,11 @@ class FakeRepository:
     async def store_review_output(
         self,
         run_id: UUID,
-        model_output: dict[str, object],
+        model_output: dict[str, object] | None,
         parsed: ReviewOutput,
         processed: ProcessedReviewOutput,
     ) -> ReviewPublication | None:
-        assert model_output["findings"]
+        assert model_output is not None and model_output["findings"]
         if self.publication is None:
             return None
         if not self.stored:
@@ -166,11 +166,12 @@ class ProcessingRepository:
     async def store_review_output(
         self,
         run_id: UUID,
-        model_output: dict[str, object],
+        model_output: dict[str, object] | None,
         parsed: ReviewOutput,
         processed: ProcessedReviewOutput,
     ) -> ReviewPublication | None:
         assert run_id == RUN_ID
+        assert model_output is not None
         assert model_output == output_with_body_only()
         assert model_output["summary"] == {
             "problem": "A transaction can span a provider call.",
@@ -378,12 +379,12 @@ def test_gateway_json_text_is_parsed_and_stored_as_the_exact_object(
 ) -> None:
     @dataclass
     class RecordingRepository(FakeRepository):
-        raw: list[dict[str, object]] = field(default_factory=list)
+        raw: list[dict[str, object] | None] = field(default_factory=list)
 
         async def store_review_output(
             self,
             run_id: UUID,
-            model_output: dict[str, object],
+            model_output: dict[str, object] | None,
             parsed: ReviewOutput,
             processed: ProcessedReviewOutput,
         ) -> ReviewPublication | None:
@@ -405,7 +406,9 @@ def test_gateway_json_text_is_parsed_and_stored_as_the_exact_object(
 
     assert published is True
     assert repository.raw == [json.loads(text)]
-    assert list(repository.raw[0]) == ["findings", "summary"]
+    raw_0 = repository.raw[0]
+    assert raw_0 is not None
+    assert list(raw_0) == ["findings", "summary"]
     stored = repository.stored[0][1]
     assert stored.findings == ReviewOutput.model_validate(output()).findings
     assert stored.summary.model_dump() == {
@@ -502,7 +505,7 @@ def test_unanchored_line_routes_to_body_for_github_and_gitlab() -> None:
         async def store_review_output(
             self,
             run_id: UUID,
-            model_output: dict[str, object],
+            model_output: dict[str, object] | None,
             parsed: ReviewOutput,
             processed: ProcessedReviewOutput,
         ) -> ReviewPublication | None:

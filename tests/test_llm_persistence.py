@@ -23,6 +23,7 @@ from app.modules.reviews.application.llm import (
     RunCallContext,
 )
 from app.modules.reviews.infrastructure.llm_call_trace import RunTraceLlmCalls
+from tests.review_publication_fakes import RecordingRunTrace
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000003311")
 WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000003312")
@@ -125,22 +126,6 @@ def _record(**overrides: Any) -> LlmCallRecord:
     )
     values.update(overrides)
     return LlmCallRecord(**values)
-
-
-class RecordingRunTrace:
-    def __init__(self) -> None:
-        self.records: list[tuple[UUID, str, dict[str, Any], Any, datetime, int]] = []
-
-    async def record(
-        self,
-        run_id: UUID,
-        tool: str,
-        request: dict[str, Any],
-        response: Any,
-        started_at: datetime,
-        duration_ms: int,
-    ) -> None:
-        self.records.append((run_id, tool, request, response, started_at, duration_ms))
 
 
 def test_llm_call_goes_through_the_shared_run_trace() -> None:

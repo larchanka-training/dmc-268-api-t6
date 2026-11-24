@@ -718,6 +718,7 @@ L2 и L3, L1 и L4 не вытесняются. Внутри слота: бит�
 картой и не переписывается под усечённый prompt. Исключённые файлы заменяются
 общим счётчиком во всех модельных `repo_tree`/`changed_files`/`omitted_files`;
 разрешённые, но не вместившиеся пути можно перечислять как непроверенные.
+Правило деградации ревью-вызова при переполнении контекста (`NoModelAnswer`, `review_input_incomplete`, `coverage partial`/`none`, `runs.state = succeeded`) и граница с `policy_prompt_budget_exceeded` регламентируются PIPELINE_SPEC §2 (Refs #461).
 
 ### 4.2. Общие конвенции
 
