@@ -141,6 +141,7 @@ def _publication(event: str, response: dict[str, Any]) -> tuple[dict[str, Any], 
             "request_changes",
             "neutral",
         ),
+        ([_publication("APPROVE", {"github_review_id": 501})], "request_changes", "neutral"),
     ],
     ids=[
         "request-changes-then-setting-changed",
@@ -150,6 +151,7 @@ def _publication(event: str, response: dict[str, Any]) -> tuple[dict[str, Any], 
         "no-publication",
         "request-changes-then-found-as-comment",
         "comment-then-found-as-request-changes",
+        "unknown-published-event",
     ],
 )
 def test_succeeded_blocking_run_concludes_from_the_published_event_not_the_setting(
@@ -169,6 +171,7 @@ def test_succeeded_blocking_run_concludes_from_the_published_event_not_the_setti
                 lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
                 RecordingQueue(),
                 worker_id="worker",
+                expected_attempt=1,
                 run_url=lambda _: None,
             ).execute(RUN_ATTEMPTED, _blocking_answer())
             assert stored is True

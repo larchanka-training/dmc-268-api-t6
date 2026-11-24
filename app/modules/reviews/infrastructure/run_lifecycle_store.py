@@ -515,9 +515,11 @@ class SqlAlchemyRunLifecycleStore:
         """The event GitHub accepted this Run's review with, from its publication trace (§7).
 
         Read back from ``run_actions`` so every re-render, RunGuard's included, shows the
-        review that was posted, never the repository setting as it is now. The first
-        accepted step is the POST; a later one is a T17 find by marker under a pointer
-        rebuilt from the current setting, while GitHub keeps the first event.
+        review that was posted, never the repository setting as it is now. For Runs with
+        ``final_review_results``, T8 freezes ``review_event`` in ``publication_plan`` and T17
+        reuses it, so every accepted step keeps the same event. For legacy Runs without a
+        saved plan, T17 rebuilds from the current setting while GitHub keeps the first
+        event, so ordering by index selects the original POST.
         """
         request = await self._session.scalar(
             select(RunAction.request)
