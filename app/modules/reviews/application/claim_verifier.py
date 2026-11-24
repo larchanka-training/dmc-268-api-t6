@@ -35,9 +35,12 @@ Scope and explicit boundaries (issue #445):
   syntactic truth (such as ``"accepts at most one parameter"`` / ``"exactly one"``) and AST
   checks on modified files lacking an ``L3 full_file`` block.
 - Limitations:
-  - Primary defect heuristic: ``_PRIMARY_DEFECT_TITLE_RE`` uses title keywords (param, parameter,
-    naming, typo, convention, etc.); comparative claims lacking these title keywords are not
-    filtered by primary defect logic.
+  - Primary defect heuristic: decision is based on title keywords from
+    ``_PRIMARY_DEFECT_TITLE_PATTERNS`` (ssrf, injection, vulnerability, crash, leak, dos, rce,
+    auth, etc.); findings with local defects lacking any such keyword (such as
+    "idFromUrl does not enforce resource type" with an incidental phrase like
+    "other tools use `idOrUrl`") are dropped entirely; plural forms ("injections", "leaks",
+    "overflows") are not recognized due to ``\b…\b``.
   - Single-line lambdas: single-line lambda definitions (e.g. ``fn = lambda x: bad(x)``) or arrow
     functions on a single line within a ``try`` block match the enclosing assignment/statement and
     are considered protected by ``try`` (verdict ``contradicted``), while multi-line forms correctly
@@ -158,7 +161,7 @@ _QUALIFIED_NON_IN_TAIL = re.compile(
 )
 
 _IN_TARGET_TAIL = re.compile(
-    r"^\s*in\s+(?:the\s+)?[`'\"]?(?P<target>[a-zA-Z0-9_./\-]+(?:\s+(?:file|files|tool|tools|function|method|handler|endpoint))?)[`'\"]?",
+    r"^\s*in\s+(?:the\s+)?[`'\"]?(?P<target>[a-zA-Z0-9_./\-]+(?:\s+(?:file|files|tool|tools|function|method|handler|endpoint|module|modules))?)[`'\"]?",
     re.IGNORECASE,
 )
 
@@ -378,7 +381,7 @@ def _audit_import_claim(
 
         in_match = _IN_TARGET_TAIL.search(tail)
         if in_match:
-            target = (in_match.group("target") or "").strip().lower()
+            target = (in_match.group("target") or "").strip().rstrip(".,;:").lower()
             is_local = target in this_file_targets
             if not is_local:
                 m_tool = re.match(r"^(?:the\s+)?([A-Za-z0-9_$]+)\s+tools?$", target)

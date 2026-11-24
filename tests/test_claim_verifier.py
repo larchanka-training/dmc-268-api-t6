@@ -782,13 +782,37 @@ def test_python_type_checking_and_local_imports_are_not_runtime_imports(
             "`RealVal` is not imported.",
             "contradicted",
         ),
+        (
+            "RealVal in a.ts with dot",
+            "RealVal is not imported in a.ts.",
+            "contradicted",
+        ),
+        (
+            "RealVal in get_film tool",
+            "RealVal is not imported in the get_film tool.",
+            "contradicted",
+        ),
+        (
+            "RealVal in this file",
+            "RealVal is not imported in this file.",
+            "contradicted",
+        ),
+        (
+            "RealVal in current module",
+            "RealVal is not imported in the current module.",
+            "contradicted",
+        ),
     ],
 )
 def test_qualified_not_imported_claims_are_not_contradicted(
     title: str, body: str, expected_status: str
 ) -> None:
     """Claims qualified with 'as a value', 'at runtime', or other files are not contradicted."""
-    ts_source = b"import { RealVal } from './vals';\nexport function run() {}\n"
+    ts_source = (
+        b"import { RealVal } from './vals';\n"
+        b"export function run() {}\n"
+        b"export function get_film() {}\n"
+    )
     finding = _finding(path="src/a.ts", line=2, title=title, body=body)
     assert (
         audit_candidate_claim(finding, ts_source, claim_syntax=INSPECTOR).status == expected_status
