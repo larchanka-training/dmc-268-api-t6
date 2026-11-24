@@ -172,6 +172,16 @@ def test_jwt_tokens_are_scrubbed() -> None:
             "sk-abc12345",
             'Quoted key without scheme with space: Authorization: "***"',
         ),
+        (
+            'Header with CRLF: Authorization: "Bearer secret\r\nHost: x',
+            "secret",
+            'Header with CRLF: Authorization: "Bearer ***\r\nHost: x',
+        ),
+        (
+            'Unclosed with escaped quote: Authorization: "abc\\"def',
+            "abc",
+            'Unclosed with escaped quote: Authorization: "***',
+        ),
     ],
 )
 def test_authorization_headers_are_scrubbed(

@@ -119,8 +119,8 @@ _AUTH_QUOTED_PATTERN = re.compile(
 _AUTH_FALLBACK_PATTERN = re.compile(
     r"""(?im)(["']?Authorization["']?\s*[:=]\s*)"""
     r"""(?:"""
-    rf"""(")(?:({_AUTH_SCHEMES}))?[^\r\n"]*$|"""
-    rf"""(')(?:({_AUTH_SCHEMES}))?[^\r\n']*$|"""
+    rf"""(")(?:({_AUTH_SCHEMES}))?[^\r\n"\\]*(?:\\[^\r\n][^\r\n"\\]*)*\\?(?=[\r\n]|\Z)|"""
+    rf"""(')(?:({_AUTH_SCHEMES}))?[^\r\n'\\]*(?:\\[^\r\n][^\r\n'\\]*)*\\?(?=[\r\n]|\Z)|"""
     rf"""(?:({_AUTH_SCHEMES}))?[^\s"'][^\r\n]*"""
     r""")"""
 )
