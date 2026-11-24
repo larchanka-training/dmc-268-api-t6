@@ -464,7 +464,7 @@ class HttpGitHubVcsProvider:
         await checkpoint()
         body, _ = await self._get_capped_body(
             f"{prefix}/git/blobs/{sha}",
-            headers=_headers(token),
+            headers=_headers(token) | {"Accept-Encoding": "identity"},
             max_bytes=_MAX_BLOB_RESPONSE_BYTES,
             too_large=lambda: BlobTooLargeError(
                 "GitHub blob response exceeds the retrieval budget"
