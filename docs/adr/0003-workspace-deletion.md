@@ -7,7 +7,7 @@
 | Владелец | Задача [#545](https://github.com/larchanka-training/dmc-268-api-t6/issues/545) (milestone `Спринт 5`) |
 | Задача | [#545](https://github.com/larchanka-training/dmc-268-api-t6/issues/545), эпик [#369](https://github.com/larchanka-training/dmc-268-api-t6/issues/369) |
 | Входные решения | [ADR 0002](0002-billing-monetization.md) (#370, PR #514 / #587: §5 виды и гранты `credit_ledger`, §5.2 `balance_holds`, §6 авто-пополнение и согласия, §9 право отказа 14 дней, §10.3 обработка событий Stripe, §10.4 идемпотентность Stripe, §11.2 БД-роль `Owner`, §15 Customer Portal [#372], §16 порядок внедрения); #457 (`runs.data_purged_at`); #496 (`installation.deleted`); #113 / #511 (rebinding); #553 (`auth_agent_tokens`, `auth_agent_device_flows`) |
-| Изменяемый канон | [SYSTEM_DESIGN](../SYSTEM_DESIGN.md) §1 Р-15, §6.4, §6.5, §6.9, §10, §11, §12, §13, [BACKEND_ARCHITECTURE](../BACKEND_ARCHITECTURE.md), [ADR 0002](0002-billing-monetization.md) §4.3, §5, §10.3, §11.1; карта изменений — в §9 |
+| Изменяемый канон | [SYSTEM_DESIGN](../SYSTEM_DESIGN.md) §1 Р-15, §6.4, §6.5, §6.9, §10, §11, §12, §13, [PIPELINE_SPEC](../PIPELINE_SPEC.md) §1 (T6, T12, T13), §6, [BACKEND_ARCHITECTURE](../BACKEND_ARCHITECTURE.md), [ADR 0002](0002-billing-monetization.md) §4.3, §5, §10.3, §11.1; карта изменений — в §9 |
 
 Документ проектный: код, миграции и зависимости им не меняются, реализация идёт
 отдельными задачами api (#550, #551) и ui (ui#300, ui#301) после мержа зависимостей биллинга и ролей (§12).
@@ -72,7 +72,7 @@
    - При удалении Workspace запись `provider_installations` помечается `deleted_at = now()`.
    - Поиск привязки `link()` и логика `SqlAlchemyGitHubRepositoryRebinding` фильтруют удалённые
      воркспейсы (`workspaces.status != 'deleted'`), предотвращая доступ к tombstone.
-   - Метод `link()` для установки удалённого воркспейса отказывает без 409 и без создания нового воркспейса по той же установке (#554); новая `installation.id` после переустановки App создаёт новый независимый Workspace.
+   - Метод `link()` для установки удалённого воркспейса (критерий: `workspaces.status = 'deleted'` по join с воркспейсом установки, не затрагивая `installation.deleted` при живом воркспейсе) отказывает без 409 и без создания нового воркспейса по той же установке (#554); новая `installation.id` после переустановки App создаёт новый независимый Workspace.
 7. **UX после удаления:** сброс клиентского кэша, редирект на соседний доступный workspace либо на
    онбординг `/repositories`. Прямой переход по сохранённому URL удалённого workspace отдаёт экран 404.
 
@@ -119,14 +119,14 @@
 ### 4.1. Аннулирование остатка в схеме `credit_ledger` и каноническая отмена прогонов
 
 1. Перевод `workspaces.status = 'deleted'` в транзакции немедленно блокирует вебхуки, запуски, пополнения и claim задач.
-2. Прогоны удаляемого воркспейса обрабатываются в строгом соответствии с жизненным циклом (SD §6.4, §6.9):
-   - Прогоны в состоянии `queued` немедленно переводятся в терминальное состояние `state = 'cancelled'`, `error_code = 'workspace_deleted'`, `error_message = 'Workspace was deleted'` через канонический путь отмены (`RunRepository.cancel_run` / `run_repository.py:658-666`), выставляющий `finished_at = now()`, `cancellation_signal_requested_at` (при `attempt >= 1`) и вызывающий `notify_run_state` для оповещения UI по SSE.
-   - Прогоны в активных состояниях `running` и `publishing` получают флаг кооперативной отмены `cancel_requested = true`. Прямой перевод активных прогонов в `cancelled` внутри транзакции `DELETE` запрещён: это создаёт гонку с воркером, удерживающим `lease_until`.
+2. Прогоны удаляемого воркспейса обрабатываются в строгом соответствии с жизненным циклом (SD §6.4, §6.9, PIPELINE_SPEC §1, §6):
+   - Прогоны в состоянии `RunState.QUEUED` немедленно переводятся в терминальное состояние `state = RunState.CANCELLED`, `error_code = 'workspace_deleted'`, `error_message = 'Workspace was deleted'` через канонический путь отмены репозитория (`SqlAlchemyRunRepository.request_cancel(run_id)` расширяется параметрами причины `error_code`, `error_message` либо выделяется специализированный метод `request_system_cancel(run_id, error_code, error_message)`), выставляющий `finished_at = now()`, `cancellation_signal_requested_at = now()` (при `attempt >= 1`) и вызывающий `notify_run_state` для оповещения UI по SSE; сигнал закрытия check-run публикуется в use case после commit транзакции (по аналогии с `CancelRun`).
+   - Прогоны в активных состояниях `RunState.RUNNING` и `RunState.PUBLISHING` получают флаг кооперативной отмены `cancel_requested = true`. Прямой перевод активных прогонов в `cancelled` внутри транзакции `DELETE` запрещён: это создаёт гонку с воркером, удерживающим `lease_until`.
 3. После коммита транзакции воркер фоновой очистки `WorkspaceDeletionWorker` (#551) ожидает перехода всех активных прогонов воркспейса в терминальные состояния (`succeeded`, `failed`, `cancelled`, `skipped`).
-   - **Гарантия завершения ожидания (SD §6.4, :470, :481):**
-     а) Реконсилер при каждом тике переводит в `cancelled` любой прогон в состоянии `queued` удаляемого воркспейса (`deletion_enqueued_at IS NOT NULL`), исключая бесконечное ожидание повторных попыток claim;
-     б) Для зависших прогонов в `running` с истёкшим `lease_until` реконсилер переводит их напрямую в `cancelled` (а не в `queued`), фиксируя `error_code = 'workspace_deleted'`, `finished_at = now()`;
-     в) Устанавливается предельный таймаут ожидания завершения прогонов воркером: **15 минут**. По истечении 15 минут `WorkspaceDeletionWorker` принудительно переводит любые остаточные нетерминальные прогоны воркспейса в `state = 'cancelled'`, `error_code = 'workspace_deletion_timeout'`, `finished_at = now()`, высвобождает `balance_holds` и переходит к следующим шагам биллинга и purge.
+   - **Гарантия завершения ожидания (SD §6.4, PIPELINE_SPEC §1, §6):**
+     а) Реконсилер при каждом тике переводит в `RunState.CANCELLED` любой прогон в состоянии `RunState.QUEUED` удаляемого воркспейса (`deletion_enqueued_at IS NOT NULL`) через канонический путь отмены с выставлением `cancellation_signal_requested_at`, `notify_run_state` и последующей публикацией сигнала check-run, исключая бесконечное ожидание повторных попыток claim;
+     б) Для зависших прогонов в `RunState.RUNNING` с истёкшим `lease_until` реконсилер переводит их в `RunState.CANCELLED` (а не в `RunState.QUEUED`), фиксируя через канонический путь отмены `error_code = 'workspace_deleted'`, `finished_at = now()`, `cancellation_signal_requested_at = now()`, вызывая `notify_run_state` и публикуя сигнал закрытия check-run;
+     в) Устанавливается предельный таймаут ожидания завершения прогонов воркером: **15 минут**. По истечении 15 минут `WorkspaceDeletionWorker` принудительно переводит любые остаточные нетерминальные прогоны воркспейса в `state = RunState.CANCELLED`, `error_code = 'workspace_deletion_timeout'`, `finished_at = now()`, также через канонический путь с выставлением `cancellation_signal_requested_at`, вызовом `notify_run_state` и публикацией сигнала закрытия check-run, высвобождает `balance_holds` и переходит к следующим шагам биллинга и purge.
 4. После того как все прогоны воркспейса стали терминальными, единая точка записи биллинга (ADR 0002 §3.4, §5.2) финализирует списания за фактически потреблённые ресурсы и высвобождает `balance_holds`.
 5. Положительные свободные остатки активных грантов аннулируются отдельными проводками в `credit_ledger`:
    - `kind = 'adjustment'`;
@@ -188,11 +188,11 @@
 | `customer.subscription.deleted` | Игнорируется (HTTP 200) | Подтверждение отмены; воркспейс уже удалён, повторные действия не требуются. |
 | `invoice.paid` | Для счетов `metadata.source != 'checkout'`: пополнение не начисляется, создаётся запись outbox на `stripe.Refund` с `idempotency_key = f"refund:invoice:{invoice_id}"`. Для счетов Checkout (`metadata.source == 'checkout'`): возврат не инициируется (только запись `provider_invoice_id`), возврат идёт по сессии Checkout | Защита от двойного возврата средств по Checkout (ADR 0002 §10.3). Возврат по абонентским счетам выполняет воркер #551. |
 | `invoice.payment_failed` | Игнорируется (HTTP 200) | Фиксация неуспеха списания по уже отменённой подписке. |
-| `charge.refunded` | Фиксируется в `credit_ledger` (`kind = 'refund'`) | Отражение возврата средств в бухгалтерском аудите без изменения статуса воркспейса. |
-| `refund.updated` / `refund.failed` | При `refund.failed` создаётся проводка `credit_ledger` (`kind = 'adjustment'`, `reason = 'refund_failed'`) | Восстановление баланса и суточная сверка по ADR 0002 §10.3. |
+| `charge.refunded` | Фиксируется в `credit_ledger` (`kind = 'refund'`) на каждый объект возврата с `payment_id = payments.id` | Отражение возврата средств в бухгалтерском аудите по факту события Stripe без изменения статуса воркспейса (ADR 0002 §10.3). |
+| `refund.updated` (`status in ('failed', 'canceled')`) | Создаётся запись outbox на повтор попытки возврата через воркер #551 (по аналогии с повтором возврата 14-дневного отказа ADR 0002 §9); баланс удалённого воркспейса не восстанавливается | Исключает зависание средств клиента у Stripe и фантомное пополнение баланса удалённого воркспейса. |
 | `charge.dispute.created` | Фиксируется в `credit_ledger` (`kind = 'adjustment'`, `reason = 'dispute'`) | Отражение претензии по ADR 0002 §5/§10.3 для бухгалтерского учёта. |
-| `charge.dispute.closed` | При выигранном споре сторнируется проводкой `kind = 'adjustment'`, `reason = 'dispute_reversed'` | Завершение арбитража платежной системой по ADR 0002 §10.3. |
-| `checkout.session.completed` | Обрабатывается строго при `mode == 'payment'` (при `mode == 'setup'` игнорируется). Платеж фиксируется как `payments.status = 'paid'`, кредиты не начисляются; создаётся запись outbox на `stripe.Refund` с `idempotency_key = f"refund:checkout:{session.id}"` и фиксацией в `credit_ledger` (`kind = 'refund'`) | Сохранение фискальной достоверности платежа с последующим полным возвратом через воркер #551 (ADR 0002 §10.3). |
+| `charge.dispute.closed` | При выигранном споре сторнируется проводкой `kind = 'adjustment'` с указанием `reversal_of_id = dispute_ledger_id` строго по правилам ADR 0002 §10.3 | Завершение арбитража платежной системой по ADR 0002 §10.3. |
+| `checkout.session.completed` | Обрабатывается строго при `mode == 'payment'` (при `mode == 'setup'` игнорируется). Платеж фиксируется как `payments.status = 'paid'`, кредиты не начисляются; создаётся запись outbox на `stripe.Refund` с `idempotency_key = f"refund:checkout:{session.id}"`. Проводка `kind = 'refund'` в `credit_ledger` при создании outbox НЕ пишется — она вносится только по фактическому вебхуку `charge.refunded` на каждый объект возврата | Сохранение фискальной достоверности платежа с последующим полным возвратом через воркер #551 без дублирования строк леджера (ADR 0002 §10.3). |
 | `checkout.session.expired` | Платеж маркируется `payments.status = 'expired'` | Штатное истечение неоплаченной сессии. |
 | `payment_method.detached` | Игнорируется (HTTP 200) | Подтверждение отвязки способа оплаты. |
 | Любое другое событие Stripe | Игнорируется (HTTP 200) | Изоляция удалённого воркспейса от фоновых событий. |
@@ -208,11 +208,11 @@
 | Категория сущностей / Таблицы базы данных | Действие при удалении Workspace | Срок хранения | Обоснование и нормативная база |
 |---|---|---|---|
 | **Токены агентов** (`auth_agent_tokens`, `auth_agent_device_flows`) (#553) | Для `auth_agent_tokens`: немедленно выставляется `revoked_at = now()`; строки сохраняются как tombstone. Для `auth_agent_device_flows`: немедленное удаление строк репозиториев воркспейса | **7 лет** (`auth_agent_tokens` для аудита, ожидает Legal) / **0 дней** (`device_flows`) | Мгновенный отзыв доступа CLI-агентов к репозиториям удалённого воркспейса. |
-| **Секреты и токены интеграций** (`gitlab_connections`, `bitbucket_connections`, `bitbucket_repository_webhook_secrets`, `bitbucket_*_identities`, `bitbucket_publication_claims`) | Отзыв токенов у провайдера; обнуление секретов и ключей (`token_ciphertext = NULL`, `credential_key_id = NULL`, `token_key_id = NULL`, `secret_ciphertext = NULL`, `secret_key_id = NULL`, `revoked_at = now()`, `intake_enabled = false`). Строки сохраняются как tombstone | **7 лет** (id для FK, ожидает Legal) | `webhook_events` и `runs` имеют FK на `gitlab_connection_id`, `bitbucket_repository_id` и `bitbucket_run_origins`. Удаление строк ломает ссылочную целостность аудита. |
+| **Секреты и токены интеграций** (`gitlab_connections`, `bitbucket_connections`, `bitbucket_repository_webhook_secrets`, `bitbucket_*_identities`, `bitbucket_publication_claims`) | Отзыв токенов у провайдера; обнуление секретов и ключей (`token_ciphertext = NULL`, `credential_key_id = NULL`, `token_key_id = NULL`, `secret_ciphertext = NULL`, `secret_key_id = NULL`, `revoked_at = now()`, `intake_enabled = false`; для `bitbucket_repository_webhook_secrets` также выставляется `confirmed_at = NULL` и `revoked_at = now()` во избежание нарушения `ck_bitbucket_repository_webhook_secrets_confirmation`). Строки сохраняются как tombstone | **7 лет** (id для FK, ожидает Legal) | `webhook_events` и `runs` имеют FK на `gitlab_connection_id`, `bitbucket_repository_id` и `bitbucket_run_origins`. Удаление строк ломает ссылочную целостность аудита. |
 | **Индекс графа RAG** (`code_index_states`, `code_index_files`, `code_index_symbols`, `code_index_edges`, `code_index_imports`, `bitbucket_tree_checkpoint_pages`, `bitbucket_raw_checkpoint_blobs`, `bitbucket_published_manifests`) | Немедленное батчевое удаление (Hard Delete) | **0 дней** | Защита интеллектуальной собственности клиента (ADR 0001 §4). |
 | **Правила и конвенции** (`rule_versions`, `repo_conventions`, `repo_convention_drafts`, `repository_rules_status`) | Обезличивание текстов (см. §6.1); строки сохраняются как tombstone. `repository_rules_status` удаляется явным `DELETE` в воркере #551 | **0 дней** (`repository_rules_status`) / **7 лет** (метаданные версий, ожидает Legal) | `runs.rule_version_id` имеет ограничение `NOT NULL FK -> rule_versions.id`. Удаление строк `rule_versions` нарушает FK прогонов. Строки `repositories` не удаляются через DELETE, поэтому `repository_rules_status` очищается явным `DELETE FROM repository_rules_status WHERE repository_id IN (...)`. |
 | **Репозитории и привязки** (`repositories`, `provider_installations`, `code_changes`, `gitlab_project_bindings`, `bitbucket_run_origins`, `bitbucket_status_publications`) | Обезличивание названий и URL (см. §6.1); выставление `deleted_at = now()` на сущностях с soft-delete | **7 лет** (id для FK, ожидает Legal) | `runs.repository_id` имеет внешний ключ на `repositories.id`. Строки сохраняются для связности графа прогонов. |
-| **Доступы и роли воркспейса** (`github_user_workspace_access`, `github_user_repository_access`, роли воркспейса `#373`, `github_installation_access_revocations`) | Немедленное удаление строк данного воркспейса (Hard Delete). Для `github_installation_access_revocations`: удаление по `provider_installation_id` связанных установок | **0 дней** | Мгновенный отзыв прав доступа пользователей к удалённому ресурсу. |
+| **Доступы и роли воркспейса** (`github_user_workspace_access`, `github_user_repository_access`, роли воркспейса `#373`, `github_installation_access_revocations`) | Немедленное удаление строк данного воркспейса (Hard Delete). Для `github_installation_access_revocations`: удаление по `provider_installation_id` связанных установок (снятие fence безопасно, так как метод `link()` для установки удалённого воркспейса отказывает по `workspaces.status = 'deleted'`, а сверка репозиториев для неё не вызывается) | **0 дней** | Мгновенный отзыв прав доступа пользователей к удалённому ресурсу. |
 | **Вспомогательные таблицы интеграций** (`github_installation_removal_effects`, `bitbucket_push_retry_candidates`) | Не имеют `workspace_id` (привязаны к `delivery_id` / `webhook_event_id`); очищаются штатным воркером очистки вебхуков | **30 дней** | Штатный журнал дедупликации доставок. |
 | **Глобальные сущности пользователей** (`github_user_profiles`, `auth_refresh_families`, `auth_refresh_sessions`, `github_user_installation_sync`) | **Не затрагиваются** при удалении воркспейса | До удаления аккаунта | Принадлежат пользователю глобально, не имеют `workspace_id`. `github_user_installation_sync` содержит счётчики поколений пользователя по `github_user_id`. |
 | **Сырые вебхуки** (`webhook_events`) | Сохраняются неизменными; очистка payload не выполняется (во избежание нарушения `ck_webhook_events_payload_present`) | **30 дней** | Диагностический буфер по канону `SYSTEM_DESIGN.md` §10. Удаляются целиком воркером `webhook-worker` через 30 дней. |
@@ -230,8 +230,8 @@
 |---|---|---|---|---|
 | `workspaces` | `name` | `VARCHAR NOT NULL` | `'Deleted Workspace ' || id::text` | Обезличивание названия воркспейса для исключения хранения ПДн (логина организации) в течение 7 лет |
 | `repositories` | `full_name` | `VARCHAR NOT NULL` | `'deleted-repo-' || id::text` | Соблюдение NOT NULL при удалении названий |
-| `repositories` | `web_url` | `VARCHAR NOT NULL` | `'https://deleted.local/' || id::text` | Соблюдение NOT NULL при удалении внешних ссылок |
-| `provider_installations` | `account_external_id` | `VARCHAR NOT NULL` | `'redacted'` | Обезличивание внешнего ID аккаунта установки |
+| `repositories` | `web_url` | `TEXT NOT NULL` | `'https://deleted.local/' || id::text` | Соблюдение NOT NULL при удалении внешних ссылок (Text в модели) |
+| `provider_installations` | `account_external_id` | `BIGINT NULL, CHECK > 0` | `NULL` | Обезличивание внешнего ID аккаунта установки |
 | `provider_installations` | `metadata` | `JSONB NOT NULL` | `'{}'::jsonb` | Очистка метаданных аккаунта установки |
 | `provider_installations` | `deleted_at` | `TIMESTAMP NULL` | `now()` | Фиксация отключения установки |
 | `code_changes` | `title` | `VARCHAR NOT NULL` | `'[DELETED]'` | Удаление названия PR |
@@ -258,8 +258,8 @@
 | `findings` | `body` | `TEXT NOT NULL` | `''` (пустая строка) | Удаление подробного описания замечания |
 | `findings` | `suggestion` | `TEXT NULL` | `NULL` | Удаление предложенного кода замены |
 | `findings` | `file_path` | `VARCHAR NOT NULL` | `'[DELETED]'` | Защита структуры файлов репозитория |
-| `findings` | `rule_name` | `VARCHAR NOT NULL` | `'REDACTED'` | Обезличивание названий правил |
-| `findings` | `rule_link` | `VARCHAR NULL` | `NULL` | Удаление ссылок на правила |
+| `findings` | `rule_name` | `VARCHAR(255) NULL` | `NULL` | Обезличивание названий правил (String(255) nullable в модели) |
+| `findings` | `rule_link` | `TEXT NULL` | `NULL` | Удаление ссылок на правила (Text nullable в модели) |
 | `final_review_results` | `result` | `JSONB NOT NULL` | `'{}'::jsonb` | Очистка текста итогового вердикта |
 | `final_review_results` | `publication_plan` | `JSONB NOT NULL` | `'{}'::jsonb` | Очистка плана публикации |
 | `comments` | — | Таблица целиком | Сохраняется неизменной | Не содержит открытого текста или ПДн (`finding_id`, `github_review_id`, `github_comment_id`, `findings_hash`) |
@@ -272,7 +272,7 @@
 Удаление приложения на стороне GitHub/Bitbucket **не удаляет** Workspace:
 - Выставляется `installation_available = false`, удаляются права доступа к репозиториям.
 - Сам Workspace, баланс, подписка и финансовая история сохраняются.
-- **Доступ Owner к биллингу:** генерация сессии Stripe Customer Portal (`POST /api/workspaces/{id}/billing/portal-session`) закреплена за задачей #372 (ADR 0002 §15). Настоящий ADR 0003 уточняет, что Owner удалённого воркспейса сохраняет возможность получить сессию портала для просмотра чеков в течение 30-дневного окна (`deleted_at IS NOT NULL AND data_purged_at IS NULL`). Список воркспейсов `GET /api/workspaces` для обычных участников скрывает удалённый воркспейс, но возвращает его с признаком `deleted = true` исключительно пользователям с подтверждённой ролью `Owner` в БД.
+- **Сессия Stripe Customer Portal:** генерация сессии Stripe Customer Portal (`POST /api/workspaces/{id}/billing/portal-session`) закреплена за задачей #372 (ADR 0002 §15). При удалении Workspace доступ к сессии портала прекращается немедленно (0 дней) вместе с отзывом всех ролей и доступов к воркспейсу (§6).
 
 ### 7.2. Удаление Workspace и предотвращение коллизий при переустановке App
 1. **Пометка установки и двойное значение `deleted_at`:**
@@ -281,8 +281,8 @@
    - Для Bitbucket и GitLab методы повторного открытия отозванного подключения (`reopen_connection`, connect) строго запрещены, если связанный воркспейс находится в статусе `workspaces.status = 'deleted'`. Попытка повторного подключения завершается ошибкой `409 Conflict`.
 3. **Фильтрация в rebinding и связывании (`link`):**
    - В `SqlAlchemyGitHubRepositoryRebinding.archived_workspace` и методах `rebind()` добавляется обязательное условие: `workspaces.status != 'deleted'`.
-   - Решение по `link()` (#554, принято техлидом): для установки, связанной с удалённым воркспейсом (`deleted_at IS NOT NULL`), метод `link()` (`workspaces/infrastructure/github_installation_links.py`) отказывает в привязке без ошибки 409 и без создания нового воркспейса по той же установке. Новая `installation.id` после повторной установки App создаёт новый независимый Workspace.
-4. **Устранение коллизии уникальности `(provider, external_id)`:**
+   - Решение по `link()` (#554, принято техлидом): для установки, связанной с удалённым воркспейсом (критерий: `workspaces.status = 'deleted'` по join с воркспейсом установки, не затрагивая случай `installation.deleted` при живом воркспейсе), метод `link()` (`workspaces/infrastructure/github_installation_links.py`) отказывает в привязке без ошибки 409 и без создания нового воркспейса по той же установке. Новая `installation.id` после повторной установки App создаёт новый независимый Workspace.
+4. **Устранение коллизии уникальности `(provider, external_id)` и адаптация запросов:**
    - Существующее ограничение `UniqueConstraint("provider", "external_id")` (`app/modules/repositories/infrastructure/models.py:50`) удаляется миграцией в задаче #551.
    - Вместо него создаётся частичный уникальный индекс:
      ```sql
@@ -290,6 +290,7 @@
      ```
    - В коде используется `on_conflict_do_nothing(index_elements=["provider", "external_id"], index_where=ProviderInstallation.deleted_at.is_(None))`.
    - Благодаря частичному индексу строки с `deleted_at IS NOT NULL` перестают занимать уникальную пару `(provider, external_id)`, исключая коллизии при повторных установках App.
+   - **Адаптация поиска установки:** с частичным индексом пара `(provider, external_id)` перестаёт быть глобальным ключом таблицы: исторические tombstone-строки сохраняются в базе. Поэтому все запросы поиска активной установки (`SqlAlchemyWebhookRunTargets`, `SqlAlchemyGitHubInstallationResolver`, `SqlAlchemyGitHubRepositoryRebinding` и соседние) обязательно включают фильтр `ProviderInstallation.deleted_at.is_(None)`. От появления дублей активных установок защищает как частичный уникальный индекс на уровне БД, так и проверка существования активной установки в транзакции `link()`.
 5. **Повторная установка App:**
    - Повторная установка App той же организацией создаёт **новый независимый Workspace** с новым `id` и тарифом по умолчанию. Старый tombstone никогда не воскресает.
 
@@ -311,18 +312,20 @@
 | Документ / Спецификация | Требуемое изменение | Задача |
 |---|---|---|
 | [SYSTEM_DESIGN.md §1 Р-15](../SYSTEM_DESIGN.md#1-решения) | Замена каскадного удаления на сохранение метаданных и tombstone для фискального аудита | `#551` |
-| [SYSTEM_DESIGN.md §6.4](../SYSTEM_DESIGN.md#64-состояния-run) | Правила реконсилера для удаляемого workspace: отмена queued и зависших running с истёкшим lease_until | `#551` |
-| [SYSTEM_DESIGN.md §6.5](../SYSTEM_DESIGN.md#65-вход-и-сессия-d4) | Исключение удалённого `workspace_id` (`status = 'deleted'`) из сессий участников, сохранение доступа Owner к биллингу через portal-session | `#550` |
-| [SYSTEM_DESIGN.md §6.9](../SYSTEM_DESIGN.md#69-подключение-репозиториев-установка-github-app-d10) | Разграничение `installation.deleted` и удаления воркспейса, отказ `link()` для tombstone-установок, исключение для Owner в получении portal-session | `#551` |
+| [SYSTEM_DESIGN.md §6.4](../SYSTEM_DESIGN.md#64-состояния-run) | Правила реконсилера для удаляемого workspace: отмена queued и зависших running с истёкшим lease_until через канонический путь отмены | `#551` |
+| [PIPELINE_SPEC.md §1](../PIPELINE_SPEC.md#1-состояния-прогона) | Переходы реконсилера для удаляемого workspace: T6 (queued в cancelled), T12/T13 (running с истёкшим lease_until в cancelled) через канонический путь отмены | `#551` |
+| [PIPELINE_SPEC.md §6](../PIPELINE_SPEC.md#6-каталог-ошибок-прогона) | Каталог error_code: добавление кодов `workspace_deleted` и `workspace_deletion_timeout` | `#551` |
+| [SYSTEM_DESIGN.md §6.5](../SYSTEM_DESIGN.md#65-вход-и-сессия-d4) | Исключение удалённого `workspace_id` (`status = 'deleted'`) из сессий участников, отзыв доступов | `#550` |
+| [SYSTEM_DESIGN.md §6.9](../SYSTEM_DESIGN.md#69-подключение-репозиториев-установка-github-app-d10) | Разграничение `installation.deleted` и удаления воркспейса, отказ `link()` для tombstone-установок удалённых воркспейсов | `#551` |
 | [SYSTEM_DESIGN.md §10](../SYSTEM_DESIGN.md#10-стратегия-кэширования-контекстов) | Замена «до удаления Workspace (каскад)» на гибридную модель (0 дней очистка кода клиента, 7 лет хранение метаданных для фискального аудита) | `#551` |
 | [SYSTEM_DESIGN.md §11](../SYSTEM_DESIGN.md#11-данные-согласование-с-erd-роли-6) | Замена концепции полного каскадного удаления на батчевую очистку через `purge_workspace_run_data` с сохранением строк `RunAction` без payload | `#551` |
-| [SYSTEM_DESIGN.md §12](../SYSTEM_DESIGN.md#12-контракт-api--ui) | Исключение воркспейсов в статусе `deleted` из выдачи активных установок и сессий `/api/auth/me` (с исключением для Owner при получении portal-session) | `#550` |
+| [SYSTEM_DESIGN.md §12](../SYSTEM_DESIGN.md#12-контракт-api--ui) | Исключение воркспейсов в статусе `deleted` из выдачи активных установок и сессий `/api/auth/me` | `#550` |
 | [SYSTEM_DESIGN.md §13](../SYSTEM_DESIGN.md#13-нефункциональные-требования) | Согласование сводной таблицы сроков хранения данных клиента при удалении Workspace | `#551` |
 | [BACKEND_ARCHITECTURE.md](../BACKEND_ARCHITECTURE.md) | Фоновый воркер `WorkspaceDeletionWorker`: асинхронный вызов Stripe и отзыв VCS-токенов вне транзакций, батчевая очистка `purge_workspace_run_data` | `#551` |
 | [ADR 0002 §4.3 и §5](0002-billing-monetization.md#43-подписка) | Переопределение для удалённого воркспейса: немедленная отмена подписки, возврат по запоздалым `invoice.paid`, аннулирование грантов через `adjustment` | `#551` |
-| [ADR 0002 §10.3](0002-billing-monetization.md#103-charge-dispute) | Обработка диспутов, чарджбэков и сбоев рефандов по удалённым воркспейсам без изменения статуса `deleted` | `#551` |
+| [ADR 0002 §10.3](0002-billing-monetization.md#103-вебхуки) | Обработка диспутов (сторно с `reversal_of_id`) и сбоев рефандов (повтор возврата) по удалённым воркспейсам без изменения статуса `deleted` | `#551` |
 | [ADR 0002 §11.1](0002-billing-monetization.md#111-матрица) | Ссылка в строке «Удаление workspace» на правила и авторизацию настоящего ADR 0003 | `#550` |
-| [ADR 0002 §15](0002-billing-monetization.md#15-открытые-вопросы) | Реализация Customer Portal сессий закреплена за #372; ADR 0003 определяет доступ Owner в 30-дневном окне | `#372` / `#550` |
+| [ADR 0002 §15](0002-billing-monetization.md#15-карта-изменений-канона) | Генерация сессий Customer Portal закреплена за #372; при удалении воркспейса доступ к сессиям портала прекращается немедленно (0 дней) | `#372` / `#550` |
 | `contracts/openapi.yaml` | Спецификация эндпоинта `DELETE /api/workspaces/{workspace_id}` (ответы `202`, `403`, `404`, `422`) | `#550` |
 
 ---
