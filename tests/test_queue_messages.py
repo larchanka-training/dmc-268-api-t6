@@ -24,12 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import app.modules.reviews.infrastructure.amqp as amqp
 import app.worker as worker_module
 from app.bootstrap.llm_gateway import build_gateway as original_build_gateway
-from app.modules.code_index.application.leader_tasks import (
-    CodeIndexLeaderTasks,
-    ScheduledTask,
-)
+from app.common.application.leader_tasks import LeaderTasks, ScheduledTask
 from app.modules.reviews.application.handle_review_run import ClaimedAttempt, DeliveryOutcome
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, StoredRunMessage
+from app.modules.reviews.application.run_data_retention import INTERVAL_SECONDS, PurgeExpiredRunData
 from app.modules.reviews.application.run_delivery import (
     HandleRunDelivery,
     PersistedRunIdentity,
@@ -59,6 +57,7 @@ from app.worker import (
     github_adapters,
     run_worker,
 )
+from tests.leader_task_fakes import StubLeader, worker_process
 
 RUN = UUID("4fabfd21-5acc-4351-a99c-349dffdc00cf")
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
@@ -664,45 +663,21 @@ def test_worker_leader_tick_runs_the_sweep_then_the_outbox_replay_every_thirty_s
 
 
 @dataclass
-class _LeaderCalls:
+class _LeaderCalls(StubLeader):
     """Records the sweep, the replay and the index tasks of a leader tick, in order."""
-
-    calls: list[str] = field(default_factory=list)
-    failing: str | None = None
-    error: type[BaseException] = RuntimeError
-
-    def _record(self, name: str) -> None:
-        self.calls.append(name)
-        if name == self.failing:
-            raise self.error(f"{name} failed")
-
-    async def execute(self, *, limit: int = 100) -> int:
-        self._record("sweep")
-        return 0
-
-    async def replay_pending_publications(self, *, limit: int = 100) -> int:
-        self._record("replay")
-        return 0
 
     def task(self, name: str) -> ScheduledTask:
         calls = self
 
         class Task:
             async def run(self, budget_seconds: float) -> bool:
-                calls._record(name)
+                calls._call(name)
                 return False
 
         return ScheduledTask(name, Task(), 300)
 
     def process(self) -> WorkerProcess:
-        return WorkerProcess(
-            handle_run=cast(Any, None),
-            handle_delivery=cast(Any, None),
-            publish_review=cast(Any, None),
-            enqueue=cast(Any, self),
-            sweep=cast(Any, self),
-            index_tasks=CodeIndexLeaderTasks([self.task("ttl"), self.task("gc")]),
-        )
+        return worker_process([self.task("ttl"), self.task("gc")], stub=self)
 
 
 def test_worker_leader_tick_runs_the_index_tasks_after_the_outbox_replay() -> None:
@@ -722,7 +697,7 @@ def test_a_failing_index_task_neither_skips_the_replay_nor_fails_the_leader_tick
         asyncio.run(leader.process().leader_tick())
 
     assert leader.calls == ["sweep", "replay", "ttl", "gc"]
-    assert "Code index leader task ttl failed" in caplog.text
+    assert "Leader task ttl failed" in caplog.text
 
 
 def test_the_index_tasks_run_even_when_the_replay_fails() -> None:
@@ -745,20 +720,24 @@ def test_a_cancelled_leader_tick_skips_the_index_tasks() -> None:
 
 
 @pytest.mark.parametrize(
-    ("app", "names"),
+    ("app", "names", "expected"),
     [
         # Without the GitHub App `index_consumer` yields None: converge, GC and the TTL
         # purge only touch the database.
-        ({}, ["converge", "gc", "ttl"]),
+        ({}, ["converge", "gc", "ttl"], ["converge", "gc", "ttl", "run_data_retention"]),
         (
             {"GITHUB_APP_ID": "1", "GITHUB_APP_PRIVATE_KEY": "key"},
             ["converge", "dispatch", "gc", "ttl", "reconcile"],
+            ["converge", "dispatch", "gc", "ttl", "run_data_retention", "reconcile"],
         ),
     ],
     ids=["without-app", "with-app"],
 )
 def test_run_worker_hands_the_index_leader_tasks_to_the_worker_process(
-    monkeypatch: pytest.MonkeyPatch, app: dict[str, str], names: list[str]
+    monkeypatch: pytest.MonkeyPatch,
+    app: dict[str, str],
+    names: list[str],
+    expected: list[str],
 ) -> None:
     settings = WorkerSettings.from_environment(
         {
@@ -793,10 +772,15 @@ def test_run_worker_hands_the_index_leader_tasks_to_the_worker_process(
         asyncio.run(run_worker(settings))
 
     assert (composed["github"] is None) == (not app)
-    leader = composed["index_tasks"]
-    assert isinstance(leader, CodeIndexLeaderTasks)
-    assert [task.name for task in leader.tasks] == names
-    assert {task.name: task.interval_seconds for task in leader.tasks}["gc"] == 120
+    leader = composed["leader_tasks"]
+    assert isinstance(leader, LeaderTasks)
+    assert [task.name for task in leader.tasks] == expected
+    retention_task = next(task for task in leader.tasks if task.name == "run_data_retention")
+    assert isinstance(retention_task.task, PurgeExpiredRunData)
+    assert retention_task.continue_after_timeout is False
+    intervals = {task.name: task.interval_seconds for task in leader.tasks}
+    assert intervals["gc"] == 120
+    assert intervals["run_data_retention"] == INTERVAL_SECONDS
 
 
 LLM_ENV = {

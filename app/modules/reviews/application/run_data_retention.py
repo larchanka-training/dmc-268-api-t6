@@ -7,9 +7,7 @@ An expired file blob loses its text on its own expiry: many runs share one blob.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import math
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -22,9 +20,6 @@ _LOGGER = logging.getLogger(__name__)
 RUN_BATCH = 100
 BLOB_BATCH = 1_000
 INTERVAL_SECONDS = 3_600
-# A tick of the worker leader waits for this pass, like for the code index tasks.
-TICK_BUDGET_SECONDS = 10.0
-TICK_TIMEOUT_MARGIN_SECONDS = 5.0
 
 
 class RunDataRetentionStore(Protocol):
@@ -57,26 +52,6 @@ class PurgeExpiredRunData:
         self._retention = retention
         self._now = now
         self._clock = clock
-        self._due = -math.inf
-
-    async def tick(self) -> None:
-        """Run a pass of the worker leader once the interval has passed.
-
-        A pass that reports remaining work goes on at the next tick. A failed one waits for
-        the interval, and its `Exception`, the timeout included, stays here; a cancellation
-        propagates and stops the leader.
-        """
-        started = self._clock()
-        if started < self._due:
-            return
-        try:
-            async with asyncio.timeout(TICK_BUDGET_SECONDS + TICK_TIMEOUT_MARGIN_SECONDS):
-                remains = await self.run(TICK_BUDGET_SECONDS)
-        except Exception:
-            _LOGGER.exception("Run data retention pass failed")
-            remains = False
-        if not remains:
-            self._due = started + INTERVAL_SECONDS
 
     async def run(self, budget_seconds: float) -> bool:
         """Work for about `budget_seconds`; returns whether work remains."""
