@@ -1,16 +1,16 @@
 """One poll of the bot (`Bot.tick`) and the Telegram commands (`Bot.handle_updates`).
 
 A tick: read the open pull requests of every repo, track who is requested (a reviewer who
-reviewed and is requested again starts round N+1), request a reviewer on a pull request that
-never had one, then send the evening digest or the batch message when their rule holds.
-GitHub and Telegram calls never run inside a store transaction.
+reviewed and is requested again starts round N+1), request a reviewer on a pull request without
+requested reviewers or completed reviews, then send the evening digest or the batch message when
+their rule holds. GitHub and Telegram calls never run inside a store transaction.
 """
 
 from __future__ import annotations
 
 import logging
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -39,6 +39,64 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _reviews_needed(requested: Mapping[str, str], tracked: Mapping[str, Request]) -> bool:
+    for key in requested:
+        old = tracked.get(key)
+        if old is None or old.status is Status.REVIEWED:
+            return True
+    for key, old in tracked.items():
+        if old.status is Status.WAITING and key not in requested:
+            return True
+    return False
+
+
+def next_request_changes(
+    pr: PullRequest,
+    tracked: Mapping[str, Request],
+    requested: Mapping[str, str],
+    submitted_counts: Mapping[str, int],
+    now: datetime,
+) -> list[Request]:
+    """Pure round/status transition for tracked reviewers of one pull request."""
+    changes: list[Request] = []
+    for key, login in requested.items():
+        old = tracked.get(key)
+        if old is None:
+            changes.append(
+                Request(
+                    repo=pr.repo,
+                    number=pr.number,
+                    reviewer=key,
+                    login=login,
+                    round=1,
+                    status=Status.WAITING,
+                    queued_at=now,
+                    notified=False,
+                    reviews_seen=submitted_counts.get(key, 0),
+                )
+            )
+        elif old.status is Status.REVIEWED:
+            # Re-request after a review: GitHub has no event for it, the state change is it.
+            changes.append(
+                replace(
+                    old,
+                    round=old.round + 1,
+                    status=Status.WAITING,
+                    queued_at=now,
+                    notified=False,
+                    reviews_seen=submitted_counts.get(key, 0),
+                )
+            )
+        elif old.status is Status.REMOVED:
+            # Added back without a review in between: the same round, notified or not.
+            changes.append(replace(old, status=Status.WAITING))
+    for key, old in tracked.items():
+        if old.status is Status.WAITING and key not in requested:
+            reviewed = submitted_counts.get(key, 0) > old.reviews_seen
+            changes.append(replace(old, status=Status.REVIEWED if reviewed else Status.REMOVED))
+    return changes
+
+
 class Bot:
     def __init__(
         self,
@@ -54,7 +112,10 @@ class Bot:
         self.telegram = telegram
         self.clock = clock
         self._repos = {repo.full_name: repo for repo in settings.repos}
-        self._aliases = {repo.full_name: repo.alias for repo in settings.repos}
+
+    @property
+    def _aliases(self) -> dict[str, str]:
+        return {name: repo.alias for name, repo in self._repos.items()}
 
     # the poll
 
@@ -66,7 +127,9 @@ class Bot:
                 polled[repo.full_name] = self.github.open_pull_requests(repo.owner, repo.name)
         except GitHubError as error:
             # Nothing changes on a partial poll: a missing repo would look like closed PRs.
+            # Evening digest reads the last SQLite snapshot and does not need a fresh poll.
             log.warning("poll skipped: %s", error)
+            self._digest(now)
             return
         for full_name, prs in polled.items():
             with self.store.transaction():
@@ -83,60 +146,20 @@ class Bot:
     def _sync_requests(self, repo: Repo, pr: PullRequest, now: datetime) -> None:
         tracked = self.store.requests_of(pr.repo, pr.number)
         requested = {login.lower(): login for login in pr.requested_reviewers}
-        changes: list[Request] = []
-        reviews: Counter[str] | None = None
-
-        def submitted() -> Counter[str]:
-            nonlocal reviews
-            if reviews is None:
-                reviews = Counter(
+        submitted_counts: Counter[str] = Counter()
+        if _reviews_needed(requested, tracked):
+            try:
+                submitted_counts = Counter(
                     review.login.lower()
                     for review in self.github.reviews(repo.owner, repo.name, pr.number)
                     if review.submitted
                 )
-            return reviews
-
-        try:
-            for key, login in requested.items():
-                old = tracked.get(key)
-                if old is None:
-                    changes.append(
-                        Request(
-                            repo=pr.repo,
-                            number=pr.number,
-                            reviewer=key,
-                            login=login,
-                            round=1,
-                            status=Status.WAITING,
-                            queued_at=now,
-                            notified=False,
-                            reviews_seen=submitted()[key],
-                        )
-                    )
-                elif old.status is Status.REVIEWED:
-                    # Re-request after a review: GitHub has no event for it, the state change is it.
-                    changes.append(
-                        replace(
-                            old,
-                            round=old.round + 1,
-                            status=Status.WAITING,
-                            queued_at=now,
-                            notified=False,
-                            reviews_seen=submitted()[key],
-                        )
-                    )
-                elif old.status is Status.REMOVED:
-                    # Added back without a review in between: the same round, notified or not.
-                    changes.append(replace(old, status=Status.WAITING))
-            for key, old in tracked.items():
-                if old.status is Status.WAITING and key not in requested:
-                    reviewed = submitted()[key] > old.reviews_seen
-                    changes.append(
-                        replace(old, status=Status.REVIEWED if reviewed else Status.REMOVED)
-                    )
-        except GitHubError as error:
-            log.warning("%s#%d: reviews not read, sync postponed: %s", pr.repo, pr.number, error)
-            return
+            except GitHubError as error:
+                log.warning(
+                    "%s#%d: reviews not read, sync postponed: %s", pr.repo, pr.number, error
+                )
+                return
+        changes = next_request_changes(pr, tracked, requested, submitted_counts, now)
         if changes:
             with self.store.transaction():
                 for change in changes:
@@ -151,13 +174,12 @@ class Bot:
         for full_name, prs in polled.items():
             repo = self._repos[full_name]
             for pr in prs:
-                if (
-                    pr.draft
-                    or pr.requested_reviewers
-                    or pr.requested_teams
-                    or self.store.has_requests(pr.repo, pr.number)
-                    or self.store.assign_done(pr.repo, pr.number)
-                ):
+                if pr.draft or pr.requested_reviewers or pr.requested_teams:
+                    continue
+                tracked = self.store.requests_of(pr.repo, pr.number)
+                if any(req.status is Status.REVIEWED for req in tracked.values()):
+                    continue
+                if self.store.assign_done(pr.repo, pr.number):
                     continue
                 chosen = self._assign_one(repo, pr, load, now)
                 if chosen is not None:
@@ -190,7 +212,6 @@ class Bot:
                 log.warning("%s#%d: not assigned, retry next poll: %s", pr.repo, pr.number, error)
                 return None
             with self.store.transaction():
-                self.store.mark_assign_done(pr.repo, pr.number)
                 self.store.set_meta(META_LAST_ASSIGNED, member.key)
                 self.store.put_request(
                     Request(
@@ -245,30 +266,39 @@ class Bot:
 
     # sending
 
-    def _send_marked(self, items: list[Item], text: str) -> bool:
-        """Mark the items notified, then send. Only a refusal by Telegram (nothing delivered)
-        unmarks them; a transport error keeps the mark: a lost message beats a repeated one."""
-        keys: list[Key] = [(i.request.repo, i.request.number, i.request.reviewer) for i in items]
-        with self.store.transaction():
-            self.store.set_notified(keys, True)
-        try:
-            self.telegram.send_message(self.settings.chat_id, text)
-        except TelegramRejected as error:
-            with self.store.transaction():
-                self.store.set_notified(keys, False)
-            log.warning("message not sent, retry next poll: %s", error)
-            return False
-        except TelegramError as error:
-            log.warning("message delivery unknown, not repeated: %s", error)
+    def _send_marked(self, chunks: list[tuple[str, list[Item]]]) -> bool:
+        """Mark unnotified chunk items notified, then send each chunk.
+
+        Only a refusal by Telegram (nothing delivered for that chunk) unmarks the chunk's
+        newly marked items; already-notified items and transport errors keep their marks.
+        """
+        for text, chunk_items in chunks:
+            fresh = [i for i in chunk_items if not i.request.notified]
+            keys: list[Key] = [
+                (i.request.repo, i.request.number, i.request.reviewer) for i in fresh
+            ]
+            if keys:
+                with self.store.transaction():
+                    self.store.set_notified(keys, True)
+            try:
+                self.telegram.send_message(self.settings.chat_id, text)
+            except TelegramRejected as error:
+                if keys:
+                    with self.store.transaction():
+                        self.store.set_notified(keys, False)
+                log.warning("message not sent, retry next poll: %s", error)
+                return False
+            except TelegramError as error:
+                log.warning("message delivery unknown, not repeated: %s", error)
         return True
 
     def _batch(self, now: datetime) -> None:
         queue = self.queue()
         if not self.should_send(queue, now):
             return
-        text = messages.batch_message(queue, self.settings.team, self._aliases, now)
-        if self._send_marked(queue, text):
-            log.info("batch sent: %d lines", len(queue))
+        chunks = messages.batch_messages(queue, self.settings.team, self._aliases, now)
+        if self._send_marked(chunks):
+            log.info("batch sent: %d lines in %d message(s)", len(queue), len(chunks))
 
     def _digest(self, now: datetime) -> bool:
         """The evening digest, once a day in its window. True when it went out this tick."""
@@ -286,7 +316,7 @@ class Bot:
                 self.store.set_meta(META_DIGEST_DATE, today)
             log.info("digest: nothing waits, not sent")
             return False
-        text = messages.digest_message(
+        chunks = messages.digest_messages(
             items,
             self.settings.team,
             self._aliases,
@@ -294,11 +324,11 @@ class Bot:
             limits.digest_at.strftime("%H:%M"),
             limits.age_shown_after,
         )
-        if not self._send_marked(items, text):
+        if not self._send_marked(chunks):
             return False
         with self.store.transaction():
             self.store.set_meta(META_DIGEST_DATE, today)
-        log.info("digest sent: %d lines", len(items))
+        log.info("digest sent: %d lines in %d message(s)", len(items), len(chunks))
         return True
 
     # Telegram commands

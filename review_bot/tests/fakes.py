@@ -7,7 +7,13 @@ from datetime import UTC, datetime, timedelta
 
 from review_bot.config import Member, Repo, Settings, Thresholds
 from review_bot.models import PullRequest, Review
-from review_bot.ports import GitHubError, ReviewerRejected, TelegramRejected, Update
+from review_bot.ports import (
+    GitHubError,
+    ReviewerRejected,
+    TelegramError,
+    TelegramRejected,
+    Update,
+)
 
 API = "acme/api"
 UI = "acme/ui"
@@ -64,6 +70,7 @@ class FakeGitHub:
         title: str | None = None,
         draft: bool = False,
         reviewers: tuple[str, ...] = (),
+        teams: tuple[str, ...] = (),
         labels: frozenset[str] = frozenset(),
     ) -> None:
         self.prs[(repo, number)] = PullRequest(
@@ -75,6 +82,7 @@ class FakeGitHub:
             draft=draft,
             labels=labels,
             requested_reviewers=reviewers,
+            requested_teams=teams,
         )
 
     def update(self, repo: str, number: int, **changes: object) -> None:
@@ -129,10 +137,17 @@ class FakeTelegram:
     sent: list[tuple[str, str, int | None]] = field(default_factory=list)
     updates: list[Update] = field(default_factory=list)
     reject_next: int = 0
+    fail_next: int = 0
+    reject_after: int | None = None
 
     def send_message(self, chat_id: str, text: str, reply_to: int | None = None) -> None:
         if self.reject_next:
             self.reject_next -= 1
+            raise TelegramRejected("Telegram sendMessage: HTTP 400")
+        if self.fail_next:
+            self.fail_next -= 1
+            raise TelegramError("Telegram sendMessage: connection reset")
+        if self.reject_after is not None and len(self.sent) >= self.reject_after:
             raise TelegramRejected("Telegram sendMessage: HTTP 400")
         self.sent.append((chat_id, text, reply_to))
 

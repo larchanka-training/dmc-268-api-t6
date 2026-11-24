@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
 
-import pytest
 from fakes import Clock, FakeGitHub, FakeTelegram, make_settings
 
 from review_bot.service import Bot
@@ -28,13 +25,3 @@ class Harness:
 
     def tick(self) -> None:
         self.bot.tick()
-
-
-@pytest.fixture
-def h(tmp_path: Path) -> Iterator[Harness]:
-    db_path = str(tmp_path / "bot.sqlite3")
-    github, telegram, clock = FakeGitHub(), FakeTelegram(), Clock()
-    bot = Bot(make_settings(db_path), Store(db_path), github, telegram, clock)
-    harness = Harness(github, telegram, clock, db_path, bot)
-    yield harness
-    harness.bot.store.close()

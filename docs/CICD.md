@@ -18,6 +18,7 @@ flowchart TD
   pr --> tf["terraform fmt / validate\n(api + ui stacks)"]
   pr --> caddy["caddy validate\n(deploy/edge/Caddyfile)\n(required check)"]
   pr --> mon["promtool / amtool / blackbox / compose config\n(deploy/monitoring)"]
+  pr --> rbc["review-bot-checks\n(review_bot)"]
   pr --> lint["tflint + checkov"]
   pr --> unit["ruff check / format, mypy, replay,\npytest без integration, xdist"]
   pr --> integ["pytest -m integration:\n4 шарда pytest-split, свои PG и RabbitMQ"]
@@ -44,6 +45,7 @@ flowchart TD
   health -->|ok| promote["promote digest → :staging"]
   promote --> done["staging обновлён"]
   health -->|ok| monitoring["deploy-monitoring: Prometheus, Grafana,\nAlertmanager (docs/MONITORING.md)"]
+  health -->|ok| review_bot["deploy-review-bot: review_bot (§9)"]
   health -->|fail| rb["rollback: previous или bootstrap\n(§5: Действия при отказе)"]
   deploy -->|fail| switched{"релиз переключён?\n(§5: Действия при отказе)"}
   switched -->|да| rb
@@ -59,6 +61,7 @@ flowchart TD
 | `Terraform fmt / validate` | PR и `main` | `contents: read` | `fmt -check`, `validate` для `api-staging` и `ui-staging` |
 | `Edge Caddyfile validate` | PR и `main` | `contents: read` | `caddy validate` для `deploy/edge/Caddyfile` с `APP_DOMAIN=example.test` — та же команда, что вручную (§8.2); образ caddy читается из `deploy/edge/compose.yml`, второго тега в workflow нет. Имя — required check в правилах `main`, менять только вместе с ними. Входит в `needs` у `Push Docker image`: Caddyfile с ошибкой не доходит до `caddy reload` при выкате |
 | `Monitoring config validate` | PR и `main` | `contents: read` | `scripts/validate_monitoring.sh`: `promtool check config` и `promtool test rules` (`tests/monitoring/alerts.test.yml`), `amtool check-config` обоих вариантов Alertmanager (Telegram и без получателя) и шаблона сообщения, `--config.check` blackbox exporter, `docker compose config` в режимах edge и ports (и с `compose.prod.yml`), `nginx -t` конфига ретранслятора prod, JSON дашбордов. Образы — из `deploy/monitoring/compose.yml` ([MONITORING.md](MONITORING.md)) |
+| `Review bot lint / type / test` | PR и `main` | `contents: read` | `review-bot-checks`: в `review_bot/` (свой `pyproject.toml`, исключён из корневого `mypy`) запускает `uv sync --locked`, `ruff check .`, `ruff format --check .`, `mypy` и `pytest` (§9); в required checks правил `main` не входит |
 | `Terraform lint / security` | PR и `main` | `contents: read` | TFLint + Checkov (встроенные и custom policies `.checkov/policies`); отдельный шаг проверяет, что каждая custom policy падает на `.checkov/fixtures/bad` |
 | `Python lint / type / unit` | PR и `main` | `contents: read` | uv 0.12.11, Python 3.13, без service containers, до 20 мин: первый шаг после checkout падает, если в git есть файлы каталога `docs/plans` (`git ls-files docs/plans` не пуст: планы — локальные рабочие файлы и не коммитятся, #265), затем `uv sync --locked --all-groups`, `ruff check`, `ruff format --check` (Markdown исключён в `pyproject.toml`), `mypy`. Шаг «Unit tests (zero skips)» — `pytest -m "not integration" -n auto --strict-markers` (pytest-xdist) с гейтом покрытия 100% на `review_output` и `answers`; падает, если хоть один тест skipped (xfail не считается). Затем список `pytest --collect-only -q --strict-markers -m integration` выгружается для `Python lint / type / test` (artifact `collected-integration-tests`). Последний шаг «Gold corpus and recorded replay» запускает `validate_dataset.py --final` и `eval_replay.py` по закоммиченному baseline; без response manifest job падает |
 | `Python integration (k/4)` | PR и `main` | `contents: read` | matrix из четырёх шардов, `fail-fast: false`, до 20 мин. У каждого шарда свои service-контейнеры PostgreSQL 17 и RabbitMQ 4 (`TEST_DATABASE_URL`, `RABBITMQ_URL`): integration-тесты делят advisory-lock с фиксированными ключами, каналы NOTIFY и имена очередей, поэтому параллелятся раннерами, не xdist. `pytest -m integration --strict-markers --splits 4 --group k` (pytest-split) делит набор по закоммиченному `.test_durations`, без него — поровну по числу тестов, и перезаписывает файл длительностями выполненных в шарде тестов (`--store-durations --clean-durations`); junit шарда и эти длительности — artifact `integration-k`. Файл читается по пути pytest-split по умолчанию, внутри checkout: rootdir и конфиг `pyproject.toml` pytest выбирает до того, как плагины добавят `--durations-path`, поэтому существующий файл вне checkout сдвигает rootdir, и шард идёт без конфига; `--strict-markers` в этом случае валит сбор (маркер `integration` не зарегистрирован) |
@@ -70,6 +73,7 @@ flowchart TD
 | `Push Docker image` | только `main` | `contents: read`, `packages: write`, `actions: read` | push `:sha`, resolve digest (тот же artifact, что прошёл Trivy) |
 | `Deploy staging` | только `main` | `contents: read`, `packages: read` | выбор цели (курсовой VPS или Terraform-хост, §8), bundle и networkless GitLab preflight в immutable target image до SCP/SSH, подготовка хоста (Docker, на VPS — edge-прокси), Compose по digest, health check, авто-rollback после переключения релиза (на первом выкате без previous — bootstrap); до переключения релиз сохраняется (§5, «Действия при отказе») |
 | `Deploy monitoring` | только `main`, после успешного `Deploy staging` | `contents: read` | загружает `deploy/monitoring` в `/opt/dmc-268-monitoring` и запускает его `deploy.sh` ([MONITORING.md](MONITORING.md) §6), в том числе Tempo — приёмник трейсов приложения (§11); новых jobs и secrets трейсинг не добавляет. Отдельный job и своя группа concurrency `staging-monitoring`: его сбой не откатывает приложение, а в `staging-deploy` он держал бы lock VPS на время своего выката и задерживал `Promote staging tag` и всех ждущих за ним |
+| `Deploy review bot` | только `main`, после успешного `Deploy staging` (при изменении `review_bot/` или ручном запуске) | `contents: read` | собирает бандл секретов из Environment `staging` ([SECRETS.md](SECRETS.md#бот-ревью-review_bot-cicd-9)) и деплоит `review_bot/` в `/opt/dmc-268-review-bot` через `review_bot/deploy.sh` в своей concurrency-группе `review-bot-deploy` (§9.1); при нехватке секретов пропускается с notice |
 | `Promote staging tag` | после успешного health check | `contents: read`, `packages: write` | под lock `staging-deploy` читает `.deploy-state` на VM; если там всё ещё этот digest — `:staging-previous` ← `:staging`, `:staging` ← проверенный digest, иначе warning и пропуск |
 
 **Обновление `.test_durations`.** По этому файлу в корне репозитория pytest-split балансирует integration-шарды; в нём только integration-тесты. Создать или обновить: скачать artifact `test-durations` зелёного прогона `main` (Actions → прогон CI/CD → Artifacts), распаковать в корень репозитория (внутри один файл `.test_durations`) и закоммитить отдельным PR. Другое место для файла не задавать: `--durations-path` вне checkout сдвигает rootdir pytest (см. `Python integration (k/4)` выше). Устаревший файл корректности не нарушает: тест без записи получает среднюю длительность, страдает только баланс шардов.
@@ -1032,17 +1036,7 @@ Job **Deploy review bot** (`deploy-review-bot`) в `.github/workflows/ci-cd.yml`
 
 ### 9.3. Secrets и как их получить
 
-Все в Environment `staging` (Settings → Environments → staging):
-
-| Secret | Что это |
-|---|---|
-| `REVIEW_BOT_APP_ID` | App ID GitHub App бота (можно variable с тем же именем) |
-| `REVIEW_BOT_APP_PRIVATE_KEY` | private key App, PEM целиком |
-| `REVIEW_BOT_TELEGRAM_BOT_TOKEN` | токен Telegram-бота от @BotFather |
-| `REVIEW_BOT_TELEGRAM_CHAT_ID` | id чата команды (для группы отрицательное число, `-100...`) |
-| `REVIEW_BOT_TEAM` | состав команды, §9.2 |
-
-Доступ к хосту и fingerprint берутся те же, что у `deploy-staging` (§6).
+Все пять секретов задаются в Environment `staging` (Settings → Environments → staging); имена, назначение и куда они попадают сведены в [SECRETS.md](SECRETS.md#бот-ревью-review_bot-cicd-9). Доступ к хосту и fingerprint берутся те же, что у `deploy-staging` (§6).
 
 GitHub App (отдельный от основного App сервиса):
 

@@ -5,20 +5,14 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from collections.abc import Callable
 from typing import Any
 
+from review_bot.http import Opener, default_opener
 from review_bot.ports import TelegramError, TelegramRejected, Update
-
-Opener = Callable[[urllib.request.Request, float], Any]
-
-
-def _default_opener(request: urllib.request.Request, timeout: float) -> Any:
-    return urllib.request.urlopen(request, timeout=timeout)  # noqa: S310 (fixed https host)
 
 
 class TelegramClient:
-    def __init__(self, token: str, opener: Opener = _default_opener) -> None:
+    def __init__(self, token: str, opener: Opener = default_opener) -> None:
         self._base = f"https://api.telegram.org/bot{token}/"
         self._opener = opener
 
@@ -33,8 +27,11 @@ class TelegramClient:
             with self._opener(request, timeout) as response:
                 data = json.loads(response.read())
         except urllib.error.HTTPError as error:
-            # Telegram answered: the call was refused, nothing was delivered.
-            raise TelegramRejected(f"Telegram {method}: HTTP {error.code}") from None
+            # Telegram 4xx (other than timeout/ambiguity) guarantees nothing was delivered;
+            # 5xx may have been processed before proxy timeout/failure, so keep notified mark.
+            if 400 <= error.code < 500 and error.code != 408:
+                raise TelegramRejected(f"Telegram {method}: HTTP {error.code}") from None
+            raise TelegramError(f"Telegram {method}: HTTP {error.code}") from None
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
             raise TelegramError(f"Telegram {method}: {type(error).__name__}") from None
         if not data.get("ok"):

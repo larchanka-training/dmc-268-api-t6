@@ -155,6 +155,7 @@ def test_telegram_errors_never_carry_the_token(caplog: pytest.LogCaptureFixture)
             f"POST {base}sendMessage": [
                 {"ok": True, "result": {}},
                 http_error(base + "sendMessage", 400),
+                http_error(base + "sendMessage", 502),
                 urllib.error.URLError(f"cannot reach {base}"),
             ],
             f"POST {base}getUpdates": [
@@ -182,10 +183,13 @@ def test_telegram_errors_never_carry_the_token(caplog: pytest.LogCaptureFixture)
     assert sent["parse_mode"] == "HTML" and sent["reply_parameters"]["message_id"] == 4
     with pytest.raises(TelegramRejected) as rejected:
         client.send_message("-100", "hi")
+    with pytest.raises(TelegramError) as server_error:
+        client.send_message("-100", "hi")
+    assert not isinstance(server_error.value, TelegramRejected)
     with pytest.raises(TelegramError) as failed:
         client.send_message("-100", "hi")
     assert not isinstance(failed.value, TelegramRejected)
     (update,) = client.get_updates(offset=None, timeout=0)
     assert (update.update_id, update.chat_id, update.username) == (9, "-100", "bob_tg")
-    for text in (str(rejected.value), str(failed.value), caplog.text):
+    for text in (str(rejected.value), str(server_error.value), str(failed.value), caplog.text):
         assert BOT_TOKEN not in text

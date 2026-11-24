@@ -5,8 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from review_bot.config import ConfigError, Member, load_settings, parse_team
-from review_bot.selection import candidates
+from review_bot.config import ConfigError, Member, load_settings, parse_repos, parse_team
 
 SECRET_ENV = {
     "REVIEW_BOT_APP_ID": "1",
@@ -78,9 +77,32 @@ def test_the_example_roster_in_the_repo_parses() -> None:
     assert len(parse_team(example.read_text(encoding="utf-8"))) >= 2
 
 
-def test_candidates_order_by_load_then_round_robin_and_skip_the_author() -> None:
-    team = (Member("a", "a"), Member("b", "b"), Member("c", "c"))
-    assert [m.key for m in candidates(team, "x", {}, None)] == ["a", "b", "c"]
-    assert [m.key for m in candidates(team, "x", {}, "a")] == ["b", "c", "a"]
-    assert [m.key for m in candidates(team, "x", {"b": 1}, "a")] == ["c", "a", "b"]
-    assert [m.key for m in candidates(team, "B", {}, "a")] == ["c", "a"]
+@pytest.mark.parametrize(
+    "raw",
+    [
+        " , ",
+        "acme/api",
+        "acme=api",
+        "/api=api",
+        "acme/=api",
+        "acme/api= ",
+    ],
+)
+def test_bad_repos_are_refused(raw: str) -> None:
+    with pytest.raises(ConfigError):
+        parse_repos(raw)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("REVIEW_BOT_BATCH_MIN_PRS", "not-an-int"),
+        ("REVIEW_BOT_BATCH_MIN_PRS", "0"),
+        ("REVIEW_BOT_POLL_SECONDS", "-5"),
+        ("REVIEW_BOT_DIGEST_TIME", "25:00"),
+    ],
+)
+def test_bad_numeric_or_time_settings_are_refused(name: str, value: str) -> None:
+    with pytest.raises(ConfigError) as error:
+        load_settings({**SECRET_ENV, name: value})
+    assert name in str(error.value)

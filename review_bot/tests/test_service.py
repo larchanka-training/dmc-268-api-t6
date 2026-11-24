@@ -2,19 +2,32 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
-from conftest import Harness
+import pytest
 from fakes import API, CHAT, UI, Clock, FakeGitHub, FakeTelegram, make_settings
+from harness import Harness
 
 from review_bot.config import Member
+from review_bot.messages import TELEGRAM_MAX_MESSAGE_LEN
 from review_bot.ports import Update
 from review_bot.service import Bot
 from review_bot.store import Store
 
 ALICE, BOB, CAROL = "Alice-Example", "bob-example", "carol-example"
 OUTSIDER = "dave-example"
+
+
+@pytest.fixture
+def h(tmp_path: Path) -> Iterator[Harness]:
+    db_path = str(tmp_path / "bot.sqlite3")
+    github, telegram, clock = FakeGitHub(), FakeTelegram(), Clock()
+    bot = Bot(make_settings(db_path), Store(db_path), github, telegram, clock)
+    harness = Harness(github, telegram, clock, db_path, bot)
+    yield harness
+    harness.bot.store.close()
 
 
 def run(h: Harness, minutes: int) -> None:
@@ -50,11 +63,15 @@ def test_two_prs_in_a_row_go_to_two_different_free_people(tmp_path: Path) -> Non
     db = str(tmp_path / "two.sqlite3")
     team = (Member(ALICE, "alice_tg"), Member(BOB, "bob_tg"))
     github = FakeGitHub()
-    bot = Bot(make_settings(db, team), Store(db), github, FakeTelegram(), Clock())
-    github.open(API, 1, author=OUTSIDER)
-    github.open(UI, 2, author=OUTSIDER)
-    bot.tick()
-    assert {login for _, _, login in github.requested_log} == {ALICE, BOB}
+    store = Store(db)
+    try:
+        bot = Bot(make_settings(db, team), store, github, FakeTelegram(), Clock())
+        github.open(API, 1, author=OUTSIDER)
+        github.open(UI, 2, author=OUTSIDER)
+        bot.tick()
+        assert {login for _, _, login in github.requested_log} == {ALICE, BOB}
+    finally:
+        store.close()
 
 
 def test_two_prs_in_separate_polls_also_go_to_different_people(h: Harness) -> None:
@@ -101,17 +118,37 @@ def test_a_pr_reviewed_before_the_bot_saw_it_is_not_assigned(h: Harness) -> None
     assert h.github.requested_log == []
 
 
+def test_pr_with_requested_teams_is_not_assigned(h: Harness) -> None:
+    h.github.open(API, 1, author=OUTSIDER, teams=("backend-reviewers",))
+    h.tick()
+    assert h.github.requested_log == []
+
+
 def test_a_manually_added_reviewer_shows_up_and_a_removed_one_drops_out(h: Harness) -> None:
     h.github.open(API, 1, author=OUTSIDER, reviewers=(ALICE,))
-    h.github.open(API, 2, author=OUTSIDER, reviewers=(ALICE,))
+    h.github.open(API, 2, author=OUTSIDER, reviewers=(ALICE, BOB))
     h.tick()
     h.github.add_reviewer(API, 1, CAROL)
     h.github.remove_reviewer(API, 2, ALICE)
-    run(h, 120)  # one PR left in the queue: the two-hour rule sends it
+    run(h, 120)  # two-hour rule sends the batch
     (text,) = h.telegram.texts
     assert "@carol_tg\n• " in text and "api#1 " in text.split("@carol_tg")[1]
-    assert "api#2" not in text
+    assert "@bob_tg\n• " in text and "api#2 " in text.split("@bob_tg")[1]
+    assert "api#2" not in text.split("@bob_tg")[0]
     assert h.github.requested_log == []
+
+
+def test_pr_whose_only_reviewer_is_removed_without_review_gets_a_new_reviewer(
+    h: Harness,
+) -> None:
+    h.github.open(API, 1, author=OUTSIDER, reviewers=(ALICE,))
+    h.tick()
+    assert h.github.requested_log == []
+    h.github.remove_reviewer(API, 1, ALICE)
+    run(h, 1)
+    assert len(h.github.requested_log) == 1
+    assert h.github.requested_log[0][:2] == (API, 1)
+    assert h.github.requested_log[0][2] != OUTSIDER
 
 
 # AC4: re-request after a review
@@ -133,7 +170,7 @@ def test_a_re_request_after_a_review_queues_the_pr_again_as_round_2(h: Harness) 
 def test_removed_and_added_back_without_a_review_is_the_same_round_and_not_repeated(
     h: Harness,
 ) -> None:
-    h.github.open(API, 1, author=OUTSIDER, reviewers=(BOB,), labels=frozenset({"urgent"}))
+    h.github.open(API, 1, author=OUTSIDER, reviewers=(ALICE, BOB), labels=frozenset({"urgent"}))
     h.tick()
     h.github.remove_reviewer(API, 1, BOB)
     run(h, 1)
@@ -233,6 +270,76 @@ def test_a_refused_message_is_retried_and_sent_once(h: Harness) -> None:
     assert h.telegram.texts == []
     run(h, 10)
     assert len(h.telegram.texts) == 1
+
+
+def test_telegram_transport_error_keeps_notified_mark_without_retry(h: Harness) -> None:
+    h.github.open(API, 1, author=OUTSIDER, reviewers=(BOB,), labels=frozenset({"urgent"}))
+    h.telegram.fail_next = 1
+    h.tick()
+    assert h.telegram.texts == []
+    run(h, 180)
+    assert h.telegram.texts == []
+
+
+def test_rejected_digest_does_not_requeue_already_notified_batch_prs(h: Harness) -> None:
+    at_berlin(h, 15, 0)
+    h.github.open(API, 1, author=OUTSIDER, reviewers=(BOB,), labels=frozenset({"urgent"}))
+    h.tick()
+    assert len(h.telegram.texts) == 1
+    at_berlin(h, 18, 0)
+    h.telegram.reject_next = 1
+    h.tick()
+    assert len(h.telegram.texts) == 1
+    at_berlin(h, 18, 1)
+    h.tick()
+    assert len(h.telegram.texts) == 2
+    assert h.telegram.texts[1].startswith("🌙 Висит без ревью к 18:00\n\n")
+
+
+def test_large_queue_of_60_prs_splits_within_limit_and_tracks_partial_delivery(
+    h: Harness,
+) -> None:
+    for number in range(1, 61):
+        h.github.open(
+            API,
+            number,
+            author=OUTSIDER,
+            title=f"Long pull request title padding for limit testing #{number:02d}",
+            reviewers=(BOB,),
+        )
+    h.tick()
+    run(h, 30)
+    assert len(h.telegram.texts) >= 2
+    assert all(len(text) <= TELEGRAM_MAX_MESSAGE_LEN for text in h.telegram.texts)
+    delivered = "\n".join(h.telegram.texts)
+    for number in range(1, 61):
+        assert f"api#{number} " in delivered
+    run(h, 180)
+    count_after_quiet = len(h.telegram.texts)
+    assert count_after_quiet >= 2
+
+
+def test_large_queue_partial_chunk_rejection_retries_only_undelivered_chunk(
+    h: Harness,
+) -> None:
+    for number in range(1, 61):
+        h.github.open(
+            API,
+            number,
+            author=OUTSIDER,
+            title=f"Long pull request title padding for limit testing #{number:02d}",
+            reviewers=(BOB,),
+        )
+    h.tick()
+    h.telegram.reject_after = 1
+    run(h, 30)
+    first_chunk_texts = list(h.telegram.texts)
+    assert len(first_chunk_texts) == 1
+    h.telegram.reject_after = None
+    run(h, 1)
+    assert len(h.telegram.texts) == 2
+    assert "api#1 " not in h.telegram.texts[1]
+    assert "api#60 " in h.telegram.texts[1]
 
 
 def test_a_failed_poll_changes_nothing(h: Harness) -> None:
@@ -374,6 +481,26 @@ def test_the_digest_is_not_repeated_after_a_restart(h: Harness) -> None:
     at_berlin(h, 18, 5)
     h.tick()
     assert len(h.telegram.texts) == 1
+
+
+def test_starting_after_digest_window_does_not_send_digest(h: Harness) -> None:
+    at_berlin(h, 19, 30)
+    h.github.open(API, 1, author=OUTSIDER, reviewers=(BOB,))
+    h.tick()
+    assert h.telegram.texts == []
+
+
+def test_digest_is_sent_from_snapshot_when_github_poll_fails(h: Harness) -> None:
+    at_berlin(h, 17, 50)
+    h.github.open(API, 1, author=OUTSIDER, reviewers=(BOB,))
+    h.tick()
+    assert h.telegram.texts == []
+    h.github.fail_list = True
+    at_berlin(h, 18, 0)
+    h.tick()
+    assert len(h.telegram.texts) == 1
+    assert h.telegram.texts[0].startswith("🌙 Висит без ревью к 18:00\n\n")
+    assert "api#1 Change 1" in h.telegram.texts[0]
 
 
 # AC10: /mine

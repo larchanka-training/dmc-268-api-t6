@@ -15,17 +15,12 @@ from typing import Any
 
 import jwt
 
+from review_bot.http import Opener, default_opener
 from review_bot.models import PullRequest, Review
 from review_bot.ports import GitHubError, ReviewerRejected
 
 API = "https://api.github.com"
 TIMEOUT_SECONDS = 20
-
-Opener = Callable[[urllib.request.Request, float], Any]
-
-
-def _default_opener(request: urllib.request.Request, timeout: float) -> Any:
-    return urllib.request.urlopen(request, timeout=timeout)  # noqa: S310 (fixed https host)
 
 
 class GitHubAppClient:
@@ -33,7 +28,7 @@ class GitHubAppClient:
         self,
         app_id: str,
         private_key: str,
-        opener: Opener = _default_opener,
+        opener: Opener = default_opener,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._app_id = app_id

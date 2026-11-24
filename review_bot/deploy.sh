@@ -15,9 +15,11 @@ PROJECT=dmc-268-review-bot
 ENV_FILE="${REVIEW_BOT_DIR}/review-bot.env"
 KEYS=(REVIEW_BOT_APP_ID REVIEW_BOT_APP_PRIVATE_KEY REVIEW_BOT_TELEGRAM_BOT_TOKEN REVIEW_BOT_TELEGRAM_CHAT_ID REVIEW_BOT_TEAM)
 
-# Values are written single-quoted, as env-file.sh does: Compose reads them across lines (PEM)
-# without interpolation, so a value may contain neither ' nor a trailing backslash. Everything is
-# checked before the file is replaced; names only, never values, reach the log.
+# Values are written single-quoted, as env-file.sh does (write_env_file intentionally mirrors
+# deploy/scripts/env-file.sh because CI uploads only review_bot/ to /opt/dmc-268-review-bot):
+# Compose reads them across lines (PEM) without interpolation, so a value may contain neither '
+# nor a trailing backslash. Everything is checked before the file is replaced; names only, never
+# values, reach the log.
 write_env_file() (
   set -o pipefail
   bundle="$1"

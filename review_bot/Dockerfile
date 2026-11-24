@@ -37,6 +37,6 @@ VOLUME ["/data"]
 
 # Alive while the poll loop runs: main touches the heartbeat file after every poll.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
-  CMD python -c "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/review-bot.alive') > 300)"
+  CMD python -c "import os, sys, time; path = os.environ.get('REVIEW_BOT_HEARTBEAT_PATH', '/tmp/review-bot.alive'); sys.exit(time.time() - os.path.getmtime(path) > 300)"
 
 CMD ["review-bot"]
