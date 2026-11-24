@@ -7,14 +7,22 @@ The Bitbucket webhook delivery contract is [BITBUCKET_WEBHOOK.md](BITBUCKET_WEBH
 
 ## Connections and credential rotation
 
-`GET /api/workspaces/{workspace_id}/bitbucket/connections` still returns the
-complete active connection list with `nextCursor: null`. The internal
-`list_bindings` store now scans bounded keyset pages ordered by repository name
-and ID. Each page and its position are scoped to the portal workspace and,
-when supplied, the installation. Rotation drains all internal pages before
-validating the replacement token. There is no public connection cursor: the
-merged [UI #224](https://github.com/larchanka-training/dmc-268-ui-t6/pull/224)
-schema requires `nextCursor` to be null.
+`GET /api/workspaces/{workspace_id}/bitbucket/connections` returns up to 100
+active bindings per page, ordered by repository full name and ID. A non-null
+`nextCursor` is an opaque, versioned keyset position bound to that portal
+workspace; pass it as the optional `cursor` query parameter for the next page.
+The last page returns `nextCursor: null`. An invalid or foreign-workspace cursor
+returns `400 invalid_cursor`, an unsupported version returns
+`409 cursor_expired`, and an empty or overlong query value returns 422. The
+cursor is at most 1,024 characters. Pages are not a snapshot: a binding added
+before the saved position may be missed, while removals or name changes between
+requests can change later pages. Replaying a cursor against unchanged bindings
+returns the same position.
+
+The internal `list_bindings` store still drains bounded keyset pages for token
+rotation. Each internal page and its position are scoped to the portal
+workspace and, when supplied, the installation. Rotation drains all pages
+before validating the replacement token.
 
 The binding-page migration backfills `repositories.workspace_id` for existing
 Bitbucket bindings once. During a rolling deployment, pause connection writes
@@ -173,9 +181,9 @@ private-repository measurement or an `N+4` GET bound for the live response shape
 ## Contract and remaining proof
 
 The API's UI Zod fixture is pinned to the exact merged UI source commit
-[`5a90cce81efeb17a9f6a1dfa30236b09b65cfe55`](https://github.com/larchanka-training/dmc-268-ui-t6/commit/5a90cce81efeb17a9f6a1dfa30236b09b65cfe55)
-from [UI #224](https://github.com/larchanka-training/dmc-268-ui-t6/pull/224).
-Its `bitbucketConnectionList.nextCursor` remains null.
+[`5f94a8e0725195dbdd022af498a2f21f8f9befed`](https://github.com/larchanka-training/dmc-268-ui-t6/commit/5f94a8e0725195dbdd022af498a2f21f8f9befed)
+from [UI #262](https://github.com/larchanka-training/dmc-268-ui-t6/pull/262).
+Its `bitbucketConnectionList.nextCursor` accepts a string or null.
 
 A disposable private Bitbucket repository has not been available for a live
 listing/raw-read measurement. Record only sanitized request counts and commit

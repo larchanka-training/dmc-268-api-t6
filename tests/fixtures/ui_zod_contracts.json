@@ -1,7 +1,7 @@
 {
   "provenance": {
     "repository": "https://github.com/larchanka-training/dmc-268-ui-t6",
-    "commit": "5a90cce81efeb17a9f6a1dfa30236b09b65cfe55",
+    "commit": "5f94a8e0725195dbdd022af498a2f21f8f9befed",
     "generator": "z.toJSONSchema (Zod 4)",
     "command": "DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs"
   },
@@ -2402,7 +2402,10 @@
           }
         },
         "nextCursor": {
-          "type": "null"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
