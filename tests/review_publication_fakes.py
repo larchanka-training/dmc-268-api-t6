@@ -271,6 +271,7 @@ class InlinePublishingRepositoryFake(PublicationRepositoryFake):
 class PublicationUowFake:
     reviews: PublicationRepositoryFake
     committed: list[str] = field(default_factory=list)
+    blob_cache: None = None
 
     @property
     def runs(self) -> PublicationRepositoryFake:
