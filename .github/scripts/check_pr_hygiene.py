@@ -36,13 +36,14 @@ CLOSING_KEYWORD_RE = re.compile(
 )
 CONVENTIONAL_TITLE_RE = re.compile(
     r"^(?:feat|fix|docs|chore|refactor|perf|test|build|ci|style|revert)"
-    r"(?:\([^()\n]+\))?!?: .+$"
+    r"(?:\([a-z0-9._/-]+\))?!?: .+$"
 )
 REVERT_SUBJECT_RE = re.compile(r'^Revert ".+"$')
 MERGE_SUBJECT_RE = re.compile(r"^Merge .+$")
 REFS_VALUE_RE = re.compile(rf"(?im)^(?:[-*]\s+)?Refs:?\s+(?:{REPO_SLUG})?#[0-9]+\b")
 EMPTY_REFS_PLACEHOLDER_RE = re.compile(r"(?im)^(?:[-*]\s+)?Refs:?\s+#\s*$")
-FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+FENCE_OPEN_RE = re.compile(r"^[ \t]{0,3}(`{3,}(?![^\n]*`)|~{3,})")
+FENCE_CLOSE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})\s*$")
 INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 SECTION_HEADING_RE = re.compile(r"^#{1,2}\s+(.+?)\s*$")
 THEMATIC_BREAK_RE = re.compile(r"^\s*---+\s*$")
@@ -90,7 +91,7 @@ def strip_html_comments(text: str) -> str:
         if at_line_start:
             eol = text.find("\n", pos)
             first_line = text[pos:eol] if eol != -1 else text[pos:]
-            fence_match = FENCE_RE.match(first_line)
+            fence_match = FENCE_OPEN_RE.match(first_line)
             if fence_match:
                 fence_token = fence_match.group(1)
                 fence_char = fence_token[0]
@@ -104,7 +105,7 @@ def strip_html_comments(text: str) -> str:
                     next_eol = text.find("\n", cur)
                     line_end = next_eol if next_eol != -1 else n
                     line = text[cur:line_end]
-                    closing_match = FENCE_RE.match(line)
+                    closing_match = FENCE_CLOSE_RE.match(line)
                     if closing_match:
                         c_token = closing_match.group(1)
                         if c_token[0] == fence_char and len(c_token) >= fence_len:
@@ -161,8 +162,8 @@ def strip_comments_and_fences(text: str) -> str:
     fence_len = 0
     fence_buffer: list[str] = []
     for line in without_comments.splitlines():
-        match = FENCE_RE.match(line)
         if fence_char is None:
+            match = FENCE_OPEN_RE.match(line)
             if match:
                 fence_char = match.group(1)[0]
                 fence_len = len(match.group(1))
@@ -170,6 +171,7 @@ def strip_comments_and_fences(text: str) -> str:
                 continue
             kept.append(line)
         else:
+            match = FENCE_CLOSE_RE.match(line)
             token = match.group(1) if match else ""
             if token and token[0] == fence_char and len(token) >= fence_len:
                 fence_char = None
@@ -188,8 +190,8 @@ def has_meaningful_content(text: str) -> bool:
     fence_char: str | None = None
     fence_len = 0
     for line in text.splitlines():
-        match = FENCE_RE.match(line)
         if fence_char is None:
+            match = FENCE_OPEN_RE.match(line)
             if match:
                 fence_char = match.group(1)[0]
                 fence_len = len(match.group(1))
@@ -197,6 +199,7 @@ def has_meaningful_content(text: str) -> bool:
             if line.strip():
                 return True
         else:
+            match = FENCE_CLOSE_RE.match(line)
             token = match.group(1) if match else ""
             if token and token[0] == fence_char and len(token) >= fence_len:
                 fence_char = None
@@ -217,8 +220,8 @@ def extract_sections(stripped_body: str) -> tuple[list[str], dict[str, str], lis
     fence_char: str | None = None
     fence_len = 0
     for line in stripped_body.splitlines():
-        match = FENCE_RE.match(line)
         if fence_char is None:
+            match = FENCE_OPEN_RE.match(line)
             if match:
                 fence_char = match.group(1)[0]
                 fence_len = len(match.group(1))
@@ -244,6 +247,7 @@ def extract_sections(stripped_body: str) -> tuple[list[str], dict[str, str], lis
             if current is not None:
                 sections[current].append(line)
         else:
+            match = FENCE_CLOSE_RE.match(line)
             token = match.group(1) if match else ""
             if token and token[0] == fence_char and len(token) >= fence_len:
                 fence_char = None
@@ -355,9 +359,10 @@ def check_sections_data(body: str, *, draft: bool = False) -> tuple[list[str], l
 
     refs_body = section_bodies.get("Refs", "")
     if "Refs" in section_bodies:
-        has_concrete_ref = bool(REFS_VALUE_RE.search(refs_body))
+        refs_content = strip_comments_and_fences(refs_body)
+        has_concrete_ref = bool(REFS_VALUE_RE.search(refs_content))
         only_placeholder = (
-            bool(EMPTY_REFS_PLACEHOLDER_RE.search(refs_body)) and not has_concrete_ref
+            bool(EMPTY_REFS_PLACEHOLDER_RE.search(refs_content)) and not has_concrete_ref
         )
         if not has_concrete_ref:
             reason = (
@@ -529,6 +534,9 @@ def _load_inputs(args: argparse.Namespace) -> tuple[str | None, str, bool]:
             "Missing pull_request event payload (--event-path, GITHUB_EVENT_PATH, "
             "or --title / --body-file / --rev-range)."
         )
+
+    if args.draft:
+        raise InputError("Cannot pass --draft without --title/--body/--body-file or event payload.")
 
     return None, "", False
 

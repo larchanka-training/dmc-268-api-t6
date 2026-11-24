@@ -62,10 +62,9 @@ Sub-agents are spawned with the harness's sub-agent tool; for each harness see
 - The `development` agent must:
   - Avoid editing files owned by another open PR without commenting there (`AGENTS.md`).
   - Operate incrementally, writing a failing test first against genuine production code paths
-    with spec-derived assertions (never mock out the unit under test; do not pass unverified
-    artifacts—such as reports, datasets, or model responses—off as genuine, while spec-defined
-    test fixtures and stubs are allowed; verify permissive license before copying third-party code
-    or datasets).
+    with spec-derived assertions (never mock out the unit under test; fixtures and stubs defined
+    by the spec are allowed — fabricated reports, datasets, or model responses presented as real
+    are not; verify permissive license before copying third-party code or datasets).
   - Implement only enough code to pass the test.
   - Verify compile checks and execution results.
   - Mark the task done in the local todo list.

@@ -647,13 +647,15 @@ def test_commit_body_code_fence_and_inline_closing_keyword() -> None:
     ("title", "valid"),
     [
         ("feat(calc): add multiply", True),
-        ("feat(api,ui): cross-service change", True),
         ("ci(pr-hygiene): kebab-case scope", True),
+        ("chore(worker/leader): tick budget", True),
         ("chore: no scope is valid", True),
         ("feat(): empty scope", False),
-        ("ci(pr hygiene): spaces inside scope", True),
-        ("feat(API): uppercase inside scope", True),
-        ("feat(landing page): multiword scope", True),
+        ("feat( ): whitespace scope", False),
+        ("ci(pr hygiene): spaces inside scope", False),
+        ("feat(API): uppercase inside scope", False),
+        ("feat(landing page): multiword scope", False),
+        ("feat(api,ui): comma-separated scope", False),
     ],
 )
 def test_conventional_title_scope_validation(title: str, valid: bool) -> None:
@@ -832,13 +834,54 @@ def test_empty_code_fence_in_section_is_treated_as_empty() -> None:
     assert any("PR body section(s) are empty: `## How to verify`" in e for e in errors)
 
 
-def test_conventional_title_accepts_multiword_and_special_char_scope() -> None:
-    valid_titles = [
-        "feat(pr hygiene): enforce pr hygiene and harden rules",
-        "feat(UI): update ui styles",
-        "feat(landing page): add agent access snippet",
-        "chore(worker/leader): tick budget",
-    ]
-    for title in valid_titles:
-        errors = MOD.check_title_data(title)
-        assert errors == [], f"Expected title {title!r} to be valid, got {errors}"
+def test_fence_with_inline_code_at_line_start_does_not_break_sections() -> None:
+    body = (
+        "## What\n```npm test``` runs it\n\n"
+        "## Why\nReason\n\n"
+        "## How to verify\nSteps\n\n"
+        "## Refs\nRefs #123\n"
+    )
+    errors, warnings = MOD.check_sections_data(body, draft=False)
+    assert errors == []
+    assert warnings == []
+
+
+def test_code_fence_with_nested_fence_markers_ignores_closing_keyword() -> None:
+    body = (
+        "## What\n```\n```js\nCloses #5\n```\n```\n\n"
+        "## Why\nReason\n\n"
+        "## How to verify\nSteps\n\n"
+        "## Refs\nRefs #123\n"
+    )
+    result = MOD.check_pr_data(title="feat(test): ok", body=body, commits=(), draft=False)
+    assert not any("Forbidden closing keyword" in e for e in result.errors)
+
+
+def test_refs_inside_code_fence_is_not_counted_as_valid_ref() -> None:
+    only_fenced_refs = (
+        "## What\nDescription\n\n"
+        "## Why\nReason\n\n"
+        "## How to verify\nSteps\n\n"
+        "## Refs\n```\nRefs #123\n```\n"
+    )
+    errors, warnings = MOD.check_sections_data(only_fenced_refs, draft=False)
+    assert any("`## Refs` must include `Refs #N`" in e for e in errors)
+
+    valid_refs_alongside_fence = (
+        "## What\nDescription\n\n"
+        "## Why\nReason\n\n"
+        "## How to verify\nSteps\n\n"
+        "## Refs\n```\nRefs #123\n```\nRefs #456\n"
+    )
+    errors, warnings = MOD.check_sections_data(valid_refs_alongside_fence, draft=False)
+    assert errors == []
+
+
+def test_draft_flag_without_pr_metadata_raises_input_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+    exit_code = MOD.main(["--rev-range", "origin/main..HEAD", "--draft"])
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "Cannot pass --draft without" in captured.err
