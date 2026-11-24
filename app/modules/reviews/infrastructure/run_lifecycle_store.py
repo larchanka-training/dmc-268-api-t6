@@ -31,6 +31,9 @@ from app.modules.reviews.application.handle_review_run import RunGuardSnapshot
 from app.modules.reviews.application.policy_errors import policy_error_detail
 from app.modules.reviews.application.process_run import RunVcsInput
 from app.modules.reviews.application.publish_run_review import (
+    GITHUB_PUBLISH_TOOL,
+    TRACE_GITHUB_REVIEW_ID,
+    TRACE_REVIEW_EVENT,
     PublicationIdentity,
     PublishContext,
     publication_matches,
@@ -41,6 +44,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMe
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.application.verdict import (
     HashedFinding,
+    ReviewEvent,
     findings_hash,
     review_event,
     severity_counts,
@@ -54,6 +58,7 @@ from app.modules.reviews.infrastructure.models import (
     FinalReviewResult,
     Finding,
     Run,
+    RunAction,
 )
 from app.modules.reviews.infrastructure.publication_findings import published_finding_from_row
 from app.modules.reviews.infrastructure.publication_plan import SavedPublicationPlan
@@ -485,11 +490,12 @@ class SqlAlchemyRunLifecycleStore:
         )[run_id]
         inline = sum(1 for item in findings if item.inline_comment)
         body_count = len(findings) - inline
+        verdict = None if summary_only else result.verdict
         return CheckRunReport(
             target,
             run.state.value,
             run.attempt,
-            verdict=None if summary_only else result.verdict,
+            verdict=verdict,
             coverage_status=result.coverage.status.value,
             saved_summary=result.summary,
             severity_counts=severity_counts(severities),
@@ -499,7 +505,38 @@ class SqlAlchemyRunLifecycleStore:
             summary_only=bool(summary_only),
             summary_reason=summary_only_reason_of(context_summary),
             provider=installation.provider,
+            # Only a blocking verdict's conclusion depends on the event (§7).
+            review_event=(
+                await self._published_review_event(run_id) if verdict == "blocking" else None
+            ),
         )
+
+    async def _published_review_event(self, run_id: UUID) -> ReviewEvent | None:
+        """The event GitHub accepted this Run's review with, from its publication trace (§7).
+
+        Read back from ``run_actions`` so every re-render, RunGuard's included, shows the
+        review that was posted, never the repository setting as it is now. For Runs with
+        ``final_review_results``, T8 freezes ``review_event`` in ``publication_plan`` and T17
+        reuses it, so every accepted step keeps the same event. For legacy Runs without a
+        saved plan, T17 rebuilds from the current setting while GitHub keeps the first
+        event, so ordering by index selects the original POST.
+        """
+        request = await self._session.scalar(
+            select(RunAction.request)
+            .where(
+                RunAction.run_id == run_id,
+                RunAction.tool == GITHUB_PUBLISH_TOOL,
+                RunAction.response.has_key(TRACE_GITHUB_REVIEW_ID),
+            )
+            .order_by(RunAction.index)
+            .limit(1)
+        )
+        event = None if request is None else request.get(TRACE_REVIEW_EVENT)
+        if event == "COMMENT":
+            return "COMMENT"
+        if event == "REQUEST_CHANGES":
+            return "REQUEST_CHANGES"
+        return None
 
     async def _publish_pointer(self, run: Run, repository: Repository) -> ReviewPublishPointer:
         saved = await self._session.get(FinalReviewResult, run.id)

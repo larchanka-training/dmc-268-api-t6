@@ -10,6 +10,7 @@ from typing import Literal
 from uuid import UUID, uuid5
 
 type Verdict = Literal["blocking", "attention", "clean"]
+type ReviewEvent = Literal["COMMENT", "REQUEST_CHANGES"]
 type SeverityThresholdValue = Literal["all", "warning", "critical"]
 
 SEVERITIES = ("critical", "high", "medium", "low", "info")
