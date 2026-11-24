@@ -565,13 +565,15 @@ Fallback-модель — вторая модель шлюза с тем же st
 Чтения GitHub blob (`get_blob` / `get_repository_blob`) просят `Accept-Encoding: identity`, чтобы
 прочитать до 4 KiB тела ошибки. Без заголовков лимита 403/429 с `message` JSON-тела, содержащим
 «secondary rate limit», даёт через `ClassifiedVcsProvider` retryable `diff_fetch_failed` с
-паузой 60 с. Заголовки `Retry-After` или `X-RateLimit-Remaining: 0` дают тот же результат при
-любом HTTP-статусе blob-чтения, включая 404 и 5xx. Без этих заголовков 429 без сообщения о
-secondary rate limit остаётся best effort для blob диффа. `fetch_files` пропускает контекстный
-файл при HTTP-ошибке, ошибке декодирования или `RunFailure.rate_limited=True`; другие
-`RunFailure` пробрасываются. Чтение `AGENTS.md` передаёт подтверждённый лимит попытке как
-retryable `diff_fetch_failed`. Остальные сбои blob диффа остаются best effort. Если сервер всё
-же вернул сжатое тело ошибки, оно не разбирается и без других признаков лимит не подтверждается.
+паузой 60 с. Заголовки `Retry-After` или `X-RateLimit-Remaining: 0` дают тот же код и
+`rate_limited`, пауза из заголовков, при любом HTTP-статусе blob-чтения, включая 404 и 5xx.
+403/429 без признаков лимита, как и прочие HTTP-ошибки blob, — best effort, не
+`github_forbidden`. `fetch_files` пропускает контекстный файл при HTTP-ошибке или ошибке
+декодирования, а при первом `RunFailure.rate_limited=True` прекращает цикл чтения остальных
+файлов с одним warning; другие `RunFailure` пробрасываются. Чтение `AGENTS.md` передаёт
+подтверждённый лимит попытке как retryable `diff_fetch_failed`. Остальные сбои blob диффа
+остаются best effort. Если сервер всё же вернул сжатое тело ошибки, оно не разбирается и без
+других признаков лимит не подтверждается.
 
 **Сбои GitLab (`gitlab.publish_review`, SD §8.4).**
 

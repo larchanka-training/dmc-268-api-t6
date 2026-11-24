@@ -20,8 +20,8 @@ from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
 )
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
-from tests.github_vcs_payload_fakes import _BASE, _HEAD, _pull_payload
 from app.modules.reviews.infrastructure.vcs_failures import ClassifiedVcsProvider
+from tests.github_vcs_payload_fakes import _BASE, _HEAD, _pull_payload
 from tests.installation_onboarding_fakes import provider_checkpoint
 
 _BLOB = "c" * 40

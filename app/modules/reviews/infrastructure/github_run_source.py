@@ -131,9 +131,17 @@ class GitHubRunSource:
                 blob = await self._vcs.get_blob(run.locator, sha, checkpoint=self._checkpoint)
                 content = blob.decode("utf-8")
             except (httpx.HTTPError, ValueError, RunFailure) as exc:
-                if isinstance(exc, RunFailure) and not exc.rate_limited:
-                    raise
-                # Context files are best effort, like the blob cache of the diff step.
+                if isinstance(exc, RunFailure):
+                    if not exc.rate_limited:
+                        raise
+                    # Context files are best effort, even under a confirmed rate limit;
+                    # the diff blobs retry it.
+                    _LOGGER.warning(
+                        "Stopping context file fetch after rate limit at %s of run %s",
+                        path,
+                        self._run_id,
+                    )
+                    break
                 _LOGGER.warning("Skipping context file %s of run %s", path, self._run_id)
                 continue
             files.append(RepositoryFile(path=path, size=len(blob), content=content))
