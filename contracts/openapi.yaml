@@ -507,7 +507,13 @@ paths:
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "422":
-          $ref: "#/components/responses/ValidationFailed"
+          description: The body failed validation, or the name does not match (`workspace_name_mismatch`).
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/HTTPValidationError"
+                  - $ref: "#/components/schemas/ErrorResponse"
         "503":
           description: Database is not configured.
   /api/workspaces/{workspace_id}/bitbucket/discovery:

@@ -5,32 +5,33 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select, text, update
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.common.infrastructure.db.enums import LedgerKind
+from app.common.infrastructure.db.enums import CodeChangeState, LedgerKind
 from app.modules.auth.application.scope import AuthScope
 from app.modules.auth.infrastructure.current_user import SqlAlchemyCurrentUserRepository
 from app.modules.billing.infrastructure.models import CreditLedger
-from app.modules.integrations.gitlab.application.request_credentials import (
-    BoundGitLabTarget,
+from app.modules.integrations.bitbucket.infrastructure.models import (
+    BitbucketConnection,
+    BitbucketInstallationIdentity,
+    BitbucketRepositoryIdentity,
+    BitbucketRepositoryWebhookSecret,
 )
 from app.modules.integrations.gitlab.infrastructure.connection_store import (
     SqlAlchemyGitLabConnectionStore,
 )
-from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
-from app.modules.reviews.application.determine_ci_eligibility import (
-    CandidateMiss,
-    CiWaitMode,
-    EligibilityCandidate,
-    WebhookRunIdentity,
+from app.modules.integrations.gitlab.infrastructure.models import (
+    GitLabConnection,
+    GitLabProjectBinding,
 )
-from app.modules.reviews.application.project_github_pull_request import PullRequestState
+from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
+from app.modules.reviews.application.try_enqueue_webhook_run import CandidateMiss
 from app.modules.reviews.infrastructure.metrics_summary import SqlAlchemyMetricsSummary
+from app.modules.reviews.infrastructure.models import CodeChange
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunStore
 from app.modules.workspaces.application.delete_workspace import (
     DeleteWorkspace,
@@ -265,7 +266,7 @@ def test_delete_workspace_use_case_execute_postgres(
 
 
 async def _seed_and_delete_ws_b(
-    session_factory: async_sessionmaker,
+    session_factory: async_sessionmaker[AsyncSession],
     user_id: int,
 ) -> None:
     # Seed INSTALL_B with account_external_id and metadata for OAuth linking
@@ -426,28 +427,85 @@ def test_lock_gitlab_rejects_deleted_workspace_postgres(
         engine = portal_env.engine()
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-        # 1. Mark WS_A deleted
+        gl_install_id = uuid4()
+        gl_repo_id = uuid4()
+        gl_pr_id = uuid4()
+        async with session_factory.begin() as session:
+            session.add(
+                ProviderInstallation(
+                    id=gl_install_id,
+                    workspace_id=WS_A,
+                    provider="gitlab",
+                    external_id=9101,
+                    provider_metadata={},
+                )
+            )
+            await session.flush()
+            session.add(
+                GitLabConnection(
+                    provider_installation_id=gl_install_id,
+                    workspace_id=WS_A,
+                    provider="gitlab",
+                    instance_origin="https://gitlab.example",
+                    credential_generation=1,
+                    token_ciphertext=b"enc-gl",
+                    credential_key_id="k1",
+                    webhook_secret_digest="a" * 64,
+                    intake_enabled=True,
+                )
+            )
+            session.add(
+                Repository(
+                    id=gl_repo_id,
+                    provider_installation_id=gl_install_id,
+                    workspace_id=WS_A,
+                    external_id=7101,
+                    full_name="group/repo",
+                    default_branch="main",
+                    web_url="https://gitlab.example/group/repo",
+                    enabled=True,
+                    installation_available=True,
+                )
+            )
+            await session.flush()
+            session.add(
+                GitLabProjectBinding(
+                    repository_id=gl_repo_id,
+                    provider_installation_id=gl_install_id,
+                    instance_origin="https://gitlab.example",
+                    project_external_id=7101,
+                )
+            )
+            session.add(
+                CodeChange(
+                    id=gl_pr_id,
+                    repository_id=gl_repo_id,
+                    external_id=101,
+                    external_number=1,
+                    title="GL MR",
+                    source_branch="feat",
+                    target_branch="main",
+                    base_sha="a" * 40,
+                    head_sha="b" * 40,
+                    state=CodeChangeState.OPEN,
+                    web_url="https://gitlab.example/group/repo/-/merge_requests/1",
+                )
+            )
+
+        # 1. Before mark_deleted: real Postgres rows pass authority lock
+        async with session_factory() as session:
+            before_gl = await SqlAlchemyWebhookRunStore(session)._lock_gitlab(gl_pr_id)
+            assert isinstance(before_gl, tuple)
+
+        # 2. Mark WS_A deleted
         async with SqlAlchemyDeleteWorkspaceUnitOfWork(session_factory) as uow:
             await uow.store.mark_deleted(WS_A, user_id=42)
             await uow.commit()
 
-        # 2. SqlAlchemyWebhookRunStore._lock_gitlab rejects deleted workspace on Postgres
+        # 3. After mark_deleted: _lock_gitlab rejects exclusively due to workspace status
         async with session_factory() as session:
-            webhook_store = SqlAlchemyWebhookRunStore(session)
-            target = BoundGitLabTarget(
-                origin_provider_installation_id=uuid4(),
-                workspace_id=WS_A,
-                repository_id=uuid4(),
-                instance_origin="https://gitlab.com",
-                project_id=123,
-                credential_generation=1,
-            )
-            with patch(
-                "app.modules.reviews.infrastructure.webhook_runs.read_gitlab_eligibility_target",
-                new=AsyncMock(return_value=target),
-            ):
-                miss_gl = await webhook_store._lock_gitlab(uuid4())
-                assert miss_gl == CandidateMiss.MISSING_INSTALLATION
+            miss_gl = await SqlAlchemyWebhookRunStore(session)._lock_gitlab(gl_pr_id)
+            assert miss_gl == CandidateMiss.MISSING_INSTALLATION
 
         await engine.dispose()
 
@@ -461,44 +519,104 @@ def test_lock_bitbucket_rejects_deleted_workspace_postgres(
         engine = portal_env.engine()
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-        # 1. Mark WS_A deleted
+        bb_install_id = uuid4()
+        bb_repo_id = uuid4()
+        bb_pr_id = uuid4()
+        async with session_factory.begin() as session:
+            session.add(
+                ProviderInstallation(
+                    id=bb_install_id,
+                    workspace_id=WS_A,
+                    provider="bitbucket",
+                    external_id=9201,
+                    provider_metadata={},
+                )
+            )
+            await session.flush()
+            session.add(
+                BitbucketInstallationIdentity(
+                    provider_installation_id=bb_install_id,
+                    workspace_id=WS_A,
+                    provider="bitbucket",
+                    bitbucket_workspace_uuid=uuid4(),
+                )
+            )
+            await session.flush()
+            session.add(
+                BitbucketConnection(
+                    provider_installation_id=bb_install_id,
+                    workspace_id=WS_A,
+                    credential_generation=1,
+                    token_ciphertext=b"enc-bb",
+                    token_key_id="k1",
+                    intake_enabled=True,
+                )
+            )
+            session.add(
+                Repository(
+                    id=bb_repo_id,
+                    provider_installation_id=bb_install_id,
+                    workspace_id=WS_A,
+                    external_id=7201,
+                    full_name="bb-org/repo",
+                    default_branch="main",
+                    web_url="https://bitbucket.org/bb-org/repo",
+                    enabled=True,
+                    installation_available=True,
+                )
+            )
+            await session.flush()
+            session.add(
+                BitbucketRepositoryIdentity(
+                    repository_id=bb_repo_id,
+                    provider_installation_id=bb_install_id,
+                    workspace_id=WS_A,
+                    repository_external_id=7201,
+                    repository_uuid=uuid4(),
+                )
+            )
+            await session.flush()
+            session.add(
+                BitbucketRepositoryWebhookSecret(
+                    repository_id=bb_repo_id,
+                    generation=1,
+                    binding_generation=1,
+                    secret_ciphertext=b"sec",
+                    secret_key_id="k1",
+                    confirmed_at=datetime.now(UTC),
+                )
+            )
+            session.add(
+                CodeChange(
+                    id=bb_pr_id,
+                    repository_id=bb_repo_id,
+                    external_id=201,
+                    external_number=2,
+                    title="BB PR",
+                    source_branch="feat",
+                    target_branch="main",
+                    base_sha="a" * 40,
+                    head_sha="b" * 40,
+                    state=CodeChangeState.OPEN,
+                    ai_review_labeled=True,
+                    web_url="https://bitbucket.org/bb-org/repo/pull-requests/2",
+                )
+            )
+
+        # 1. Before mark_deleted: real Postgres rows pass authority lock
+        async with session_factory() as session:
+            before_bb = await SqlAlchemyWebhookRunStore(session)._lock_bitbucket(bb_pr_id)
+            assert isinstance(before_bb, tuple)
+
+        # 2. Mark WS_A deleted
         async with SqlAlchemyDeleteWorkspaceUnitOfWork(session_factory) as uow:
             await uow.store.mark_deleted(WS_A, user_id=42)
             await uow.commit()
 
-        # 2. SqlAlchemyWebhookRunStore._lock_bitbucket rejects deleted workspace on Postgres
+        # 3. After mark_deleted: _lock_bitbucket rejects exclusively due to workspace status
         async with session_factory() as session:
-            webhook_store = SqlAlchemyWebhookRunStore(session)
-            identity = WebhookRunIdentity(
-                provider="bitbucket",
-                origin_provider_installation_id=uuid4(),
-                workspace_id=WS_A,
-                repository_id=uuid4(),
-                repository_external_id=12345,
-                repository_uuid=uuid4(),
-                credential_generation=1,
-                binding_generation=1,
-                webhook_generation=1,
-            )
-            candidate = EligibilityCandidate(
-                code_change_id=uuid4(),
-                installation_external_id=12345,
-                repository_full_name="org/repo",
-                head_sha="deadbeef",
-                state=PullRequestState.OPEN,
-                repository_enabled=True,
-                ai_review_labeled=True,
-                ai_review_labeled_at=None,
-                head_first_seen_at=None,
-                wait_for_ci=CiWaitMode.NEVER,
-                identity=identity,
-            )
-            with patch(
-                "app.modules.reviews.infrastructure.webhook_runs.read_bitbucket_eligibility_candidate",
-                new=AsyncMock(return_value=candidate),
-            ):
-                miss_bb = await webhook_store._lock_bitbucket(uuid4())
-                assert miss_bb == CandidateMiss.MISSING_INSTALLATION
+            miss_bb = await SqlAlchemyWebhookRunStore(session)._lock_bitbucket(bb_pr_id)
+            assert miss_bb == CandidateMiss.MISSING_INSTALLATION
 
         await engine.dispose()
 
