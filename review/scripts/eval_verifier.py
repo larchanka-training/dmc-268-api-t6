@@ -23,6 +23,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import replace
@@ -78,7 +79,7 @@ from app.modules.reviews.infrastructure.llm.ecb_fx import (
 from app.modules.reviews.infrastructure.llm.gateway import FxQuoteUnavailableError, LlmGateway
 from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.models import GatewayVerifierModel
-from app.modules.reviews.infrastructure.llm.settings import LlmSettings
+from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelProfile
 from app.modules.reviews.infrastructure.llm.transport import (
     ChatRequest,
     ChatResponse,
@@ -91,6 +92,9 @@ from review.scripts.validate_verifier_dataset import validate_dataset
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CORPUS = ROOT / "test-prs-dataset/verifier/v1/cases.json"
 FIXED_V1_CORPUS_SHA256 = "5e038d079ee238a1b895a6fd08f25422861d4a751ebbd89fd4e60eed6df41649"
+APPROVAL_REF_PATTERN = re.compile(
+    r"^https://github\.com/larchanka-training/dmc-268-api-t6/(issues|pull)/\d+#issuecomment-\d+$"
+)
 FIXED_V1_CLASS_TOTALS = (
     ("proven", 4),
     ("invented", 4),
@@ -160,47 +164,48 @@ def _invalid_call_ids(
     return invalid
 
 
+def _profile_fields(profile: ModelProfile | None) -> dict[str, Any]:
+    if profile is None:
+        return {
+            "model": None,
+            "provider": None,
+            "endpoint_sha256": None,
+            "context_window": None,
+            "max_output_tokens": None,
+            "structured_output": None,
+            "chars_per_token": None,
+            "input_per_mtok_usd": None,
+            "output_per_mtok_usd": None,
+            "cache_read_per_mtok_usd": None,
+            "extra_body_sha256": None,
+        }
+    return {
+        "model": profile.model,
+        "provider": profile.provider,
+        "endpoint_sha256": hashlib.sha256(profile.base_url.encode()).hexdigest(),
+        "context_window": profile.context_window,
+        "max_output_tokens": profile.max_output_tokens,
+        "structured_output": profile.structured_output,
+        "chars_per_token": profile.chars_per_token,
+        "input_per_mtok_usd": str(profile.price.input_per_mtok),
+        "output_per_mtok_usd": str(profile.price.output_per_mtok),
+        "cache_read_per_mtok_usd": str(profile.price.cache_read_per_mtok),
+        "extra_body_sha256": hashlib.sha256(
+            json.dumps(profile.extra_body, sort_keys=True).encode()
+        ).hexdigest(),
+    }
+
+
 def _route_metadata(settings: LlmSettings) -> dict[str, Any]:
     primary, fallback = settings.verifier_route()
-    metadata = {
-        "primary_model": primary.model,
-        "primary_provider": primary.provider,
-        "fallback_model": None if fallback is None else fallback.model,
-        "fallback_provider": None if fallback is None else fallback.provider,
-        "endpoint_sha256": hashlib.sha256(primary.base_url.encode()).hexdigest(),
-        "fallback_endpoint_sha256": (
-            None if fallback is None else hashlib.sha256(fallback.base_url.encode()).hexdigest()
-        ),
-        "context_window": primary.context_window,
-        "max_output_tokens": primary.max_output_tokens,
-        "structured_output": primary.structured_output,
-        "chars_per_token": primary.chars_per_token,
-        "input_per_mtok_usd": str(primary.price.input_per_mtok),
-        "output_per_mtok_usd": str(primary.price.output_per_mtok),
-        "cache_read_per_mtok_usd": str(primary.price.cache_read_per_mtok),
-        "extra_body_sha256": hashlib.sha256(
-            json.dumps(primary.extra_body, sort_keys=True).encode()
-        ).hexdigest(),
-        "fallback_context_window": None if fallback is None else fallback.context_window,
-        "fallback_max_output_tokens": None if fallback is None else fallback.max_output_tokens,
-        "fallback_structured_output": None if fallback is None else fallback.structured_output,
-        "fallback_chars_per_token": None if fallback is None else fallback.chars_per_token,
-        "fallback_input_per_mtok_usd": (
-            None if fallback is None else str(fallback.price.input_per_mtok)
-        ),
-        "fallback_output_per_mtok_usd": (
-            None if fallback is None else str(fallback.price.output_per_mtok)
-        ),
-        "fallback_cache_read_per_mtok_usd": (
-            None if fallback is None else str(fallback.price.cache_read_per_mtok)
-        ),
-        "fallback_extra_body_sha256": (
-            None
-            if fallback is None
-            else hashlib.sha256(
-                json.dumps(fallback.extra_body, sort_keys=True).encode()
-            ).hexdigest()
-        ),
+    primary_fields = _profile_fields(primary)
+    fallback_fields = _profile_fields(fallback)
+    metadata: dict[str, Any] = {
+        **{
+            (f"primary_{key}" if key in {"model", "provider"} else key): value
+            for key, value in primary_fields.items()
+        },
+        **{f"fallback_{key}": value for key, value in fallback_fields.items()},
     }
     metadata["route_sha256"] = hashlib.sha256(
         json.dumps(metadata, sort_keys=True).encode()
@@ -594,13 +599,16 @@ async def run_all(
         stop_threshold_usd <= 0
         or approved_overrun_usd < 0
         or window_end.tzinfo is None
-        or not approval_ref.strip()
+        or not APPROVAL_REF_PATTERN.fullmatch(approval_ref.strip())
     ):
         raise ValueError(
-            "positive threshold, nonnegative overrun, aware window and approval required"
+            "positive threshold, nonnegative overrun, aware window and approval URL required"
         )
     if datetime.now(UTC) >= window_end:
         raise ValueError("approved window has closed")
+    dataset: dict[str, Any] = json.loads(corpus_bytes)
+    if dataset.get("cases") != cases:
+        raise ValueError("cases do not match corpus_bytes")
     git_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=ROOT,
@@ -753,8 +761,10 @@ def main(*, provider_transport: httpx.AsyncBaseTransport | None = None) -> None:
         parser.error("--stop-threshold-usd must be finite and positive")
     if not args.approved_overrun_usd.is_finite() or args.approved_overrun_usd < 0:
         parser.error("--approved-overrun-usd must be finite and nonnegative")
-    if not args.approval_ref.strip():
-        parser.error("--approval-ref must be nonempty")
+    if not APPROVAL_REF_PATTERN.fullmatch(args.approval_ref.strip()):
+        parser.error(
+            "--approval-ref must be an issue or PR comment URL of larchanka-training/dmc-268-api-t6"
+        )
     settings = LlmSettings.from_env(os.environ)
     primary, fallback = settings.verifier_route()
     if primary.model != args.model:
@@ -801,6 +811,8 @@ def main(*, provider_transport: httpx.AsyncBaseTransport | None = None) -> None:
     report = asyncio.run(execute())
     if report["stop_reason"] == "interrupted":
         raise SystemExit(130)
+    if report["stop_reason"] != "complete":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

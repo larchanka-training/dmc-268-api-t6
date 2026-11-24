@@ -64,7 +64,7 @@ def _cli_args(output: Path) -> list[str]:
         "--window-end",
         "2999-01-01T00:00:00+00:00",
         "--approval-ref",
-        "approved-test-run",
+        "https://github.com/larchanka-training/dmc-268-api-t6/issues/217#issuecomment-1",
         "--allow-paid",
     ]
 
@@ -79,15 +79,27 @@ async def _run_all(
     corpus_bytes: bytes | None = None,
     approved_overrun_usd: Decimal = Decimal(0),
     window_end: datetime | None = None,
-    approval_ref: str = "approved-test-run",
+    approval_ref: str = (
+        "https://github.com/larchanka-training/dmc-268-api-t6/issues/217#issuecomment-1"
+    ),
     fx_transport: httpx.AsyncBaseTransport | None = None,
 ) -> dict[str, Any]:
+    if corpus_bytes is None:
+        raw_bytes = CORPUS.read_bytes()
+        raw_dataset = json.loads(raw_bytes)
+        if raw_dataset["cases"] == cases:
+            resolved_bytes = raw_bytes
+        else:
+            raw_dataset["cases"] = cases
+            resolved_bytes = json.dumps(raw_dataset).encode("utf-8")
+    else:
+        resolved_bytes = corpus_bytes
     return await run_all(
         cases,
         settings,
         transport,
         output,
-        corpus_bytes=CORPUS.read_bytes() if corpus_bytes is None else corpus_bytes,
+        corpus_bytes=resolved_bytes,
         stop_threshold_usd=stop_threshold_usd,
         approved_overrun_usd=approved_overrun_usd,
         window_end=window_end or datetime.now(UTC) + timedelta(minutes=3),
@@ -132,7 +144,16 @@ def _expected_reply(case: dict[str, Any], reason: str) -> httpx.Response:
             "--approved-overrun-usd must be finite and nonnegative",
         ),
         ("--approved-overrun-usd", "-1", "--approved-overrun-usd must be finite and nonnegative"),
-        ("--approval-ref", "", "--approval-ref must be nonempty"),
+        (
+            "--approval-ref",
+            "",
+            "--approval-ref must be an issue or PR comment URL",
+        ),
+        (
+            "--approval-ref",
+            "x",
+            "--approval-ref must be an issue or PR comment URL",
+        ),
         ("--model", "wrong-model", "--model must match the configured verifier route"),
         (
             "--fallback-model",
@@ -285,7 +306,9 @@ def test_cli_accepts_approved_route_and_sends_first_provider_request(
         calls.append(request)
         return _expected_reply(case, "Visible interpolation")
 
-    eval_verifier.main(provider_transport=httpx.MockTransport(respond))
+    with pytest.raises(SystemExit) as error:
+        eval_verifier.main(provider_transport=httpx.MockTransport(respond))
+    assert error.value.code == 1
     assert len(calls) == 1
     assert json.loads(calls[0].content)["model"] == "verifier-model"
     report = json.loads(output.read_text())
@@ -329,7 +352,10 @@ def _provenance_cli_runner(
 
     def run_cli(output: Path) -> dict[str, Any]:
         monkeypatch.setattr(sys, "argv", _cli_args(output) + ["--corpus", str(corpus)])
-        eval_verifier.main(provider_transport=httpx.MockTransport(respond))
+        with pytest.raises(SystemExit) as error:
+            eval_verifier.main(provider_transport=httpx.MockTransport(respond))
+        if error.value.code != 1:
+            raise SystemExit(error.value.code)
         report: dict[str, Any] = json.loads(output.read_text())
         return report
 
@@ -364,12 +390,12 @@ def test_report_corpus_digest_includes_oracle_bytes(
             )
         ) as client:
             return await _run_all(
-                [first_case],
+                json.loads(mutated)["cases"],
                 _settings(),
                 OpenAICompatibleTransport(client),
                 tmp_path / "changed-report.json",
                 corpus_bytes=mutated,
-                stop_threshold_usd=Decimal("0.1"),
+                stop_threshold_usd=Decimal("0.000001"),
             )
 
     changed = asyncio.run(exercise())
@@ -588,10 +614,22 @@ def test_candidate_case_reaches_pinned_verifier_with_literal_input(case_id: str)
     assert result["cost_usd"] == "0.000020"
 
 
-def test_inapplicable_rule_case_omits_the_unrelated_file_and_keeps_policy() -> None:
+def test_inapplicable_rule_case_keeps_python_and_go_policy_without_other_cases() -> None:
+    _case, _result, requests = _captured_case("VFY-03")
+    user = html.unescape(json.loads(requests[0].content)["messages"][1]["content"])
+    assert "def parse_user(): pass" in user
+    assert "SELECT * FROM users" not in user
+    assert "lookup_external" not in user
+    assert '<rule_attribution name=".review/rules.md" />' in user
+    assert "Go files must use CamelCase function names." in user
+    assert "Use Python 3.13." in user
+
+
+def test_insufficient_context_case_omits_helper_definition_and_keeps_policy() -> None:
     _case, _result, requests = _captured_case("VFY-04")
     user = html.unescape(json.loads(requests[0].content)["messages"][1]["content"])
-    assert "app/service.py" not in user
+    assert "return lookup_external(key)" in user
+    assert "def lookup_external" not in user
     assert '<rule_attribution name=".review/rules.md" />' in user
     assert "API keys must not be transmitted to untrusted servers" in user
 
@@ -1011,6 +1049,79 @@ def test_changed_v1_corpus_cannot_pass_the_fixed_gate(tmp_path: Path) -> None:
     assert report["proposed_gate"]["checks"]["fixed_v1_corpus_sha256"] is False
     assert report["proposed_gate"]["status"] == "failed"
     assert report["stop_reason"] == "quality_failed"
+
+
+def test_run_all_rejects_mismatched_cases_and_corpus_bytes(tmp_path: Path) -> None:
+    cases = load_dataset(CORPUS)["cases"]
+    mutated_cases = json.loads(json.dumps(cases))
+    mutated_cases[0]["input"]["code"]["lines"][0]["text"] += " # mismatched"
+    calls = 0
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return completion("{}")
+
+    async def exercise() -> dict[str, Any]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await run_all(
+                mutated_cases,
+                _settings(),
+                OpenAICompatibleTransport(client),
+                tmp_path / "mismatched.json",
+                corpus_bytes=CORPUS.read_bytes(),
+                stop_threshold_usd=Decimal("0.5"),
+                approved_overrun_usd=Decimal(0),
+                window_end=datetime.now(UTC) + timedelta(minutes=3),
+                approval_ref=(
+                    "https://github.com/larchanka-training/dmc-268-api-t6/issues/217#issuecomment-1"
+                ),
+            )
+
+    with pytest.raises(ValueError, match="cases do not match corpus_bytes"):
+        asyncio.run(exercise())
+    assert calls == 0
+
+
+def test_cli_returns_zero_only_on_complete_and_exits_one_on_failed_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cases = load_dataset(CORPUS)["cases"]
+    answers = [case for case in cases if case["input"]["candidate"] is not None]
+    monkeypatch.setattr(eval_verifier, "ROOT", CORPUS.parents[2])
+    monkeypatch.setattr(LlmSettings, "from_env", lambda _env: _settings())
+
+    def run_with(reply_fn: Callable[[dict[str, Any]], httpx.Response], out_name: str) -> int:
+        output = tmp_path / out_name
+        args = _cli_args(output)
+        args[args.index("--stop-threshold-usd") + 1] = "1.0"
+        monkeypatch.setattr(sys, "argv", args)
+        seen = 0
+
+        def respond(_request: httpx.Request) -> httpx.Response:
+            nonlocal seen
+            case = answers[seen]
+            seen += 1
+            return reply_fn(case)
+
+        try:
+            eval_verifier.main(provider_transport=httpx.MockTransport(respond))
+        except SystemExit as exc:
+            assert isinstance(exc.code, int)
+            return exc.code
+        return 0
+
+    assert (
+        run_with(
+            lambda case: _expected_reply(case, "Checked against shown code and policy"),
+            "complete.json",
+        )
+        == 0
+    )
+    assert run_with(lambda _case: completion("{}"), "failed.json") == 1
+    assert json.loads((tmp_path / "failed.json").read_text())["stop_reason"] == (
+        "no_evaluated_candidates"
+    )
 
 
 def test_full_invalid_run_reports_terminal_quality(tmp_path: Path) -> None:
