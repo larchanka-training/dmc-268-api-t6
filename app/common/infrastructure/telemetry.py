@@ -8,7 +8,12 @@ attributes of ``ALLOWED_ATTRIBUTES``. Request and response bodies of ``run_actio
 review texts never reach a span, and the exporter drops any other attribute before export, so a
 library or a later span cannot widen the boundary by accident. An exception leaves the process
 as its type and its frames only (``safe_stack``), on spans and in logs alike: its message can
-quote a payload. Log records carry the formatted message, never their ``extra`` fields.
+quote a payload. Log records carry the formatted message (never their ``extra`` fields);
+``JsonFormatter`` scrubs GitHub tokens, JWTs, ``Authorization`` credentials (schemes
+``Bearer``, ``Basic``, ``token``, ``Digest``, ``Negotiate``, ``AWS4-HMAC-SHA256``,
+``Hawk``, unquoted values without scheme up to the end of the line, and quoted header
+values), and single-line configured process secret env values collected at init (top-level
+string values from JSON dictionaries; multi-line PEM blocks are not scrubbed line-by-line).
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID
 
 from opentelemetry import propagate, trace
@@ -105,6 +110,126 @@ def bind_run_id(run_id: UUID | str) -> Iterator[None]:
 
 # --- logs -----------------------------------------------------------------------------------
 
+_AUTH_SCHEMES = r"(?:Bearer|Basic|token|Digest|Negotiate|AWS4-HMAC-SHA256|Hawk)[ \t]++"
+_AUTH_QUOTED_PATTERN = re.compile(
+    r"""(?i)(["']?Authorization["']?\s*[:=]\s*)"""
+    rf"""(?:(")(?:({_AUTH_SCHEMES}))?[^\r\n"\\]*(?:\\.[^\r\n"\\]*)*"|"""
+    rf"""(')(?:({_AUTH_SCHEMES}))?[^\r\n'\\]*(?:\\.[^\r\n'\\]*)*')"""
+)
+_AUTH_FALLBACK_PATTERN = re.compile(
+    r"""(?im)(["']?Authorization["']?\s*[:=]\s*)"""
+    r"""(?:"""
+    rf"""(")(?:({_AUTH_SCHEMES}))?[^\r\n"\\]*(?:\\[^\r\n][^\r\n"\\]*)*\\?(?=[\r\n]|\Z)|"""
+    rf"""(')(?:({_AUTH_SCHEMES}))?[^\r\n'\\]*(?:\\[^\r\n][^\r\n'\\]*)*\\?(?=[\r\n]|\Z)|"""
+    rf"""(?:({_AUTH_SCHEMES}))?[^\s"'][^\r\n]*"""
+    r""")"""
+)
+_GITHUB_TOKEN_PATTERN = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,})\b"
+)
+_JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\b")
+
+_MIN_SECRET_LENGTH = 8
+_SECRET_ENV_NAMES = frozenset({"AI_DMC268_T6"})
+_SECRET_ENV_SUFFIXES = (
+    "_SECRET",
+    "_SECRETS",
+    "_SECRETS_B64",
+    "_TOKEN",
+    "_PASSWORD",
+    "_API_KEY",
+    "_API_KEYS",
+    "_PRIVATE_KEY",
+    "_CREDENTIAL_KEYS",
+    "_ACCESS_KEY",
+    "_SSH_KEY",
+)
+
+
+def _is_secret_env_name(name: str) -> bool:
+    upper = name.upper()
+    return upper in _SECRET_ENV_NAMES or upper.endswith(_SECRET_ENV_SUFFIXES)
+
+
+class ConfiguredSecrets(NamedTuple):
+    secrets: tuple[str, ...]
+    malformed_env_vars: tuple[str, ...]
+
+
+def _parse_json_dict_secrets(trimmed: str, env_name: str) -> ConfiguredSecrets:
+    """Parse configured JSON dictionary secrets.
+
+    Обходятся только строковые значения верхнего уровня, формат keyring по docs/SECRETS.md плоский.
+    """
+    if not trimmed.startswith("{"):
+        return ConfiguredSecrets((), ())
+    try:
+        data = json.loads(trimmed)
+    except json.JSONDecodeError:
+        # Malformed keyring JSON must not fail logger initialization; never log `trimmed`.
+        return ConfiguredSecrets((), (env_name,))
+    if not isinstance(data, dict):
+        return ConfiguredSecrets((), ())
+    secrets = tuple(
+        cleaned
+        for val in data.values()
+        if isinstance(val, str) and len(cleaned := val.strip()) >= _MIN_SECRET_LENGTH
+    )
+    return ConfiguredSecrets(secrets, ())
+
+
+def _collect_configured_secrets() -> ConfiguredSecrets:
+    """Collect configured process secret values from the environment (#468)."""
+    secrets: set[str] = set()
+    malformed: list[str] = []
+    for key, value in os.environ.items():
+        if not value or not _is_secret_env_name(key):
+            continue
+        trimmed = value.strip()
+        parsed = _parse_json_dict_secrets(trimmed, key)
+        malformed.extend(parsed.malformed_env_vars)
+        if parsed.secrets:
+            secrets.update(parsed.secrets)
+            continue
+        cleaned_whole = trimmed.strip("'\" \t\r\n")
+        if len(cleaned_whole) >= _MIN_SECRET_LENGTH:
+            secrets.add(cleaned_whole)
+        for part in value.split(","):
+            cleaned = part.strip("'\" \t\r\n")
+            if len(cleaned) >= _MIN_SECRET_LENGTH:
+                secrets.add(cleaned)
+    return ConfiguredSecrets(
+        tuple(sorted(secrets, key=len, reverse=True)),
+        tuple(malformed),
+    )
+
+
+def _replace_quoted_auth(match: re.Match[str]) -> str:
+    quote = match.group(2) or match.group(4)
+    scheme = match.group(3) or match.group(5) or ""
+    return f"{match.group(1)}{quote}{scheme}***{quote}"
+
+
+def _replace_fallback_auth(match: re.Match[str]) -> str:
+    prefix = match.group(1)
+    quote = match.group(2) or match.group(4) or ""
+    scheme = match.group(3) or match.group(5) or match.group(6) or ""
+    return f"{prefix}{quote}{scheme}***"
+
+
+def _scrub_text(text: str, secrets: tuple[str, ...]) -> str:
+    """Scrub tokens, JWTs, Authorization credentials, and cached process secrets (#468)."""
+    if not text:
+        return text
+    text = _AUTH_QUOTED_PATTERN.sub(_replace_quoted_auth, text)
+    text = _AUTH_FALLBACK_PATTERN.sub(_replace_fallback_auth, text)
+    text = _GITHUB_TOKEN_PATTERN.sub("***", text)
+    text = _JWT_PATTERN.sub("***", text)
+    for secret in secrets:
+        if secret in text:
+            text = text.replace(secret, "***")
+    return text
+
 
 class JsonFormatter(logging.Formatter):
     """One JSON object per line: time, level, logger, message, ``run_id``, trace ids, error."""
@@ -112,14 +237,22 @@ class JsonFormatter(logging.Formatter):
     def __init__(self, service: str) -> None:
         super().__init__()
         self._service = service
+        configured = _collect_configured_secrets()
+        self._secrets = configured.secrets
+        self._malformed_env_names = configured.malformed_env_vars
+
+    def emit_malformed_env_warnings(self) -> None:
+        for env_name in self._malformed_env_names:
+            _LOGGER.warning("Skipping malformed JSON while collecting secret env var %s", env_name)
 
     def format(self, record: logging.LogRecord) -> str:
+        message = _scrub_text(record.getMessage(), self._secrets)
         entry: dict[str, Any] = {
             "ts": datetime.fromtimestamp(record.created, UTC).isoformat(timespec="milliseconds"),
             "level": record.levelname,
             "service": self._service,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": message,
         }
         # A delivery binds run_id; elsewhere a call site passes extra={"run_id": ...}. These two
         # extras are the only ones read: any other extra may hold a body and stays out.
@@ -184,10 +317,12 @@ def configure_logging(service: str, *, level: int = logging.INFO) -> None:
         name = handler.get_name()
         if name in (_HANDLER_NAME, _SPAN_HANDLER_NAME) or type(handler) is logging.StreamHandler:
             root.removeHandler(handler)
+    formatter = JsonFormatter(service)
     handler = logging.StreamHandler(sys.stderr)
     handler.set_name(_HANDLER_NAME)
-    handler.setFormatter(JsonFormatter(service))
+    handler.setFormatter(formatter)
     root.addHandler(handler)
+    formatter.emit_malformed_env_warnings()
     span_errors = SpanErrorHandler()
     span_errors.set_name(_SPAN_HANDLER_NAME)
     root.addHandler(span_errors)
