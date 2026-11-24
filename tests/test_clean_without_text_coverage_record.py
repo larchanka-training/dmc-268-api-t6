@@ -107,8 +107,11 @@ def test_restore_wrapper_warns_for_corrupt_explicit_coverage_without_logging_pay
             )
             is None
         )
-    assert [record.getMessage() for record in caplog.records] == [
-        "Invalid saved run coverage run_id=00000000-0000-0000-0000-0000000000d5"
+    assert [(record.name, record.getMessage()) for record in caplog.records] == [
+        (
+            "app.modules.reviews.application.run_coverage",
+            "Invalid saved run coverage run_id=00000000-0000-0000-0000-0000000000d5",
+        )
     ]
     assert "private-token" not in caplog.text
     caplog.clear()
