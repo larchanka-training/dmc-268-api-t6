@@ -125,8 +125,8 @@
 3. После коммита транзакции воркер фоновой очистки `WorkspaceDeletionWorker` (#551) ожидает перехода всех активных прогонов воркспейса в терминальные состояния (`succeeded`, `failed`, `cancelled`, `skipped`).
    - **Гарантия завершения ожидания (SD §6.4, PIPELINE_SPEC §1, §6):**
      а) Реконсилер при каждом тике переводит в `RunState.CANCELLED` любой прогон в состоянии `RunState.QUEUED` удаляемого воркспейса (`deletion_enqueued_at IS NOT NULL`) через канонический путь отмены с выставлением `cancellation_signal_requested_at`, `notify_run_state` и последующей публикацией сигнала check-run, исключая бесконечное ожидание повторных попыток claim;
-     б) Для зависших прогонов в `RunState.RUNNING` с истёкшим `lease_until` реконсилер переводит их в `RunState.CANCELLED` (а не в `RunState.QUEUED`), фиксируя через канонический путь отмены `error_code = 'workspace_deleted'`, `finished_at = now()`, `cancellation_signal_requested_at = now()`, вызывая `notify_run_state` и публикуя сигнал закрытия check-run;
-     в) Устанавливается предельный таймаут ожидания завершения прогонов воркером: **15 минут**. По истечении 15 минут `WorkspaceDeletionWorker` принудительно переводит любые остаточные нетерминальные прогоны воркспейса в `state = RunState.CANCELLED`, `error_code = 'workspace_deletion_timeout'`, `finished_at = now()`, также через канонический путь с выставлением `cancellation_signal_requested_at`, вызовом `notify_run_state` и публикацией сигнала закрытия check-run, высвобождает `balance_holds` и переходит к следующим шагам биллинга и purge.
+     б) Для зависших прогонов в `RunState.RUNNING` с истёкшим `lease_until` реконсилер (условным `UPDATE ... WHERE state = 'running' AND lease_until < now()`) переводит их в `RunState.CANCELLED` (а не в `RunState.QUEUED`), фиксируя через канонический путь отмены `error_code = 'workspace_deleted'`, `finished_at = now()`, `cancellation_signal_requested_at = now()`, вызывая `notify_run_state` и публикуя сигнал закрытия check-run;
+     в) Для активных прогонов в `RunState.RUNNING` с действующим `lease_until` (верхняя граница попытки в `PIPELINE_SPEC §3` — 8 мин для `fast`, до 18 мин для `deep` + fallback `fast`) и в `RunState.PUBLISHING` прямой принудительный перевод в `CANCELLED` **запрещён**: `running` останавливаются кооперативно по `cancel_requested = true`, а `publishing` доводится до естественного исхода (отмена возможна только при устаревшей голове по T15). По истечении контрольного порога ожидания **20 минут** (перекрывает 18 мин попытки и 5 мин `lease_until`) `WorkspaceDeletionWorker` повторно отменяет только `queued` и `running` с `lease_until < now()`; если всё ещё остаются активные `running` с неистёкшим `lease_until` или `publishing`, шаг перепланируется и удерживается в выборке реконсиляции (с алертом), **не** снимая `balance_holds` и **не** вызывая `purge_workspace_run_data` до фактической терминальности всех прогонов.
 4. После того как все прогоны воркспейса стали терминальными, единая точка записи биллинга (ADR 0002 §3.4, §5.2) финализирует списания за фактически потреблённые ресурсы и высвобождает `balance_holds`.
 5. Положительные свободные остатки активных грантов аннулируются отдельными проводками в `credit_ledger`:
    - `kind = 'adjustment'`;
@@ -167,32 +167,32 @@
 2. **Внешние вызовы и фоновая очистка (строго после `commit`, воркер `WorkspaceDeletionWorker` #551):**
    - Доведение очистки гарантируется периодической leader-задачей реконсиляции (SD §6.4), разделяющей этапы жизненного цикла:
      1) **Основная очистка данных и биллинга:** подбирает воркспейсы с предикатом `deletion_enqueued_at IS NOT NULL AND data_purged_at IS NULL`;
-     2) **Отложенные возвраты:** источником работы служат строки таблицы outbox со статусом `pending`, независимо от состояния `data_purged_at`;
+     2) **Отложенные возвраты:** источником работы служат строки таблицы `workspace_refund_outbox` (схема: `id UUID PK`, `workspace_id UUID NOT NULL REFERENCES workspaces(id)`, `payment_id UUID REFERENCES payments(id)`, `stripe_object_id TEXT NOT NULL`, `idempotency_key TEXT NOT NULL UNIQUE`, `amount_cents INTEGER`, `status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed'))`, `attempts INTEGER NOT NULL DEFAULT 0`, `last_error TEXT`, `next_retry_at TIMESTAMPTZ NOT NULL DEFAULT now()`, `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`, `completed_at TIMESTAMPTZ`; миграция Alembic — в `#550`, выполнение и реконсиляция — в `#551`) с предикатом `status = 'pending' AND next_retry_at <= now()`, независимо от состояния `data_purged_at`;
      3) **Отложенная деперсонализация Stripe Customer:** подбирает воркспейсы с предикатом `customer_anonymization_due_at IS NOT NULL AND customer_anonymization_due_at <= now() AND customer_anonymized_at IS NULL`.
    - Шаги выполнения воркера #551:
      1. **Отзыв токенов VCS и интеграций:** отзыв токенов доступа GitLab (`token_ciphertext = NULL`, `credential_key_id = NULL`, `revoked_at = now()`, `intake_enabled = false`, соблюдая `ck_gitlab_connections_credential_pair` и `ck_gitlab_connections_enabled`), Bitbucket (`token_ciphertext = NULL`, `token_key_id = NULL`, `revoked_at = now()`, `intake_enabled = false`, `secret_ciphertext = NULL`, `secret_key_id = NULL`, соблюдая `ck_bitbucket_connections_token_pair` и `ck_bitbucket_repository_webhook_secrets_pair`) и прав GitHub App; дерегистрация вебхуков у провайдеров (GitLab project webhooks, Bitbucket repo webhooks).
      2. **Отмена подписки Stripe:** `stripe.Subscription.cancel(sub_id, idempotency_key=...)`.
      3. **Отвязка платежных методов:** `stripe.PaymentMethod.detach(...)` для сохранённых карт.
      4. **Погашение Checkout-сессий:** вызов `stripe.checkout.Session.expire(...)` для активных сессий у Stripe (только для сессий с `mode == 'payment'`).
-     5. **Ожидание завершения прогонов:** воркер ожидает перехода всех активных прогонов воркспейса в терминальные состояния (`succeeded`, `failed`, `cancelled`, `skipped`) с таймаутом 15 минут.
-     6. **Финализация биллинга:** расчет итогов прогонов единой точкой биллинга, снятие `balance_holds` и аннулирование остатка грантов проводками `kind = 'adjustment'`, `reason = 'workspace_deleted'`.
-     7. **Очистка данных кода:** вызов процедуры `purge_workspace_run_data(workspace_id)` с фиксацией `runs.data_purged_at = now()`, `workspaces.data_purged_at = now()`, и установкой срока деперсонализации Customer `workspaces.customer_anonymization_due_at = now() + INTERVAL '30 days'`.
-     8. **Отложенная деперсонализация Stripe Customer:** объект `stripe.Customer` сохраняется на 30 дней после закрытия окна возврата (для проведения возможных рефандов и урегулирования диспутов), после чего деперсонализируется воркером реконсиляции (#551) с фиксацией `workspaces.customer_anonymized_at = now()`.
+     5. **Ожидание завершения прогонов:** воркер ожидает перехода всех активных прогонов воркспейса в терминальные состояния (`succeeded`, `failed`, `cancelled`, `skipped`) с контрольным порогом перепланирования **20 минут** (§4.1 п.3в: без принудительной отмены `publishing` и только условным переводом просроченных `running` по `lease_until < now()`).
+     6. **Финализация биллинга:** только после достижения полной терминальности всех прогонов воркспейса выполняется расчет итогов прогонов единой точкой биллинга, снятие `balance_holds` и аннулирование остатка грантов проводками `kind = 'adjustment'`, `reason = 'workspace_deleted'`.
+     7. **Очистка данных кода:** вызов процедуры `purge_workspace_run_data(workspace_id)` (также только после терминальности всех прогонов) с фиксацией `runs.data_purged_at = now()`, `workspaces.data_purged_at = now()`, и установкой срока деперсонализации Customer `workspaces.customer_anonymization_due_at = now() + INTERVAL '30 days'`.
+     8. **Отложенная деперсонализация Stripe Customer:** объект `stripe.Customer` сохраняется на 30 дней от завершения очистки данных (шаг 7, `customer_anonymization_due_at = now() + INTERVAL '30 days'`, что перекрывает 14-дневное окно отказа от покупки и позволяет завершить возможные рефанды и диспуты), после чего деперсонализируется воркером реконсиляции (#551) с фиксацией `workspaces.customer_anonymized_at = now()`.
 
 ### Обработка событий Stripe Webhook для Workspace в статусе `deleted`
 
-Обработчики вебхуков Stripe не выполняют синхронных сетевых вызовов возврата в транзакции: при необходимости возврата создаётся задача в outbox для асинхронного проведения через `WorkspaceDeletionWorker` (#551).
+Обработчики вебхуков Stripe не выполняют синхронных сетевых вызовов возврата в транзакции: при необходимости возврата создаётся запись в `workspace_refund_outbox` (`status = 'pending'`) для асинхронного проведения через `WorkspaceDeletionWorker` (#551).
 
 | Событие Stripe | Поведение сервиса при `workspaces.status = 'deleted'` | Обоснование |
 |---|---|---|
 | `customer.subscription.deleted` | Игнорируется (HTTP 200) | Подтверждение отмены; воркспейс уже удалён, повторные действия не требуются. |
-| `invoice.paid` | Для счетов `metadata.source != 'checkout'`: пополнение не начисляется, создаётся запись outbox на `stripe.Refund` с `idempotency_key = f"refund:invoice:{invoice_id}"`. Для счетов Checkout (`metadata.source == 'checkout'`): возврат не инициируется (только запись `provider_invoice_id`), возврат идёт по сессии Checkout | Защита от двойного возврата средств по Checkout (ADR 0002 §10.3). Возврат по абонентским счетам выполняет воркер #551. |
+| `invoice.paid` | Для счетов `metadata.source != 'checkout'`: пополнение не начисляется, создаётся запись в `workspace_refund_outbox` на `stripe.Refund` с `idempotency_key = f"refund:invoice:{invoice_id}"`. Для счетов Checkout (`metadata.source == 'checkout'`): возврат не инициируется (только запись `provider_invoice_id`), возврат идёт по сессии Checkout | Защита от двойного возврата средств по Checkout (ADR 0002 §10.3). Возврат по абонентским счетам выполняет воркер #551. |
 | `invoice.payment_failed` | Игнорируется (HTTP 200) | Фиксация неуспеха списания по уже отменённой подписке. |
 | `charge.refunded` | Фиксируется в `credit_ledger` (`kind = 'refund'`) на каждый объект возврата с `payment_id = payments.id` | Отражение возврата средств в бухгалтерском аудите по факту события Stripe без изменения статуса воркспейса (ADR 0002 §10.3). |
-| `refund.updated` (`status in ('failed', 'canceled')`) | Создаётся запись outbox на повтор попытки возврата через воркер #551 (по аналогии с повтором возврата 14-дневного отказа ADR 0002 §9); баланс удалённого воркспейса не восстанавливается | Исключает зависание средств клиента у Stripe и фантомное пополнение баланса удалённого воркспейса. |
+| `refund.updated` / `refund.failed` (`status in ('failed', 'canceled')`) | Создаётся запись в `workspace_refund_outbox` на повтор попытки возврата через воркер #551 (по аналогии с повтором возврата 14-дневного отказа ADR 0002 §9); баланс удалённого воркспейса не восстанавливается | Исключает зависание средств клиента у Stripe и фантомное пополнение баланса удалённого воркспейса. |
 | `charge.dispute.created` | Фиксируется в `credit_ledger` (`kind = 'adjustment'`, `reason = 'dispute'`) | Отражение претензии по ADR 0002 §5/§10.3 для бухгалтерского учёта. |
 | `charge.dispute.closed` | При выигранном споре сторнируется проводкой `kind = 'adjustment'` с указанием `reversal_of_id = dispute_ledger_id` строго по правилам ADR 0002 §10.3 | Завершение арбитража платежной системой по ADR 0002 §10.3. |
-| `checkout.session.completed` | Обрабатывается строго при `mode == 'payment'` (при `mode == 'setup'` игнорируется). Платеж фиксируется как `payments.status = 'paid'`, кредиты не начисляются; создаётся запись outbox на `stripe.Refund` с `idempotency_key = f"refund:checkout:{session.id}"`. Проводка `kind = 'refund'` в `credit_ledger` при создании outbox НЕ пишется — она вносится только по фактическому вебхуку `charge.refunded` на каждый объект возврата | Сохранение фискальной достоверности платежа с последующим полным возвратом через воркер #551 без дублирования строк леджера (ADR 0002 §10.3). |
+| `checkout.session.completed` | Обрабатывается строго при `mode == 'payment'` (при `mode == 'setup'` игнорируется). Платеж фиксируется как `payments.status = 'paid'`, кредиты не начисляются; создаётся запись в `workspace_refund_outbox` на `stripe.Refund` с `idempotency_key = f"refund:checkout:{session.id}"`. Проводка `kind = 'refund'` в `credit_ledger` при создании outbox-записи НЕ пишется — она вносится только по фактическому вебхуку `charge.refunded` на каждый объект возврата | Сохранение фискальной достоверности платежа с последующим полным возвратом через воркер #551 без дублирования строк леджера (ADR 0002 §10.3). |
 | `checkout.session.expired` | Платеж маркируется `payments.status = 'expired'` | Штатное истечение неоплаченной сессии. |
 | `payment_method.detached` | Игнорируется (HTTP 200) | Подтверждение отвязки способа оплаты. |
 | Любое другое событие Stripe | Игнорируется (HTTP 200) | Изоляция удалённого воркспейса от фоновых событий. |
@@ -363,7 +363,7 @@
 | Вопрос | Ответственный | Срок / Веха |
 |---|---|---|
 | Подтверждение юристами точного срока хранения фискальных проводок для юрисдикций РФ/ЕС/США (7 лет vs 10 лет) | DPO / Юридический отдел (Legal) | Спринт 5 |
-| Реализация авто-возврата Stripe Refund через outbox-воркер при возникновении `invoice.paid` после фиксации tombstone | Исполнитель задачи `#551` | Задача `#551` |
+| Реализация авто-возврата Stripe Refund через `workspace_refund_outbox` и воркер при возникновении `invoice.paid` после фиксации tombstone | Исполнитель задачи `#551` (таблица и миграция — `#550`) | Задачи `#550` / `#551` |
 
 ---
 
@@ -376,17 +376,17 @@
    - `#371` — гранты `credit_ledger`, `balance_holds`, финализация удержаний.
    - `#372` — подписки Stripe, append-only согласия `billing_consents` и эндпоинт сессий Customer Portal.
 2. **Backend API (#550, ветка `feat/550-workspace-deletion`):**
-   - Миграция таблицы `workspaces` (поля `status`, `deleted_at`, `deletion_enqueued_at`, `data_purged_at`, `customer_anonymization_due_at`, `customer_anonymized_at`).
+   - Миграция таблицы `workspaces` (поля `status`, `deleted_at`, `deletion_enqueued_at`, `data_purged_at`, `customer_anonymization_due_at`, `customer_anonymized_at`) и создание таблицы `workspace_refund_outbox` (§5 п.2).
    - Реализация эндпоинта `DELETE /api/workspaces/{id}` с авторизацией по БД-роли `Owner` и проверкой имени.
    - Каноническая отмена прогонов (`RunRepository.cancel_run` для `queued`, `cancel_requested = true` для `running`/`publishing`).
    - Немедленный отзыв токенов агентов `auth_agent_tokens.revoked_at = now()` и удаление `auth_agent_device_flows` (#553).
-   - Обработчики вебхуков Stripe для удалённого воркспейса (фиксация фискальной записи `paid`, отказ в начислении кредитов, постановка задачи на возврат в outbox).
+   - Обработчики вебхуков Stripe для удалённого воркспейса (фиксация фискальной записи `paid`, отказ в начислении кредитов, постановка задачи на возврат в `workspace_refund_outbox`).
    - Фиксация флага `deletion_enqueued_at` в транзакции и публикация задачи в RabbitMQ **строго после `commit()`**.
 3. **Фоновая обработка и очистка данных (#551):**
    - Воркер `WorkspaceDeletionWorker` и периодическая leader-задача реконсиляции (SD §6.4).
    - Внешние вызовы: отзыв VCS-токенов, дерегистрация вебхуков у провайдеров, отмена подписки Stripe, отвязка платежных методов, погашение `stripe.checkout.Session.expire`.
-   - Проведение возвратов по задачам outbox с ключами идемпотентности и фиксацией `credit_ledger kind='refund'`.
-   - Ожидание терминальности активных прогонов воркспейса (таймаут 15 мин), снятие `balance_holds`, аннулирование доступных грантов проводками `kind = 'adjustment'`, `reason = 'workspace_deleted'`.
+   - Проведение возвратов по строкам `workspace_refund_outbox` (`status = 'pending'`) с ключами идемпотентности и фиксацией `credit_ledger kind='refund'`.
+   - Ожидание терминальности активных прогонов воркспейса (контрольный порог перепланирования 20 мин, условная отмена только `lease_until < now()`, без принудительной отмены `publishing`), снятие `balance_holds`, аннулирование доступных грантов проводками `kind = 'adjustment'`, `reason = 'workspace_deleted'`.
    - Процедура `purge_workspace_run_data(workspace_id)` для удаления кода прогонов, контекста, явного `DELETE FROM repository_rules_status` и RAG-индекса, фиксация `runs.data_purged_at = now()` и `workspaces.data_purged_at = now()`.
    - Обезличивание репозиториев, версий правил, конвенций, findings и результатов ревью по спецификации §6.1.
    - Миграция `provider_installations`: удаление старого `UniqueConstraint` и создание частичного уникального индекса `WHERE deleted_at IS NULL` с поддержкой `index_where`.
