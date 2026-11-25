@@ -1,0 +1,32 @@
+{
+  "name": "AI CodeReviewer Bot",
+  "description": "AI code reviewer bot",
+  "url": "https://www.dmc268-t6.axyi.ru/",
+  "public": true,
+  "hook_attributes": {
+    "url": "https://api.dmc268-t6.axyi.ru/webhooks/github",
+    "active": true
+  },
+  "redirect_url": "https://ui.dmc268-t6.axyi.ru/auth/callback",
+  "callback_urls": ["https://ui.dmc268-t6.axyi.ru/auth/callback"],
+  "setup_url": "https://ui.dmc268-t6.axyi.ru/repositories",
+  "setup_on_update": true,
+  "request_oauth_on_install": true,
+  "default_permissions": {
+    "actions": "read",
+    "checks": "write",
+    "contents": "read",
+    "issues": "write",
+    "metadata": "read",
+    "pull_requests": "write",
+    "statuses": "read"
+  },
+  "default_events": [
+    "check_suite",
+    "pull_request",
+    "push",
+    "repository",
+    "status",
+    "workflow_run"
+  ]
+}
