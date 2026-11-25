@@ -202,6 +202,11 @@ def context_summary(
     return {
         "status": payload.status.value,
         "reason": payload.reason,
+        **(
+            {"degraded_error_codes": list(payload.degraded_error_codes)}
+            if payload.degraded_error_codes
+            else {}
+        ),
         "diff": diff,
         "reviewable_lines": payload.reviewable_lines,
         "ignored_files": payload.ignored_files,

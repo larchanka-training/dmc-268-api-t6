@@ -1235,30 +1235,41 @@ def test_publish_review_output_persists_dropped_findings() -> None:
     assert str(RUN_ID) in str(exc_info.value)
 
 
-@pytest.mark.parametrize(
-    ("error_code", "expected_phrase"),
-    [
-        ("bitbucket_request_budget_exceeded", "HTTP-запросов"),
-        ("bitbucket_response_budget_exceeded", "объёма ответов"),
-    ],
-)
-def test_bitbucket_budget_degradation_note_renders_in_review_body(
-    error_code: str,
-    expected_phrase: str,
-) -> None:
+def test_context_degradation_note_from_response_returns_none_for_unrelated_codes() -> None:
     from app.modules.reviews.application.run_failures import context_degradation_note_from_response
-    from app.modules.reviews.application.store_review_output import (
-        PublishingGuard,
-        StoreReviewOutput,
-    )
 
     assert context_degradation_note_from_response(None) is None
     assert context_degradation_note_from_response({"error": {"code": "diff_fetch_failed"}}) is None
-    note = context_degradation_note_from_response(
-        {"error": {"type": "RunFailure", "message": "limit hit", "code": error_code}}
-    )
-    assert note is not None
+    assert context_degradation_note_from_response({"degraded_error_codes": ["other"]}) is None
 
+
+@pytest.mark.parametrize(
+    ("response_payload", "expected_phrase"),
+    [
+        (
+            {
+                "error": {
+                    "type": "RunFailure",
+                    "message": "limit",
+                    "code": "bitbucket_request_budget_exceeded",
+                }
+            },
+            "Лимит запросов к Bitbucket",
+        ),
+        (
+            {"degraded_error_codes": ["bitbucket_response_budget_exceeded"]},
+            "Исчерпан бюджет ответов Bitbucket",
+        ),
+    ],
+)
+def test_publish_review_output_surfaces_bitbucket_budget_note(
+    response_payload: dict[str, object],
+    expected_phrase: str,
+) -> None:
+    from app.modules.reviews.application.run_failures import context_degradation_note_from_response
+
+    note = context_degradation_note_from_response(response_payload)
+    assert note is not None
     ctx = FindingPostProcessingInput(
         diff_map=_added_file_diff_map("app/example.py", 14),
         checked_paths=frozenset({"app/example.py"}),
@@ -1288,6 +1299,34 @@ def test_bitbucket_budget_degradation_note_renders_in_review_body(
     published_body = provider.calls[0][1]
     assert "**Ограничение контекста:**" in published_body
     assert expected_phrase in published_body
+
+
+@pytest.mark.parametrize(
+    ("error_code", "expected_phrase"),
+    [
+        ("bitbucket_request_budget_exceeded", "Лимит запросов к Bitbucket"),
+        ("bitbucket_response_budget_exceeded", "Исчерпан бюджет ответов Bitbucket"),
+    ],
+)
+def test_store_review_output_surfaces_bitbucket_budget_note(
+    error_code: str,
+    expected_phrase: str,
+) -> None:
+    from app.modules.reviews.application.run_failures import context_degradation_note_from_response
+    from app.modules.reviews.application.store_review_output import (
+        PublishingGuard,
+        StoreReviewOutput,
+    )
+
+    note = context_degradation_note_from_response({"degraded_error_codes": [error_code]})
+    assert note is not None
+    ctx = FindingPostProcessingInput(
+        diff_map=_added_file_diff_map("app/example.py", 14),
+        checked_paths=frozenset({"app/example.py"}),
+        rule_names=frozenset(),
+        allowed_v2_rules=frozenset(),
+        context_degradation_note=note,
+    )
 
     class FakeReviewRepo(InMemoryFinalization):
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
@@ -1343,3 +1382,56 @@ def test_bitbucket_budget_degradation_note_renders_in_review_body(
     stored_body = fake_repo.finalized_processed.review_body
     assert "**Ограничение контекста:**" in stored_body
     assert expected_phrase in stored_body
+
+
+def test_finalize_stored_review_body_repack_preserves_context_degradation_note() -> None:
+    from app.modules.reviews.application.findings_post_processor import (
+        FindingsPostProcessor,
+        finalize_stored_review_body,
+    )
+    from app.modules.reviews.application.run_failures import context_degradation_note
+
+    note = context_degradation_note("bitbucket_response_budget_exceeded")
+    assert note is not None
+    notes = [
+        {
+            "path": "app/example.py",
+            "line": 12,
+            "start_line": None,
+            "severity": "low",
+            "category": "correctness",
+            "title": f"Overflow {number}",
+            "body": "x" * (1173 + (number % 3)),
+            "suggestion": None,
+            "confidence": 0.4,
+            "rule_name": None,
+        }
+        for number in range(1, 7)
+    ]
+    parsed = parse_review_output(
+        {
+            "findings": [*cast(list[dict[str, object]], valid_output()["findings"]), *notes],
+            "summary": valid_output()["summary"],
+        }
+    )
+    processed = FindingsPostProcessor.from_default_patterns().process(
+        parsed,
+        diff_map=_added_file_diff_map("app/example.py", 14),
+        checked_paths=frozenset({"app/example.py"}),
+        rule_names=frozenset(),
+        allowed_v2_rules=frozenset(),
+        context_degradation_note=note,
+    )
+    assert processed.omitted_body_only_count > 0
+    repacked = finalize_stored_review_body(
+        parsed,
+        processed,
+        checked_paths=frozenset({"app/example.py"}),
+        severity_threshold="all",
+        below_threshold=0,
+        run_url="https://ui.test/runs/00000000-0000-0000-0000-000000000408",
+    )
+    assert len(repacked.review_body) <= 4000
+    assert repacked.omitted_body_only_count > 0
+    assert "**Ограничение контекста:**" in repacked.review_body
+    assert "Исчерпан бюджет ответов Bitbucket" in repacked.review_body

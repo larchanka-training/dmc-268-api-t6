@@ -82,6 +82,7 @@ from app.modules.reviews.application.run_failures import (
     RequiredSourceUnavailable,
     RunCancelled,
     RunFailure,
+    degraded_budget_error_code,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -291,6 +292,8 @@ class ReviewContextPayload:
     retrieved: tuple[RetrievedBlock, ...] = ()
     # None without a RAG plan.
     rag: RagStats | None = None
+    # Catalog budget failure codes swallowed while building optional context.
+    degraded_error_codes: tuple[str, ...] = ()
 
 
 class RevisionSource(Protocol):
@@ -376,6 +379,7 @@ class _Files:
         self._denied = denied
         self._texts: dict[str, str | FileUnavailable] = {}
         self._facts: dict[str, AstFacts | FileUnavailable] = {}
+        self.degraded_error_codes: list[str] = []
         self.imported: set[str] = set()
         self.changed: set[str] = set()
         # Changed files past the limit of AST files: an import does not bring them back.
@@ -409,6 +413,10 @@ class _Files:
                     raise
                 # Extra context is best effort: the diff itself stays available.
                 _LOGGER.warning("Context file read failed blob_sha=%s", sha, exc_info=True)
+                if (
+                    code := degraded_budget_error_code(exc)
+                ) is not None and code not in self.degraded_error_codes:
+                    self.degraded_error_codes.append(code)
                 result = FileUnavailable("source_read_failed")
             else:
                 result = checked_source(raw)
@@ -550,6 +558,16 @@ class BuildReviewContext:
             omissions.append(ContextOmission("ignored", count=ignored))
         reviewable = sum(file.additions + file.deletions for file, _ in allowed)
         retrieved: list[RetrievedBlock] = []
+        degraded_error_codes: list[str] = []
+
+        def record_degraded(exc_or_code: BaseException | str | None) -> None:
+            code = (
+                degraded_budget_error_code(exc_or_code)
+                if isinstance(exc_or_code, BaseException)
+                else exc_or_code
+            )
+            if code is not None and code not in degraded_error_codes:
+                degraded_error_codes.append(code)
 
         def payload(
             status: ContextStatus,
@@ -578,6 +596,7 @@ class BuildReviewContext:
                 # A build that returns before the RAG slot still reports it (M8): no
                 # counter, and the reason of the return.
                 rag=None if rag is None else stats or RagStats(reason=reason),
+                degraded_error_codes=tuple(degraded_error_codes),
             )
 
         # Completeness first: an empty list the provider does not confirm is not "no changes".
@@ -643,6 +662,7 @@ class BuildReviewContext:
             _LOGGER.warning(
                 "Context tree read failed head_sha=%s", diff_map.head_sha, exc_info=True
             )
+            record_degraded(exc)
             omissions.append(ContextOmission("tree_unavailable"))
             return payload(
                 ContextStatus.REVIEW,
@@ -742,7 +762,14 @@ class BuildReviewContext:
                         raise
                     # Optional like the other levels: the slot stays empty, L2 and L3 go on.
                     _LOGGER.warning("RAG slot failed head_sha=%s", diff_map.head_sha, exc_info=True)
+                    record_degraded(exc)
                     stats = RagStats(error_type=type(exc).__name__, error_message=str(exc)[:1000])
+            if candidates is not None:
+                for code in candidates.degraded_error_codes:
+                    record_degraded(code)
+            if self._rag_blobs is not None:
+                for code in self._rag_blobs.degraded_error_codes:
+                    record_degraded(code)
             if candidates is not None:
                 omissions.extend(
                     ContextOmission(item.reason, item.path, item.count)
@@ -784,6 +811,8 @@ class BuildReviewContext:
                     tokens=sum(block.tokens for block in retrieved),
                 )
         finally:
+            for code in files.degraded_error_codes:
+                record_degraded(code)
             await self._parser.aclose()
 
         # L2 windows, then L3: a full file replaces the windows of that file.

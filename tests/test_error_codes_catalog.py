@@ -7,6 +7,7 @@ This test validates catalog format and completeness (AC4), not runtime behavior 
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from app.modules.reviews.application.run_failures import (
@@ -16,6 +17,32 @@ from app.modules.reviews.application.run_failures import (
 )
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_section6_codes() -> set[str]:
+    spec_text = (ROOT / "docs" / "PIPELINE_SPEC.md").read_text(encoding="utf-8")
+    section = spec_text.split("## 6. Каталог `error_code`", 1)[1].split("### 6.1", 1)[0]
+    codes: set[str] = set()
+    for line in section.splitlines():
+        if not line.startswith("| `"):
+            continue
+        first_cell = line.split("|")[1].strip()
+        if first_cell == "`error_code`":
+            continue
+        codes.update(re.findall(r"`([a-z0-9_]+)`", first_cell))
+    return codes
+
+
+def test_section_6_and_section_6_2_error_codes_match() -> None:
+    section6 = _load_section6_codes()
+    section6_2 = set(_load_catalog_table().keys())
+    # Section 6 omits deprecated policy_path_invalid from the active causes table (noted in prose
+    # right below it) alongside target #107 codes not yet in KNOWN_ERROR_CODES; §6.2 matches
+    # KNOWN_ERROR_CODES 1-to-1.
+    expected_in_section6 = KNOWN_ERROR_CODES - {"policy_path_invalid"}
+    assert section6 >= expected_in_section6
+    assert section6_2 == KNOWN_ERROR_CODES
+    assert (section6 & section6_2) >= expected_in_section6
 
 
 def _load_catalog_table() -> dict[str, dict[str, str]]:

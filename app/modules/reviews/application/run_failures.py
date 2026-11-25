@@ -6,7 +6,7 @@ Only codes in ``RETRYABLE_ERROR_CODES`` can enter T9 before ``MAX_ATTEMPTS``;
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -248,31 +248,45 @@ class RetryDelays:
         return "30s", self.short
 
 
-_CONTEXT_DEGRADATION_NOTES: dict[str, str] = {
-    "bitbucket_request_budget_exceeded": (
-        "исчерпан лимит HTTP-запросов к Bitbucket для необязательного контекста — "
-        "ревью выполнено по diff без дополнительного контекста (L2/L3/RAG)."
-    ),
-    "bitbucket_response_budget_exceeded": (
-        "исчерпан бюджет объёма ответов Bitbucket для необязательного контекста — "
-        "ревью выполнено по diff без дополнительного контекста (L2/L3/RAG)."
-    ),
+CONTEXT_DEGRADATION_BASE_TEXTS: dict[str, str] = {
+    "bitbucket_request_budget_exceeded": "Лимит запросов к Bitbucket для ревью исчерпан.",
+    "bitbucket_response_budget_exceeded": "Исчерпан бюджет ответов Bitbucket для одного прогона.",
 }
+
+
+def degraded_budget_error_code(exc: BaseException) -> str | None:
+    """Return catalog error_code if ``exc`` is a Bitbucket budget failure for optional context."""
+    if isinstance(exc, RunFailure) and exc.error_code in CONTEXT_DEGRADATION_BASE_TEXTS:
+        return exc.error_code
+    return None
 
 
 def context_degradation_note(error_code: str | None) -> str | None:
     """Return user-visible degradation text when optional context hit a budget limit."""
     if error_code is None:
         return None
-    return _CONTEXT_DEGRADATION_NOTES.get(error_code)
+    base = CONTEXT_DEGRADATION_BASE_TEXTS.get(error_code)
+    if base is None:
+        return None
+    return f"{base} Ревью выполнено только по diff без дополнительного контекста репозитория."
 
 
 def context_degradation_note_from_response(response_value: object) -> str | None:
     """Extract a user-visible degradation note from a stored ``context.build`` response."""
     if not isinstance(response_value, Mapping):
         return None
+    notes: list[str] = []
+    degraded_codes = response_value.get("degraded_error_codes")
+    if isinstance(degraded_codes, Sequence) and not isinstance(degraded_codes, (str, bytes)):
+        for code in degraded_codes:
+            if isinstance(code, str):
+                note = context_degradation_note(code)
+                if note is not None and note not in notes:
+                    notes.append(note)
     error = response_value.get("error")
-    if not isinstance(error, Mapping):
-        return None
-    code = error.get("code")
-    return context_degradation_note(code if isinstance(code, str) else None)
+    if isinstance(error, Mapping):
+        code = error.get("code")
+        note = context_degradation_note(code if isinstance(code, str) else None)
+        if note is not None and note not in notes:
+            notes.append(note)
+    return " ".join(notes) if notes else None

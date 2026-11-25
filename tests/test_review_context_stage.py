@@ -1099,6 +1099,42 @@ def test_context_stage_propagates_control_but_preserves_optional_fallback(failur
     assert trace.steps[-1][2]["error"]["type"] == type(error).__name__
 
 
+@pytest.mark.parametrize(
+    "error_code", ["bitbucket_request_budget_exceeded", "bitbucket_response_budget_exceeded"]
+)
+@pytest.mark.parametrize("failure_point", ["tree", "read_blob"])
+def test_real_build_records_degraded_budget_codes_in_context_build(
+    error_code: str,
+    failure_point: Literal["tree", "read_blob"],
+) -> None:
+    class DegradedSource(Repository):
+        async def tree(self, revision: str) -> RevisionTree:
+            if failure_point == "tree":
+                raise RunFailure(error_code, "budget exhausted")
+            return await super().tree(revision)
+
+        async def read_blob(self, blob_sha: str) -> bytes:
+            if failure_point == "read_blob":
+                raise RunFailure(error_code, "budget exhausted")
+            return await super().read_blob(blob_sha)
+
+    trace, payloads = Trace(), Payloads()
+    stage = _stage(
+        trace,
+        context_builder=lambda run: BuildReviewContext(
+            source=DegradedSource(), parser=Parser(), counter=EstimatedTokenCounter()
+        ),
+        payloads=payloads,
+    )
+    payload = asyncio.run(stage.run(_RUN))
+
+    assert payload is not None
+    assert payload.degraded_error_codes == (error_code,)
+    (build,) = [response for tool, _, response in trace.steps if tool == "context.build"]
+    assert build["degraded_error_codes"] == [error_code]
+    assert payloads.rows[-1][1]["degraded_error_codes"] == [error_code]
+
+
 @pytest.mark.parametrize(("threshold", "cap"), [("critical", 1), ("warning", 3)])
 def test_publication_settings_leave_conventions_cache_identity_unchanged(
     threshold: SeverityThresholdValue, cap: int

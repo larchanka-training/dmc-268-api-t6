@@ -30,8 +30,8 @@ from tests.rag_context_fakes import (
     _REPOSITORY,
 )
 
-# test_review_context_stage.py and test_bitbucket_worker_full_path.py still import these from
-# here (both owned by open PR #478); they import tests.rag_context_fakes at their next edit.
+# test_bitbucket_worker_full_path.py still imports these from here; it can switch to
+# tests.rag_context_fakes at its next edit.
 from tests.rag_context_fakes import BlobCacheUow as BlobCacheUow
 from tests.rag_context_fakes import BlobStore as BlobStore
 from tests.rag_context_fakes import Graph as Graph

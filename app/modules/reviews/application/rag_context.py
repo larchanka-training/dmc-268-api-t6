@@ -85,6 +85,7 @@ from app.modules.reviews.application.graph_retriever import (
 )
 from app.modules.reviews.application.prompt_budget import TokenCounter
 from app.modules.reviews.application.rag_comments import hide_comments as hidden
+from app.modules.reviews.application.run_failures import degraded_budget_error_code
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -169,6 +170,12 @@ class CachedBlobSource:
         self._cache = cache
         self._uow_factory = uow_factory
         self._texts: dict[str, str | FileUnavailable] = {}
+        self._degraded_error_codes: list[str] = []
+
+    @property
+    def degraded_error_codes(self) -> tuple[str, ...]:
+        """Bitbucket budget failure codes swallowed while reading optional RAG blobs."""
+        return tuple(self._degraded_error_codes)
 
     async def text(self, blob_sha: str) -> str | FileUnavailable:
         if blob_sha in self._texts:
@@ -197,6 +204,10 @@ class CachedBlobSource:
                 raise
             # Extra context is best effort: the diff itself stays available.
             _LOGGER.warning("RAG blob read failed blob_sha=%s", blob_sha, exc_info=True)
+            if (
+                code := degraded_budget_error_code(exc)
+            ) is not None and code not in self._degraded_error_codes:
+                self._degraded_error_codes.append(code)
             return FileUnavailable("source_read_failed")
         result = checked_source(raw)
         if isinstance(result, str):
@@ -255,6 +266,7 @@ class RagCandidates:
     omissions: tuple[RagOmission, ...] = ()
     confirmed: int = 0
     dropped: Mapping[str, int] = field(default_factory=dict)
+    degraded_error_codes: tuple[str, ...] = ()
 
     @property
     def found(self) -> int:
@@ -383,6 +395,7 @@ class _Removed:
     unknown: str | None = None
     omissions: tuple[RagOmission, ...] = ()
     excluded: int = 0
+    degraded_error_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -475,7 +488,7 @@ class ReverseEdgeSelector:
         hints = await self._retriever.read_hints(diff_map.repository_id, targets[:MAX_RAG_TARGETS])
         commit = hints.indexed_commit_sha
         if not hints.index.usable or commit is None:
-            return RagCandidates(hints.index)
+            return RagCandidates(hints.index, degraded_error_codes=removed.degraded_error_codes)
         selection = _Selection(
             diff_map=diff_map,
             tree=tree,
@@ -513,6 +526,9 @@ class ReverseEdgeSelector:
             tuple(selection.omissions),
             selection.confirmed,
             dict(selection.dropped),
+            tuple(
+                dict.fromkeys([*removed.degraded_error_codes, *self._blobs.degraded_error_codes])
+            ),
         )
 
     async def _removed(
@@ -551,6 +567,7 @@ class ReverseEdgeSelector:
         if not sources:
             return _Removed()
         unknown = OLD_REVISION_UNKNOWN
+        base_tree_codes: tuple[str, ...] = ()
         base: RevisionTree | None = None
         if diff_map.diff_old_sha is not None:
             try:
@@ -563,6 +580,8 @@ class ReverseEdgeSelector:
                     diff_map.diff_old_sha,
                     exc_info=True,
                 )
+                if (code := degraded_budget_error_code(exc)) is not None:
+                    base_tree_codes = (code,)
                 unknown = SOURCE_READ_FAILED
         if base is None:
             # The names are unknown: the importers of a deleted or renamed module are
@@ -580,6 +599,7 @@ class ReverseEdgeSelector:
                     for file, path in sources
                     if file.change_type is ChangeType.MODIFIED
                 ),
+                degraded_error_codes=base_tree_codes,
             )
         base_files = _RevisionFiles(
             tree=base,
