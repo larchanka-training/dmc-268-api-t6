@@ -456,7 +456,7 @@ sequenceDiagram
   P->>GH: POST /pulls/{n}/reviews (commit_id = sha_1)
   GH-->>P: 200 OK (комментарии на sha_1 приняты)
   P->>PG: T14: state → succeeded, запись квитанций в comments
-  P->>GH: Check Run sha_1 → completed / neutral
+  P->>GH: Check Run sha_1 → итог по PIPELINE_SPEC §7
   P->>PG: NOTIFY webhook_work_available / retry_after
   PG-->>WW: пробуждение webhook-worker
   WW->>PG: claim отложенной квитанции sha_2
