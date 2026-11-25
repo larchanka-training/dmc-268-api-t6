@@ -330,8 +330,9 @@ Prod App публичный: [ai-codereviewer-bot](https://github.com/apps/ai-co
 Поставить App на репозиторий аккаунта, который им не владеет:
 
 1. Открыть https://github.com/apps/ai-codereviewer-bot/installations/new от имени этого аккаунта и выбрать репозитории. Не ставить prod App туда, где уже стоит staging App `dmc268-t6-reviewer`.
-2. GitHub присылает `installation.created` на `https://api.dmc268-t6.axyi.ru/webhooks/github`. Пока установка не привязана к Workspace, webhook-worker её не проецирует. Вход на prod UI привязывает установку ([docs/SECRETS.md](docs/SECRETS.md), «Регистрация и проверка»).
-3. При проекции worker создаёт лейбл `ai-review` запросом `POST /repos/{owner}/{repo}/labels`. Ответ 422 значит, что лейбл уже есть.
+2. GitHub присылает `installation.created` на `https://api.dmc268-t6.axyi.ru/webhooks/github`. Доставка видна владельцу App в Recent Deliveries. Пока установку не привязали, webhook-worker её не проецирует.
+3. Войти на prod UI (`https://ui.dmc268-t6.axyi.ru`). Вход привязывает установку к Workspace ([docs/SECRETS.md](docs/SECRETS.md), «Регистрация и проверка»). До входа доставка остаётся `ignored_unknown_installation`, и лейбл не создаётся.
+4. После проекции worker создаёт лейбл `ai-review` запросом `POST /repos/{owner}/{repo}/labels`. Ответ 422 значит, что лейбл уже есть.
 
 ### Снятие страницы
 

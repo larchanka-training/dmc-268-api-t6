@@ -108,6 +108,7 @@ def test_readme_explains_install_and_taking_the_page_down() -> None:
     assert "### Снятие страницы" in text
     assert "https://github.com/apps/ai-codereviewer-bot/installations/new" in text
     assert "`installation.created`" in text
+    assert "Войти на prod UI" in text
     assert "лейбл `ai-review`" in text
     assert "Only on this account" in text
     assert "docs/GITHUB_APP.md" in text
