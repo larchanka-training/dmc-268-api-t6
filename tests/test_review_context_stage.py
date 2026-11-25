@@ -5,51 +5,30 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from dataclasses import replace
+from datetime import timedelta
 from typing import Any, Literal
 from uuid import UUID
 
 import pytest
-from psycopg.errors import LockNotAvailable
-from sqlalchemy.exc import OperationalError
 
-from app.modules.code_index.domain.enums import EdgeKind, IndexStatus, RagIndexStatus
-from app.modules.code_index.domain.rag_index import RagIndex
+from app.modules.code_index.domain.enums import RagIndexStatus
 from app.modules.reviews.application import rag_index, review_ignore
 from app.modules.reviews.application.ast_resolution import RevisionTree
-from app.modules.reviews.application.ast_symbols import (
-    AstFacts,
-    AstFailureReason,
-    ParseRequest,
-)
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
-from app.modules.reviews.application.context_provenance import LineRange, SourceRef, SourceRole
+from app.modules.reviews.application.context_provenance import SourceRole
 from app.modules.reviews.application.diff_map import DiffMap, DiffSide, VcsProviderName
 from app.modules.reviews.application.execute_review import ExecuteReviewRun
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
-from app.modules.reviews.application.graph_retriever import (
-    GraphHints,
-    GraphRetriever,
-    GraphTarget,
-)
-from app.modules.reviews.application.policy_documents import PolicyEntryKind, PolicyTreeEntry
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput
 from app.modules.reviews.application.prompt_builder import FileStatus, PullRequestMeta
-from app.modules.reviews.application.rag_context import CachedBlobSource
-from app.modules.reviews.application.rag_index import OpenReviewIndex, RagReadiness
 from app.modules.reviews.application.review_context import (
     BuildReviewContext,
-    ContextBlock,
     ContextLevel,
     ContextStatus,
-    RagPlan,
-    Representation,
-    RetrievedBlock,
     ReviewContextPayload,
     SummaryOnlyReview,
 )
@@ -60,7 +39,6 @@ from app.modules.reviews.application.review_context_stage import (
 )
 from app.modules.reviews.application.review_ignore import IgnoreMatcher
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure, RunSkipped
-from app.modules.reviews.application.run_trace import ContextPayloadStore, RunTrace
 from app.modules.reviews.application.vcs_diff import (
     MergeBaseUnavailable,
     PullRequestLocator,
@@ -68,245 +46,83 @@ from app.modules.reviews.application.vcs_diff import (
     _is_generated,
 )
 from app.modules.reviews.application.verdict import SeverityThresholdValue
-from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
 from app.worker import WorkerSettings
 from tests.execute_review_fakes import _AcceptingCheckpointPublisher
+from tests.policy_snapshot_fakes import Store as Store
+from tests.policy_snapshot_fakes import Uow as Uow
+from tests.review_context_stage_support import (
+    _BASE as _BASE,
+)
+from tests.review_context_stage_support import (
+    _HEAD as _HEAD,
+)
+from tests.review_context_stage_support import (
+    _LOCATOR as _LOCATOR,
+)
+from tests.review_context_stage_support import (
+    _PATCH as _PATCH,
+)
+from tests.review_context_stage_support import (
+    _PINNED as _PINNED,
+)
+from tests.review_context_stage_support import (
+    _RUN as _RUN,
+)
+from tests.review_context_stage_support import (
+    _SOURCE as _SOURCE,
+)
+from tests.review_context_stage_support import (
+    Parser as Parser,
+)
+from tests.review_context_stage_support import (
+    Payloads as Payloads,
+)
+from tests.review_context_stage_support import (
+    Policy as Policy,
+)
+from tests.review_context_stage_support import (
+    Repository as Repository,
+)
+from tests.review_context_stage_support import (
+    Runs as Runs,
+)
+from tests.review_context_stage_support import (
+    Trace as Trace,
+)
+from tests.review_context_stage_support import (
+    Vcs as Vcs,
+)
+from tests.review_context_stage_support import (
+    _block as _block,
+)
+from tests.review_context_stage_support import (
+    _checkpoint as _checkpoint,
+)
+from tests.review_context_stage_support import (
+    _gate as _gate,
+)
+from tests.review_context_stage_support import (
+    _greet_hints as _greet_hints,
+)
+from tests.review_context_stage_support import (
+    _mark_summary_only_rows as _mark_summary_only_rows,
+)
+from tests.review_context_stage_support import (
+    _rag_builder as _rag_builder,
+)
+from tests.review_context_stage_support import (
+    _readiness as _readiness,
+)
+from tests.review_context_stage_support import (
+    _snapshots as _snapshots,
+)
+from tests.review_context_stage_support import (
+    _stage as _stage,
+)
+from tests.review_context_stage_support import (
+    _stored as _stored,
+)
 from tests.run_coverage_fakes import empty_snapshot
-from tests.test_prepare_policy_snapshot import Store, Uow
-from tests.test_rag_context import BlobCacheUow, BlobStore, Graph, SharedBlobCache, _uses
-from tests.test_rag_readiness import FakeReviewIndexUow, StubReviewIndexAccess
-
-_RUN = UUID("00000000-0000-0000-0000-000000000002")
-_HEAD = "a" * 40
-_BASE = "b" * 40
-_LOCATOR = PullRequestLocator(17, "octo/repo", 7)
-_SOURCE = "def greet(name):\n    extra = 1\n    return name\n"
-_PATCH = "@@ -1,2 +1,3 @@\n def greet(name):\n+    extra = 1\n     return name"
-
-
-async def _checkpoint() -> None:
-    return None
-
-
-@dataclass
-class Runs:
-    snapshots: list[DiffSnapshot] | None
-
-    async def get_run_vcs_input(self, run_id: UUID) -> RunVcsInput:
-        return RunVcsInput(UUID(int=5), UUID(int=1), _HEAD, _BASE, _LOCATOR)
-
-    async def get_run_snapshots(self, run_id: UUID) -> list[DiffSnapshot] | None:
-        return self.snapshots
-
-
-@dataclass
-class Vcs:
-    head_sha: str = _HEAD
-    merge_base: str | Exception = "c" * 40
-    files_changed: int = 2
-
-    async def get_pull_request(
-        self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
-    ) -> VcsPullRequest:
-        await checkpoint()
-        meta = PullRequestMeta(
-            title="t",
-            description=None,
-            author="octo",
-            source_branch="f",
-            target_branch="main",
-            labels=(),
-            files_changed=self.files_changed,
-            lines_added=0,
-            lines_removed=0,
-            is_draft=False,
-            is_fork=False,
-        )
-        return VcsPullRequest(locator, self.head_sha, _BASE, meta)
-
-    async def get_merge_base(
-        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
-    ) -> str:
-        await checkpoint()
-        if isinstance(self.merge_base, Exception):
-            raise self.merge_base
-        return self.merge_base
-
-    async def get_diff(
-        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
-    ) -> tuple[Any, ...]:
-        raise AssertionError("the stored diff is reused")
-
-    async def get_blob(
-        self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
-    ) -> bytes:
-        raise AssertionError("blobs are read through the revision source")
-
-
-@dataclass
-class Policy:
-    rules: bytes | None = b"```review-ignore\ngenerated/**\n```\n"
-    error: PolicyError | None = None
-
-    async def list_entries(self, tree_oid: str | None) -> Mapping[str, PolicyTreeEntry]:
-        if self.error is not None:
-            raise self.error
-        if tree_oid is not None:
-            return {"rules.md": PolicyTreeEntry(PolicyEntryKind.FILE, "3" * 40, 5)}
-        if self.rules is None:
-            return {}
-        return {".review": PolicyTreeEntry(PolicyEntryKind.DIRECTORY, "1" * 40, None)}
-
-    async def read_blob(self, oid: str) -> bytes:
-        assert self.rules is not None
-        return self.rules
-
-
-class Repository:
-    async def tree(self, revision: str) -> RevisionTree:
-        return RevisionTree(revision, {"src/app.py": "d" * 40}, complete=True)
-
-    async def read_blob(self, blob_sha: str) -> bytes:
-        return _SOURCE.encode()
-
-
-class Parser:
-    async def parse_many(
-        self, requests: tuple[ParseRequest, ...]
-    ) -> dict[str, AstFacts | AstFailureReason]:
-        return {item.key: extract_facts(item.language, item.source) for item in requests}
-
-    async def aclose(self) -> None:
-        return None
-
-
-@dataclass
-class Trace:
-    steps: list[tuple[str, dict[str, Any], Any]] = field(default_factory=list)
-
-    async def record(
-        self,
-        run_id: UUID,
-        tool: str,
-        request: dict[str, Any],
-        response: Any,
-        started_at: datetime,
-        duration_ms: int,
-    ) -> None:
-        self.steps.append((tool, request, response))
-
-
-@dataclass
-class Payloads:
-    """``context_payloads`` of the run: every write the stage made, or a failing store."""
-
-    rows: list[tuple[UUID, dict[str, Any]]] = field(default_factory=list)
-    error: Exception | None = None
-
-    snapshots: list[DiffSnapshot] | None = None
-
-    async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
-        if self.error is not None:
-            raise self.error
-        self.rows.append((run_id, summary))
-
-    async def save_summary_only_stop(
-        self,
-        run_id: UUID,
-        summarize: Callable[[list[DiffSnapshot]], dict[str, Any]],
-    ) -> dict[str, Any]:
-        if self.error is not None:
-            raise self.error
-        if self.snapshots is None:
-            raise AssertionError("the summary-only stop reloads stored rows")
-        marked = _mark_summary_only_rows(self.snapshots)
-        self.snapshots[:] = marked
-        summary = summarize(self.snapshots)
-        self.rows.append((run_id, summary))
-        return summary
-
-
-def _stored(path: str, patch: str) -> str:
-    """The patch as ``StoreDiffSnapshot`` keeps it for the UI: under a git header."""
-    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{patch}"
-
-
-def _snapshots() -> list[DiffSnapshot]:
-    generated = "@@ -1 +1 @@\n-a\n+b"
-    return [
-        DiffSnapshot(
-            "src/app.py", _stored("src/app.py", _PATCH), "d" * 40, "modified", None, 1, 0, 1
-        ),
-        DiffSnapshot(
-            "generated/api.py",
-            _stored("generated/api.py", generated),
-            "e" * 40,
-            "modified",
-            None,
-            1,
-            1,
-            2,
-            omission_reason="generated",
-        ),
-    ]
-
-
-def _mark_summary_only_rows(snapshots: list[DiffSnapshot]) -> list[DiffSnapshot]:
-    """In-memory stand-in for the store's summary-only UPDATE.
-
-    A withheld row (no model patch, no omission) and a proven empty file stay, and so
-    does a row the line threshold already flagged. Every other row loses its model patch.
-    """
-    marked: list[DiffSnapshot] = []
-    for item in snapshots:
-        withheld = (
-            item.review_patch is None and item.omission_reason is None and not item.summary_only
-        )
-        if withheld or item.summary_only or item.omission_reason == "empty_file":
-            marked.append(item)
-        else:
-            marked.append(replace(item, summary_only=True, review_patch=None))
-    return marked
-
-
-def _stage(
-    trace: RunTrace,
-    *,
-    store: Store | None = None,
-    policy: Policy | None = None,
-    vcs: Vcs | None = None,
-    snapshots: list[DiffSnapshot] | None = None,
-    none: bool = False,
-    empty: bool = False,
-    builtin_excluded: Callable[[str], bool] = lambda path: False,
-    context_builder: Callable[[RunVcsInput], BuildReviewContext] | None = None,
-    rag: OpenReviewIndex | None = None,
-    payloads: ContextPayloadStore | None = None,
-) -> ReviewContextStage:
-    shared = store or Store()
-    provider = vcs or Vcs()
-    held = None if none else [] if empty else list(snapshots or _snapshots())
-    if isinstance(payloads, Payloads) and held is not None:
-        payloads.snapshots = held
-    return ReviewContextStage(
-        checkpoint=_checkpoint,
-        runs=Runs(held),
-        vcs=provider,
-        merge_base=provider,
-        prepare_policy=PreparePolicySnapshot(
-            uow_factory=lambda: Uow(shared), source_factory=lambda pins: policy or Policy()
-        ),
-        context_builder=context_builder
-        or (
-            lambda run: BuildReviewContext(
-                source=Repository(), parser=Parser(), counter=EstimatedTokenCounter()
-            )
-        ),
-        trace=trace,
-        builtin_excluded=builtin_excluded,
-        rag=rag,
-        payloads=payloads,
-    )
 
 
 def test_stage_records_the_policy_and_the_context_without_any_document_or_code_text() -> None:
@@ -344,15 +160,6 @@ def test_stage_records_the_policy_and_the_context_without_any_document_or_code_t
     recorded = repr(trace.steps)
     assert "extra = 1" not in recorded
     assert "generated" not in recorded
-
-
-def _block(block_id: str, level: ContextLevel, role: SourceRole, tokens: int) -> ContextBlock:
-    source = SourceRef(
-        role, UUID(int=5), _HEAD, "src/app.py", None, (), DiffSide.RIGHT, (LineRange(1, 3),), "t"
-    )
-    return ContextBlock(
-        block_id, level, None, source, Representation.EXACT_LINES, "x", tokens, False
-    )
 
 
 def test_context_trace_counts_tokens_by_source_role_so_retrieved_excerpts_show() -> None:
@@ -538,7 +345,7 @@ def test_profile_check_failure_names_the_pinned_policy_base() -> None:
     from dataclasses import replace
 
     from app.modules.reviews.application.policy_snapshot import ExecutionProfile
-    from tests.test_prepare_policy_snapshot import _pins
+    from tests.policy_snapshot_fakes import _pins
 
     trace = Trace()
     profile = replace(ExecutionProfile.fast("model-a", ""), tokenizer_version="tokenizer/v0")
@@ -1149,7 +956,7 @@ def test_prepare_snapshot_and_stage_begin_raise_on_unknown_profile_version() -> 
 
     from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
     from tests.execute_review_fakes import _make_test_snapshot
-    from tests.test_prepare_policy_snapshot import _pins
+    from tests.policy_snapshot_fakes import _pins
 
     # 1. PreparePolicySnapshot.execute raises on unknown budget_profile_version in pins
     bad_pins = _pins(
@@ -1279,621 +1086,6 @@ def test_context_stage_propagates_control_but_preserves_optional_fallback(failur
             asyncio.run(stage.run(_RUN))
         assert caught.value is error
     assert trace.steps[-1][2]["error"]["type"] == type(error).__name__
-
-
-# The index the review opens at the RAG gate (#144): pointers of a fake readiness.
-_REPOSITORY = UUID(int=1)
-_INDEXED = "6" * 40
-_TARGET = "7" * 40
-_USABLE = (RagIndexStatus.READY, RagIndexStatus.STALE)
-
-
-def _readiness(status: RagIndexStatus, *, error_code: str | None = None) -> RagReadiness:
-    usable = status in _USABLE
-    index = RagIndex(
-        status,
-        _INDEXED if usable else None,
-        datetime(2026, 10, 23, 9, 30, tzinfo=UTC) if usable else None,
-        3 if usable else 0,
-        9 if usable else 0,
-        error_code,
-    )
-    return RagReadiness(enabled=True, index=index, default_head_sha=_TARGET)
-
-
-def _gate(readiness: RagReadiness) -> tuple[OpenReviewIndex, StubReviewIndexAccess]:
-    access = StubReviewIndexAccess(readiness)
-    return OpenReviewIndex(lambda: FakeReviewIndexUow(access)), access
-
-
-@dataclass
-class RaisingIndexAccess:
-    error: Exception
-    opened: list[UUID] = field(default_factory=list)
-
-    async def open_for_review(self, repository_id: UUID) -> RagReadiness:
-        self.opened.append(repository_id)
-        raise self.error
-
-
-def _failing_gate(error: Exception) -> tuple[OpenReviewIndex, RaisingIndexAccess]:
-    access = RaisingIndexAccess(error)
-    return OpenReviewIndex(lambda: FakeReviewIndexUow(access)), access
-
-
-def test_without_the_gate_the_stage_records_no_index_step() -> None:
-    trace = Trace()
-
-    assert asyncio.run(_stage(trace).run(_RUN)) is not None
-
-    assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
-
-
-def test_rag_toggle_off_records_no_index_step() -> None:
-    trace = Trace()
-    gate, access = _gate(RagReadiness(enabled=False))
-
-    assert asyncio.run(_stage(trace, rag=gate).run(_RUN)) is not None
-
-    # The adapter decides that RAG is off; the stage writes nothing for it.
-    assert access.opened == [_REPOSITORY]
-    assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
-
-
-@pytest.mark.parametrize(
-    ("status", "error_code", "response"),
-    [
-        (RagIndexStatus.EMPTY, None, {"outcome": "not_ready", "reason": "empty"}),
-        # A code kept from an earlier failure is not the reason of a building index.
-        (RagIndexStatus.BUILDING, "archive_unsafe", {"outcome": "not_ready", "reason": "building"}),
-        (
-            RagIndexStatus.FAILED,
-            "limit_exceeded:files",
-            {"outcome": "not_ready", "reason": "failed", "error_code": "limit_exceeded:files"},
-        ),
-        # The stage's pinned prompt (v2) has no retrieved section: a usable index is not used.
-        (RagIndexStatus.READY, None, {"outcome": "not_ready", "reason": "prompt_version"}),
-        (RagIndexStatus.STALE, None, {"outcome": "not_ready", "reason": "prompt_version"}),
-    ],
-    ids=["empty", "building", "failed", "ready", "stale"],
-)
-def test_index_readiness_is_recorded_after_the_context_build(
-    status: RagIndexStatus, error_code: str | None, response: dict[str, str]
-) -> None:
-    trace = Trace()
-    gate, access = _gate(_readiness(status, error_code=error_code))
-
-    payload = asyncio.run(_stage(trace, rag=gate).run(_RUN))
-
-    assert payload is not None and payload.status is ContextStatus.REVIEW
-    assert access.opened == [_REPOSITORY]
-    assert [step[0] for step in trace.steps] == ["policy.load", "context.build", "context.rag"]
-    usable = status in _USABLE
-    assert trace.steps[2][1] == {
-        "index_status": status.value,
-        "indexed_commit_sha": _INDEXED if usable else None,
-        "default_head_sha": _TARGET,
-        "stale": status is RagIndexStatus.STALE,
-    }
-    assert trace.steps[2][2] == response
-
-
-def test_stale_index_is_opened_once_and_the_review_continues() -> None:
-    trace = Trace()
-    gate, access = _gate(_readiness(RagIndexStatus.STALE))
-
-    payload = asyncio.run(asyncio.wait_for(_stage(trace, rag=gate).run(_RUN), timeout=5))
-
-    assert payload is not None and payload.status is ContextStatus.REVIEW
-    assert access.opened == [_REPOSITORY]
-    assert [step[0] for step in trace.steps].count("context.rag") == 1
-
-
-def test_not_ready_reason_comes_from_the_index_not_from_its_status() -> None:
-    @dataclass(frozen=True)
-    class PatchedIndex(RagIndex):
-        @property
-        def not_ready_reason(self) -> RagIndexStatus | None:
-            return RagIndexStatus.BUILDING
-
-    trace = Trace()
-    index = PatchedIndex(RagIndexStatus.EMPTY, None, None, 0, 0, None)
-    gate, _ = _gate(RagReadiness(enabled=True, index=index, default_head_sha=_TARGET))
-
-    asyncio.run(_stage(trace, rag=gate).run(_RUN))
-
-    assert trace.steps[-1][0] == "context.rag"
-    assert trace.steps[-1][2] == {"outcome": "not_ready", "reason": "building"}
-
-
-@pytest.mark.parametrize(
-    ("status", "usable", "reason", "response"),
-    [
-        # A status of a usable index on an index that cannot serve the review.
-        (
-            RagIndexStatus.READY,
-            False,
-            RagIndexStatus.BUILDING,
-            {"outcome": "not_ready", "reason": "building"},
-        ),
-        # A status of an index that is not ready on one the review may read.
-        (
-            RagIndexStatus.EMPTY,
-            True,
-            RagIndexStatus.EMPTY,
-            {"outcome": "not_ready", "reason": "prompt_version"},
-        ),
-    ],
-    ids=["ready-not-usable", "empty-usable"],
-)
-def test_usable_comes_from_the_index_not_from_its_status(
-    status: RagIndexStatus,
-    usable: bool,
-    reason: RagIndexStatus,
-    response: dict[str, str],
-) -> None:
-    @dataclass(frozen=True)
-    class PatchedIndex(RagIndex):
-        @property
-        def usable(self) -> bool:
-            return usable
-
-        @property
-        def not_ready_reason(self) -> RagIndexStatus | None:
-            return reason
-
-    trace = Trace()
-    index = PatchedIndex(status, None, None, 0, 0, None)
-    gate, _ = _gate(RagReadiness(enabled=True, index=index, default_head_sha=_TARGET))
-
-    asyncio.run(_stage(trace, rag=gate).run(_RUN))
-
-    assert trace.steps[-1][0] == "context.rag"
-    assert trace.steps[-1][2] == response
-
-
-def test_caught_build_failure_still_records_the_index_readiness() -> None:
-    class Broken:
-        async def execute(self, **kwargs: object) -> object:
-            raise RuntimeError("the tree is unavailable")
-
-    trace = Trace()
-    gate, _ = _gate(_readiness(RagIndexStatus.EMPTY))
-    stage = _stage(trace, rag=gate)
-    stage._context_builder = lambda run: Broken()  # type: ignore[assignment,return-value]
-
-    assert asyncio.run(stage.run(_RUN)) is None
-
-    assert [step[0] for step in trace.steps] == ["policy.load", "context.build", "context.rag"]
-    assert trace.steps[1][2]["error"]["type"] == "RuntimeError"
-    assert trace.steps[2][2] == {"outcome": "not_ready", "reason": "empty"}
-
-
-def test_index_readiness_is_recorded_before_the_skip_of_an_all_ignored_payload() -> None:
-    class AllIgnored(BuildReviewContext):
-        async def execute(self, **kwargs: Any) -> ReviewContextPayload:
-            payload = await super().execute(**kwargs)
-            return replace(payload, status=ContextStatus.ALL_CHANGES_IGNORED)
-
-    trace = Trace()
-    gate, _ = _gate(_readiness(RagIndexStatus.BUILDING))
-    stage = _stage(
-        trace,
-        rag=gate,
-        context_builder=lambda run: AllIgnored(
-            source=Repository(), parser=Parser(), counter=EstimatedTokenCounter()
-        ),
-    )
-
-    with pytest.raises(RunSkipped) as skipped:
-        asyncio.run(stage.run(_RUN))
-
-    assert skipped.value.reason == "all_changes_ignored"
-    assert [step[0] for step in trace.steps] == ["policy.load", "context.build", "context.rag"]
-    assert trace.steps[2][2] == {"outcome": "not_ready", "reason": "building"}
-
-
-def test_skip_before_the_context_build_does_not_open_the_index() -> None:
-    trace = Trace()
-    gate, access = _gate(_readiness(RagIndexStatus.READY))
-    stage = _stage(trace, rag=gate, policy=Policy(rules=b"```review-ignore\n**\n```\n"))
-
-    with pytest.raises(RunSkipped):
-        asyncio.run(stage.run(_RUN))
-
-    assert access.opened == []
-    assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
-
-
-@pytest.mark.parametrize("failure", ["cancel", "deadline", "policy"])
-def test_control_raised_by_the_build_ends_the_attempt_without_the_index_step(
-    failure: str,
-) -> None:
-    error = {
-        "cancel": RunCancelled("installation_unavailable"),
-        "deadline": RunFailure("deadline_exceeded"),
-        "policy": PolicyError(PolicyErrorCode.MATCH_BUDGET_EXCEEDED, "over the budget"),
-    }[failure]
-
-    class Broken(BuildReviewContext):
-        async def execute(self, **kwargs: Any) -> Any:
-            raise error
-
-    trace = Trace()
-    gate, access = _gate(_readiness(RagIndexStatus.READY))
-    stage = _stage(
-        trace,
-        rag=gate,
-        context_builder=lambda run: Broken(
-            source=Repository(), parser=Parser(), counter=EstimatedTokenCounter()
-        ),
-    )
-
-    with pytest.raises(type(error)) as caught:
-        asyncio.run(stage.run(_RUN))
-
-    assert caught.value is error
-    assert access.opened == [_REPOSITORY]
-    assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        RuntimeError("the database is gone"),
-        RunFailure("diff_fetch_failed", "optional"),
-        # What the adapter raises when a writer of the repository row outlasts its lock
-        # timeout: a gate failure, not the deadline.
-        OperationalError(
-            "SELECT repositories.id FROM repositories FOR SHARE",
-            None,
-            LockNotAvailable("canceling statement due to lock timeout"),
-        ),
-    ],
-    ids=["unexpected", "run-failure", "lock-timeout"],
-)
-def test_failed_gate_is_recorded_and_the_review_continues_without_rag(error: Exception) -> None:
-    trace = Trace()
-    gate, access = _failing_gate(error)
-
-    payload = asyncio.run(_stage(trace, rag=gate).run(_RUN))
-
-    assert payload is not None and payload.status is ContextStatus.REVIEW
-    assert access.opened == [_REPOSITORY]
-    assert [step[0] for step in trace.steps] == ["policy.load", "context.build", "context.rag"]
-    assert trace.steps[2][1] == {
-        "index_status": None,
-        "indexed_commit_sha": None,
-        "default_head_sha": None,
-        "stale": None,
-    }
-    assert trace.steps[2][2] == {"error": {"type": type(error).__name__, "message": str(error)}}
-
-
-@pytest.mark.parametrize("failure", ["cancel", "deadline", "policy"])
-def test_control_raised_by_the_gate_ends_the_attempt(failure: str) -> None:
-    error = {
-        "cancel": RunCancelled("installation_unavailable"),
-        "deadline": RunFailure("deadline_exceeded"),
-        "policy": PolicyError(PolicyErrorCode.ACCESS_DENIED, "GitHub answered 403"),
-    }[failure]
-    trace = Trace()
-    gate, _ = _failing_gate(error)
-
-    with pytest.raises(type(error)) as caught:
-        asyncio.run(_stage(trace, rag=gate).run(_RUN))
-
-    assert caught.value is error
-    assert [step[0] for step in trace.steps] == ["policy.load"]
-
-
-# The RAG slot behind the gate (#144): the run's pinned prompt shows retrieved blocks.
-_IMPORTER = 'from .app import greet\n\n\ndef main():\n    return greet("octo")\n'
-_IMPORTER_BLOB = "f" * 40
-# The review prompt the fake policy store pins.
-_PINNED = ("review.system", "v2")
-
-
-@pytest.fixture
-def capable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The pinned review prompt of the run declares a retrieved section."""
-    monkeypatch.setattr(rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({_PINNED}))
-
-
-class RagRepository(Repository):
-    """The head of the changed ``src/app.py`` and of ``src/main.py``, which calls its
-    ``greet``."""
-
-    def __init__(self, tree_error: Exception | None = None) -> None:
-        self._tree_error = tree_error
-
-    async def tree(self, revision: str) -> RevisionTree:
-        if self._tree_error is not None:
-            raise self._tree_error
-        files = {"src/app.py": "d" * 40, "src/main.py": _IMPORTER_BLOB}
-        return RevisionTree(revision, files, complete=True)
-
-    async def read_blob(self, blob_sha: str) -> bytes:
-        return (_IMPORTER if blob_sha == _IMPORTER_BLOB else _SOURCE).encode()
-
-
-@dataclass
-class FailingGraph:
-    error: Exception
-    reads: int = 0
-
-    async def read_hints(self, repository_id: UUID, targets: Sequence[GraphTarget]) -> GraphHints:
-        self.reads += 1
-        raise self.error
-
-
-def _greet_hints(*paths: str, status: IndexStatus = IndexStatus.READY) -> Graph:
-    """The graph: each path uses the changed ``greet``."""
-    return Graph({_REPOSITORY: tuple(_uses(path, "src/app.py", "greet") for path in paths)}, status)
-
-
-def _rag_builder(
-    retriever: GraphRetriever, repository: Repository | None = None
-) -> Callable[[RunVcsInput], BuildReviewContext]:
-    """The context builder of a run with the RAG sources of the run."""
-
-    def build(run: RunVcsInput) -> BuildReviewContext:
-        source = repository or RagRepository()
-        store = BlobStore()
-        return BuildReviewContext(
-            source=source,
-            parser=Parser(),
-            counter=EstimatedTokenCounter(),
-            retriever=retriever,
-            rag_blobs=CachedBlobSource(
-                repository_id=run.repository_id,
-                source=source,
-                cache=SharedBlobCache(store),
-                uow_factory=lambda: BlobCacheUow(store),
-            ),
-        )
-
-    return build
-
-
-@pytest.mark.usefixtures("capable")
-@pytest.mark.parametrize("status", _USABLE, ids=["ready", "stale"])
-def test_a_prompt_with_a_retrieved_section_records_what_the_rag_slot_used(
-    status: RagIndexStatus,
-) -> None:
-    trace = Trace()
-    gate, _ = _gate(_readiness(status))
-    graph = _greet_hints("src/main.py", "src/gone.py")
-
-    payload = asyncio.run(_stage(trace, rag=gate, context_builder=_rag_builder(graph)).run(_RUN))
-
-    assert payload is not None and payload.status is ContextStatus.REVIEW
-    (block,) = payload.retrieved
-    assert (block.source.path, block.source.revision) == ("src/main.py", _HEAD)
-    assert [read[1] for read in graph.reads] == [(GraphTarget("src/app.py", "greet"),)]
-    assert [step[0] for step in trace.steps] == ["policy.load", "context.build", "context.rag"]
-    # The request is what the gate read; the response counts what the slot did.
-    assert trace.steps[2][1] == {
-        "index_status": status.value,
-        "indexed_commit_sha": _INDEXED,
-        "default_head_sha": _TARGET,
-        "stale": status is RagIndexStatus.STALE,
-    }
-    assert trace.steps[2][2] == {
-        "outcome": "used",
-        "candidates": {"found": 2, "confirmed": 1, "dropped": {"rag_candidate_missing": 1}},
-        "tokens": block.tokens,
-    }
-    assert "src/" not in repr(trace.steps[2])
-    # The context step lists the retrieved block by its side and revision, not its text.
-    assert [item for item in trace.steps[1][2]["blocks"] if item["level"] == "RAG"] == [
-        {
-            "level": "RAG",
-            "role": "retrieved_excerpt",
-            "path": "src/main.py",
-            "side": "RIGHT",
-            "revision": _HEAD,
-            "ranges": [[1, 1], [4, 5]],
-            "representation": "exact_lines",
-            "tokens": block.tokens,
-            "reason": "rag_reverse_edge",
-        }
-    ]
-    assert 'greet("octo")' not in repr(trace.steps)
-
-
-def test_without_a_retrieved_section_a_usable_index_is_not_read() -> None:
-    trace = Trace()
-    gate, access = _gate(_readiness(RagIndexStatus.READY))
-    graph = _greet_hints("src/main.py")
-
-    payload = asyncio.run(_stage(trace, rag=gate, context_builder=_rag_builder(graph)).run(_RUN))
-
-    assert payload is not None and (payload.retrieved, payload.rag) == ((), None)
-    assert access.opened == [_REPOSITORY]
-    assert graph.reads == []
-    assert trace.steps[2][2] == {"outcome": "not_ready", "reason": "prompt_version"}
-
-
-@pytest.mark.usefixtures("capable")
-@pytest.mark.parametrize(
-    ("status", "response"),
-    [
-        (IndexStatus.EMPTY, {"outcome": "not_ready", "reason": "empty"}),
-        (IndexStatus.BUILDING, {"outcome": "not_ready", "reason": "building"}),
-        (IndexStatus.FAILED, {"outcome": "not_ready", "reason": "failed", "error_code": None}),
-    ],
-    ids=["empty", "building", "failed"],
-)
-def test_an_index_no_longer_ready_at_the_graph_read_is_recorded_with_its_fresh_status(
-    status: IndexStatus, response: dict[str, str | None]
-) -> None:
-    trace = Trace()
-    gate, _ = _gate(_readiness(RagIndexStatus.READY))
-    graph = _greet_hints("src/main.py", status=status)
-
-    payload = asyncio.run(_stage(trace, rag=gate, context_builder=_rag_builder(graph)).run(_RUN))
-
-    assert payload is not None and payload.retrieved == ()
-    assert len(graph.reads) == 1
-    # The request stays what the gate read: the index was ready then.
-    assert trace.steps[2][1]["index_status"] == "ready"
-    assert trace.steps[2][2] == response
-
-
-@pytest.mark.usefixtures("capable")
-def test_a_failing_rag_slot_is_recorded_and_the_other_levels_stay() -> None:
-    graph = FailingGraph(RuntimeError("graph unavailable"))
-    without = asyncio.run(_stage(Trace(), context_builder=_rag_builder(graph)).run(_RUN))
-    trace = Trace()
-    gate, _ = _gate(_readiness(RagIndexStatus.READY))
-
-    payload = asyncio.run(_stage(trace, rag=gate, context_builder=_rag_builder(graph)).run(_RUN))
-
-    assert without is not None and payload is not None
-    assert graph.reads == 1
-    assert (payload.blocks, payload.omissions, payload.retrieved) == (
-        without.blocks,
-        without.omissions,
-        (),
-    )
-    assert [step[0] for step in trace.steps] == ["policy.load", "context.build", "context.rag"]
-    assert trace.steps[2][1]["index_status"] == "ready"
-    assert trace.steps[2][2] == {"error": {"type": "RuntimeError", "message": "graph unavailable"}}
-
-
-@pytest.mark.usefixtures("capable")
-def test_a_build_that_returns_before_the_rag_slot_records_its_reason_and_zero_counters() -> None:
-    trace = Trace()
-    gate, _ = _gate(_readiness(RagIndexStatus.READY))
-    graph = _greet_hints("src/main.py")
-    repository = RagRepository(ConnectionError("provider unavailable"))
-
-    payload = asyncio.run(
-        _stage(trace, rag=gate, context_builder=_rag_builder(graph, repository)).run(_RUN)
-    )
-
-    assert payload is not None and payload.retrieved == ()
-    assert graph.reads == []
-    assert trace.steps[2][2] == {
-        "outcome": "used",
-        "reason": "tree_unavailable",
-        "candidates": {"found": 0, "confirmed": 0, "dropped": {}},
-        "tokens": 0,
-    }
-
-
-@pytest.mark.usefixtures("capable")
-def test_a_caught_build_failure_records_the_gate_without_rag_counters() -> None:
-    plans: list[object] = []
-
-    class Broken:
-        async def execute(self, **kwargs: object) -> object:
-            plans.append(kwargs["rag"])
-            raise RuntimeError("the parser is gone")
-
-    trace = Trace()
-    gate, _ = _gate(_readiness(RagIndexStatus.STALE))
-    stage = _stage(trace, rag=gate)
-    stage._context_builder = lambda run: Broken()  # type: ignore[assignment,return-value]
-
-    assert asyncio.run(stage.run(_RUN)) is None
-
-    assert plans == [RagPlan()]
-    assert [step[0] for step in trace.steps] == ["policy.load", "context.build", "context.rag"]
-    assert trace.steps[2][1] == {
-        "index_status": "stale",
-        "indexed_commit_sha": _INDEXED,
-        "default_head_sha": _TARGET,
-        "stale": True,
-    }
-    # The gate let RAG in; the slot did not complete, so nothing is counted.
-    assert trace.steps[2][2] == {"outcome": "used", "reason": "context_build_failed"}
-
-
-def test_context_trace_lists_retrieved_blocks_with_their_side_and_revision() -> None:
-    diff_map = DiffMap(
-        schema_version=1,
-        parser_version="unified-hunks/v1",
-        provider=VcsProviderName.GITHUB,
-        repository_id=UUID(int=5),
-        code_change_number=7,
-        policy_base_sha=_BASE,
-        head_sha=_HEAD,
-        diff_old_sha="c" * 40,
-        file_list_complete=True,
-        incomplete_reasons=(),
-        files=(),
-        digest="d" * 64,
-    )
-
-    def retrieved(
-        side: DiffSide, revision: str, representation: Representation, reason: str
-    ) -> RetrievedBlock:
-        source = SourceRef(
-            SourceRole.RETRIEVED_EXCERPT,
-            UUID(int=5),
-            revision,
-            "src/main.py",
-            "f" * 40,
-            (),
-            side,
-            (LineRange(1, 1), LineRange(4, 5)),
-            reason,
-        )
-        return RetrievedBlock(
-            "RAG:src/main.py:1-1,4-5",
-            ContextLevel.RAG,
-            source,
-            representation,
-            "def main():",
-            7,
-            EdgeKind.USES_IMPORTED,
-            _INDEXED,
-        )
-
-    payload = ReviewContextPayload(
-        status=ContextStatus.REVIEW,
-        reason=None,
-        policy_snapshot_id=UUID(int=9),
-        policy_digest="p" * 64,
-        diff_digest="d" * 64,
-        blocks=(_block("b1", ContextLevel.L1, SourceRole.DIFF, 40),),
-        omissions=(),
-        imports=(),
-        levels_present=(ContextLevel.L1, ContextLevel.RAG),
-        reviewable_lines=1,
-        ignored_files=0,
-        tokens_used=54,
-        retrieved=(
-            retrieved(DiffSide.RIGHT, _HEAD, Representation.EXACT_LINES, "rag_broken_reference"),
-            # The definition a broken reference lost, at the old side.
-            retrieved(DiffSide.LEFT, "c" * 40, Representation.SIGNATURE, "rag_broken_reference"),
-        ),
-    )
-
-    summary = context_summary(diff_map, payload)
-
-    assert [
-        (item["level"], item["side"], item.get("revision"), item["representation"])
-        for item in summary["blocks"]
-    ] == [
-        ("L1", "RIGHT", None, "exact_lines"),
-        ("RAG", "RIGHT", _HEAD, "exact_lines"),
-        ("RAG", "LEFT", "c" * 40, "signature"),
-    ]
-    assert summary["blocks"][2] == {
-        "level": "RAG",
-        "role": "retrieved_excerpt",
-        "path": "src/main.py",
-        "side": "LEFT",
-        "revision": "c" * 40,
-        "ranges": [[1, 1], [4, 5]],
-        "representation": "signature",
-        "tokens": 7,
-        "reason": "rag_broken_reference",
-    }
-    assert "def main" not in repr(summary)
 
 
 @pytest.mark.parametrize(("threshold", "cap"), [("critical", 1), ("warning", 3)])
