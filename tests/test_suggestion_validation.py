@@ -795,29 +795,32 @@ class TestValidatorAllNineReasonsAndCaplog:
         assert counting.parse_calls == 1
         assert stats1 == stats2
 
-    def test_python_suggestion_syntax_error_not_fatal_if_tree_sitter_reports_no_increase(
+    def test_python_suggestion_syntax_error_rejected_even_if_tree_sitter_reports_no_increase(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Any ast.parse error growth on a valid Python source rejects the suggestion."""
         code = b"def f():\n    return 1\n"
         suggestion = "    return 2"
         real_parse = ast.parse
 
         def mock_parse(text: str, *args: object, **kwargs: object) -> ast.AST:
             if "return 2" in text:
-                raise SyntaxError("simulated future python syntax")
+                raise SyntaxError("simulated broken syntax on line 2")
             return real_parse(text)
 
         monkeypatch.setattr(ast, "parse", mock_parse)
         res = validate_suggestion_tree(AstLanguage.PYTHON, code, 2, 2, suggestion)
-        assert res.is_valid is True
+        assert res.is_valid is False
+        assert res.reason == SuggestionRejectionReason.SYNTAX_ERROR
+        assert (
+            res.detail
+            == "Python syntax error after applying suggestion: simulated broken syntax on line 2"
+        )
 
-    def test_python_suggestion_valid_ast_parse_not_dropped_if_tree_sitter_reports_error_increase(
+    def test_python_suggestion_rejected_when_tree_sitter_reports_error_increase(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When ast.parse confirms validity of new Python code,
-
-        tree-sitter error increase is ignored.
-        """
+        """Tree-sitter parse error increase on Python rejects even when ast.parse succeeds."""
         code = b"def f():\n    return 1\n"
         suggestion = "    return 2"
         from app.modules.reviews.infrastructure import suggestion_ast
@@ -827,38 +830,8 @@ class TestValidatorAllNineReasonsAndCaplog:
 
         monkeypatch.setattr(suggestion_ast, "count_syntax_errors", lambda node: 10)
         res = validate_suggestion_tree(AstLanguage.PYTHON, code, 2, 2, suggestion)
-        assert res.is_valid is True
-
-    def test_python_suggestion_syntax_error_rejected_when_tree_sitter_reports_increase_with_detail(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """SyntaxError from ast.parse with tree-sitter error increase
-
-        produces detailed rejection.
-        """
-        code = b"def f():\n    return 1\n"
-        suggestion = "    return 2"
-        from app.modules.reviews.infrastructure import suggestion_ast
-
-        parser = suggestion_ast._get_parser(AstLanguage.PYTHON)
-        suggestion_ast._get_before_stats(parser, AstLanguage.PYTHON, code, code.decode("utf-8"))
-
-        real_parse = ast.parse
-
-        def mock_parse(text: str, *args: object, **kwargs: object) -> ast.AST:
-            if "return 2" in text:
-                raise SyntaxError("simulated broken syntax on line 2")
-            return real_parse(text)
-
-        monkeypatch.setattr(ast, "parse", mock_parse)
-        monkeypatch.setattr(suggestion_ast, "count_syntax_errors", lambda node: 5)
-        res = validate_suggestion_tree(AstLanguage.PYTHON, code, 2, 2, suggestion)
         assert res.is_valid is False
         assert res.reason == SuggestionRejectionReason.SYNTAX_ERROR
-        assert (
-            res.detail
-            == "Python syntax error after applying suggestion: simulated broken syntax on line 2"
-        )
 
     def test_python_indentation_error_rejected_even_if_tree_sitter_reports_no_increase(
         self, monkeypatch: pytest.MonkeyPatch

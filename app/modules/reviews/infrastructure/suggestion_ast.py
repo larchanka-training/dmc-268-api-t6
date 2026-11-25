@@ -184,6 +184,60 @@ def _get_before_stats(
     return errors, dups, orig_python_valid
 
 
+def _check_python_syntax(new_text: str, *, orig_valid: bool) -> SuggestionValidationResult | None:
+    """Reject Python suggestions introducing an ``ast.parse`` error on valid sources."""
+    if not orig_valid:
+        return None
+    try:
+        ast.parse(new_text)
+    except (SyntaxError, ValueError, MemoryError, RecursionError) as exc:
+        return SuggestionValidationResult(
+            is_valid=False,
+            reason=SuggestionRejectionReason.SYNTAX_ERROR,
+            detail=f"Python syntax error after applying suggestion: {exc}",
+        )
+    return None
+
+
+def _validate_tree_sitter_delta(
+    parser: Parser,
+    *,
+    new_text: str,
+    errors_before: int,
+    dups_before: int,
+) -> SuggestionValidationResult:
+    """Compare Tree-sitter error and duplicate-condition counts after substitution."""
+    try:
+        tree_after = parser.parse(new_text.encode("utf-8"))
+    except Exception as exc:
+        return SuggestionValidationResult(
+            is_valid=True,
+            reason=SuggestionRejectionReason.WORKER_ERROR,
+            detail=f"Tree-sitter parse failed: {exc}",
+        )
+
+    errors_after = count_syntax_errors(tree_after.root_node)
+    if errors_after > errors_before:
+        return SuggestionValidationResult(
+            is_valid=False,
+            reason=SuggestionRejectionReason.SYNTAX_ERROR,
+            detail=(
+                f"Suggestion introduces syntax errors: "
+                f"{errors_after} errors after vs {errors_before} before"
+            ),
+        )
+
+    dups_after = count_duplicate_nested_conditions(tree_after.root_node)
+    if dups_after > dups_before:
+        return SuggestionValidationResult(
+            is_valid=False,
+            reason=SuggestionRejectionReason.DUPLICATE_CONDITION,
+            detail="Suggestion introduces duplicate nested condition",
+        )
+
+    return SuggestionValidationResult(is_valid=True)
+
+
 def validate_suggestion_tree(
     language: AstLanguage,
     source_bytes: bytes,
@@ -222,52 +276,14 @@ def validate_suggestion_tree(
             detail=f"Tree-sitter parse failed: {exc}",
         )
 
-    py_exc: Exception | None = None
     if language is AstLanguage.PYTHON:
-        try:
-            ast.parse(new_text)
-        except (SyntaxError, ValueError, MemoryError, RecursionError) as exc:
-            py_exc = exc
-            if orig_valid and isinstance(exc, IndentationError):
-                return SuggestionValidationResult(
-                    is_valid=False,
-                    reason=SuggestionRejectionReason.SYNTAX_ERROR,
-                    detail=f"Python syntax error after applying suggestion: {exc}",
-                )
+        py_rejection = _check_python_syntax(new_text, orig_valid=orig_valid)
+        if py_rejection is not None:
+            return py_rejection
 
-    try:
-        new_bytes = new_text.encode("utf-8")
-        tree_after = parser.parse(new_bytes)
-    except Exception as exc:
-        return SuggestionValidationResult(
-            is_valid=True,
-            reason=SuggestionRejectionReason.WORKER_ERROR,
-            detail=f"Tree-sitter parse failed: {exc}",
-        )
-
-    errors_after = count_syntax_errors(tree_after.root_node)
-    ast_confirms_valid = language is AstLanguage.PYTHON and orig_valid and py_exc is None
-    if errors_after > errors_before and not ast_confirms_valid:
-        detail = (
-            f"Python syntax error after applying suggestion: {py_exc}"
-            if py_exc is not None
-            else (
-                f"Suggestion introduces syntax errors: "
-                f"{errors_after} errors after vs {errors_before} before"
-            )
-        )
-        return SuggestionValidationResult(
-            is_valid=False,
-            reason=SuggestionRejectionReason.SYNTAX_ERROR,
-            detail=detail,
-        )
-
-    dups_after = count_duplicate_nested_conditions(tree_after.root_node)
-    if dups_after > dups_before:
-        return SuggestionValidationResult(
-            is_valid=False,
-            reason=SuggestionRejectionReason.DUPLICATE_CONDITION,
-            detail="Suggestion introduces duplicate nested condition",
-        )
-
-    return SuggestionValidationResult(is_valid=True)
+    return _validate_tree_sitter_delta(
+        parser,
+        new_text=new_text,
+        errors_before=errors_before,
+        dups_before=dups_before,
+    )

@@ -27,6 +27,7 @@ from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunTraceUnitOfWork,
 )
 from tests.portal_postgres import HEAD, PR_NEW, REPO_A, RUN_ATTEMPTED, Env, portal_schema
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 _PATH = "app/charge.py"
 _PATCH = "@@ -10,3 +10,4 @@\n context\n+added\n context\n context"
@@ -173,6 +174,7 @@ def test_succeeded_blocking_run_concludes_from_the_published_event_not_the_setti
                 worker_id="worker",
                 expected_attempt=1,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             ).execute(RUN_ATTEMPTED, _blocking_answer())
             assert stored is True
             for request, response in published:

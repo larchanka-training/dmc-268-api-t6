@@ -29,16 +29,11 @@ from app.modules.reviews.application.review_output import (
     VerifiedReviewOutput,
     _as_json_object,
     coerce_dropped_findings,
-    empty_review_output,
+    load_validated_review_output,
     parse_review_output,
     parse_review_output_v2,
 )
-from app.modules.reviews.application.run_coverage import CoverageItem, CoverageStatus, RunCoverage
 from app.modules.reviews.application.run_failures import LEASE, RunFailure
-from app.modules.reviews.application.suggestion_validator import (
-    preload_suggestion_blobs,
-    validate_review_suggestions,
-)
 from app.modules.reviews.application.verdict import (
     HashedFinding,
     SeverityThresholdValue,
@@ -349,46 +344,21 @@ class StoreReviewOutput:
         answer = _as_json_object(raw_output) if model_answer else None
         started_at = self._now()
         started = time.monotonic()
-        try:
-            async with self._uow_factory() as uow:
-                context = await uow.reviews.get_post_processing_input(run_id)
-                preloaded_blobs = (
-                    await preload_suggestion_blobs(
-                        parsed,
-                        diff_map=context.diff_map,
-                        blob_cache=uow.blob_cache,
-                    )
-                    if context is not None and parsed is not None
-                    else {}
-                )
-            if context is None:
-                return False
-            coverage = context.coverage or RunCoverage(
-                CoverageStatus.PARTIAL,
-                0,
-                reasons=(CoverageItem(None, "classification_unavailable"),),
-            )
-            if parsed is None:
-                # No findings to process. The post-processor replaces this summary with its own
-                # backend summary of the same result, the only one stored.
-                parsed = empty_review_output(context, coverage)
-            threshold_to_use = (
-                effective_threshold
-                if effective_threshold is not None
-                else context.severity_threshold
-            )
-            v2_rules_to_use = (
-                effective_v2_rules if effective_v2_rules is not None else context.allowed_v2_rules
-            )
-            parsed = await validate_review_suggestions(
-                parsed,
-                diff_map=context.diff_map,
-                preloaded_blobs=preloaded_blobs,
-                parser=self._parser,
-                run_id=run_id,
-            )
-        finally:
-            await self._parser.aclose()
+        loaded = await load_validated_review_output(
+            self._uow_factory,
+            run_id,
+            parsed,
+            parser=self._parser,
+        )
+        if loaded is None:
+            return False
+        context, parsed, coverage = loaded
+        threshold_to_use = (
+            effective_threshold if effective_threshold is not None else context.severity_threshold
+        )
+        v2_rules_to_use = (
+            effective_v2_rules if effective_v2_rules is not None else context.allowed_v2_rules
+        )
         processor = FindingsPostProcessor.from_default_patterns()
         processed = processor.process(
             parsed,

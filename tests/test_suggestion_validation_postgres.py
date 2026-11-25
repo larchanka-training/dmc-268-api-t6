@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
 
@@ -25,8 +23,10 @@ from app.modules.reviews.infrastructure.review_output_unit_of_work import (
 from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
     SqlAlchemyRunProcessingUnitOfWork,
 )
-from tests.portal_postgres import HEAD, PR_NEW, REPO_A, RUN_ATTEMPTED, Env, portal_schema
+from tests.portal_postgres import HEAD, PR_NEW, REPO_A, RUN_ATTEMPTED, Env
 from tests.verifier_pipeline_fakes import FakeQueue, InProcessSuggestionParser
+
+pytest_plugins = ("tests.portal_postgres",)
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "swapi" / "films_858e1c1.ts"
 _PATH = "src/tools/films.ts"
@@ -43,15 +43,6 @@ def _make_pool_parser(engine: AsyncEngine) -> InProcessSuggestionParser:
         assert engine.sync_engine.pool.checkedout() == 0  # type: ignore[attr-defined]
 
     return InProcessSuggestionParser(on_validate=_assert_pool_zero)
-
-
-@pytest.fixture
-def pg_env() -> Iterator[Env]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    with portal_schema(database_url, None) as env:
-        yield env
 
 
 class _PoolCheckingProvider:
@@ -73,10 +64,12 @@ class _PoolCheckingProvider:
 
 
 @pytest.mark.integration
-def test_store_and_publish_return_pool_connection_after_reading_blob_cache(pg_env: Env) -> None:
+def test_store_and_publish_return_pool_connection_after_reading_blob_cache(
+    portal_env: Env,
+) -> None:
     engine = create_async_engine(
-        pg_env.database_url,
-        connect_args={"options": f"-csearch_path={pg_env.schema}"},
+        portal_env.database_url,
+        connect_args={"options": f"-csearch_path={portal_env.schema}"},
         pool_size=1,
         max_overflow=0,
     )

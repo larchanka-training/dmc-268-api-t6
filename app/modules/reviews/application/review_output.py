@@ -752,6 +752,71 @@ class ReviewOutputHandler(Protocol):
     ) -> bool: ...
 
 
+class _PostProcessingRepository(Protocol):
+    async def get_post_processing_input(
+        self, run_id: UUID
+    ) -> FindingPostProcessingInput | None: ...
+
+
+class _PostProcessingUnitOfWork(UnitOfWork, Protocol):
+    @property
+    def reviews(self) -> _PostProcessingRepository: ...
+
+    @property
+    def blob_cache(self) -> BlobCache | None: ...
+
+
+class _PostProcessingUnitOfWorkFactory(Protocol):
+    def __call__(self) -> _PostProcessingUnitOfWork: ...
+
+
+async def load_validated_review_output(
+    uow_factory: _PostProcessingUnitOfWorkFactory,
+    run_id: UUID,
+    parsed: ReviewOutput | None,
+    *,
+    parser: SuggestionParser,
+) -> tuple[FindingPostProcessingInput, ReviewOutput, RunCoverage] | None:
+    """Load context/blobs in one session, then validate suggestions outside DB transactions."""
+    from app.modules.reviews.application.run_coverage import (
+        CoverageItem,
+        CoverageStatus,
+        RunCoverage,
+    )
+
+    try:
+        async with uow_factory() as uow:
+            context = await uow.reviews.get_post_processing_input(run_id)
+            preloaded_blobs = (
+                await preload_suggestion_blobs(
+                    parsed,
+                    diff_map=context.diff_map,
+                    blob_cache=uow.blob_cache,
+                )
+                if context is not None and parsed is not None
+                else {}
+            )
+        if context is None:
+            return None
+        coverage = context.coverage or RunCoverage(
+            CoverageStatus.PARTIAL,
+            0,
+            reasons=(CoverageItem(None, "classification_unavailable"),),
+        )
+        if parsed is None:
+            parsed = empty_review_output(context, coverage)
+        validated = await validate_review_suggestions(
+            parsed,
+            diff_map=context.diff_map,
+            preloaded_blobs=preloaded_blobs,
+            parser=parser,
+            run_id=run_id,
+        )
+    finally:
+        await parser.aclose()
+    return context, validated, coverage
+
+
 class PublishReviewOutput:
     """Persist a validated model answer, then publish outside database transactions.
 
@@ -780,11 +845,6 @@ class PublishReviewOutput:
         severity_threshold: SeverityThresholdValue | None = None,
     ) -> bool:
         from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
-        from app.modules.reviews.application.run_coverage import (
-            CoverageItem,
-            CoverageStatus,
-            RunCoverage,
-        )
 
         effective_dropped_input = (
             dropped_findings
@@ -815,44 +875,21 @@ class PublishReviewOutput:
         # Anchoring and custom-rule attribution are an immutable run boundary:
         # accepting caller data here would let a model response choose its own
         # hunk lines or valid rule names.
-        try:
-            async with self._uow_factory() as uow:
-                context = await uow.reviews.get_post_processing_input(run_id)
-                preloaded_blobs = (
-                    await preload_suggestion_blobs(
-                        parsed,
-                        diff_map=context.diff_map,
-                        blob_cache=uow.blob_cache,
-                    )
-                    if context is not None and parsed is not None
-                    else {}
-                )
-            if context is None:
-                return False
-            threshold_to_use = (
-                effective_threshold
-                if effective_threshold is not None
-                else context.severity_threshold
-            )
-            v2_rules_to_use = (
-                effective_v2_rules if effective_v2_rules is not None else context.allowed_v2_rules
-            )
-            coverage = context.coverage or RunCoverage(
-                CoverageStatus.PARTIAL,
-                0,
-                reasons=(CoverageItem(None, "classification_unavailable"),),
-            )
-            if parsed is None:
-                parsed = empty_review_output(context, coverage)
-            parsed = await validate_review_suggestions(
-                parsed,
-                diff_map=context.diff_map,
-                preloaded_blobs=preloaded_blobs,
-                parser=self._parser,
-                run_id=run_id,
-            )
-        finally:
-            await self._parser.aclose()
+        loaded = await load_validated_review_output(
+            self._uow_factory,
+            run_id,
+            parsed,
+            parser=self._parser,
+        )
+        if loaded is None:
+            return False
+        context, parsed, coverage = loaded
+        threshold_to_use = (
+            effective_threshold if effective_threshold is not None else context.severity_threshold
+        )
+        v2_rules_to_use = (
+            effective_v2_rules if effective_v2_rules is not None else context.allowed_v2_rules
+        )
         processed = FindingsPostProcessor.from_default_patterns().process(
             parsed,
             diff_map=context.diff_map,
