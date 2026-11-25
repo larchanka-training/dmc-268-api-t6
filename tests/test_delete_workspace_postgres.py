@@ -497,12 +497,13 @@ def test_lock_gitlab_rejects_deleted_workspace_postgres(
             before_gl = await SqlAlchemyWebhookRunStore(session)._lock_gitlab(gl_pr_id)
             assert isinstance(before_gl, tuple)
 
-        # 2. Mark WS_A deleted
-        async with SqlAlchemyDeleteWorkspaceUnitOfWork(session_factory) as uow:
-            await uow.store.mark_deleted(WS_A, user_id=42)
-            await uow.commit()
+        # 2. Mark only WS_A deleted (keep ProviderInstallation live to isolate workspace status)
+        async with session_factory.begin() as session:
+            await session.execute(
+                update(Workspace).where(Workspace.id == WS_A).values(status=WorkspaceStatus.DELETED)
+            )
 
-        # 3. After mark_deleted: _lock_gitlab rejects exclusively due to workspace status
+        # 3. After workspace deletion: _lock_gitlab rejects exclusively due to workspace status
         async with session_factory() as session:
             miss_gl = await SqlAlchemyWebhookRunStore(session)._lock_gitlab(gl_pr_id)
             assert miss_gl == CandidateMiss.MISSING_INSTALLATION
@@ -608,12 +609,13 @@ def test_lock_bitbucket_rejects_deleted_workspace_postgres(
             before_bb = await SqlAlchemyWebhookRunStore(session)._lock_bitbucket(bb_pr_id)
             assert isinstance(before_bb, tuple)
 
-        # 2. Mark WS_A deleted
-        async with SqlAlchemyDeleteWorkspaceUnitOfWork(session_factory) as uow:
-            await uow.store.mark_deleted(WS_A, user_id=42)
-            await uow.commit()
+        # 2. Mark only WS_A deleted (keep ProviderInstallation live to isolate workspace status)
+        async with session_factory.begin() as session:
+            await session.execute(
+                update(Workspace).where(Workspace.id == WS_A).values(status=WorkspaceStatus.DELETED)
+            )
 
-        # 3. After mark_deleted: _lock_bitbucket rejects exclusively due to workspace status
+        # 3. After workspace deletion: _lock_bitbucket rejects exclusively due to workspace status
         async with session_factory() as session:
             miss_bb = await SqlAlchemyWebhookRunStore(session)._lock_bitbucket(bb_pr_id)
             assert miss_bb == CandidateMiss.MISSING_INSTALLATION
