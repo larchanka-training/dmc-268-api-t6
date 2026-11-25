@@ -104,12 +104,12 @@ class SqlAlchemyAuthSessionStore:
         if profile is None:
             raise RuntimeError("refresh session has no user profile")
         # A deleted installation is not a second workspace. A workspace with no
-        # deleted GitHub installation (none at all, or only another provider) stays.
+        # retired installation (none at all) stays, including one whose only
+        # live installation is not GitHub.
         live_installation = (
             select(ProviderInstallation.id)
             .where(
                 ProviderInstallation.workspace_id == GitHubUserWorkspaceAccess.workspace_id,
-                ProviderInstallation.provider == "github",
                 ProviderInstallation.deleted_at.is_(None),
             )
             .exists()
@@ -118,7 +118,6 @@ class SqlAlchemyAuthSessionStore:
             select(ProviderInstallation.id)
             .where(
                 ProviderInstallation.workspace_id == GitHubUserWorkspaceAccess.workspace_id,
-                ProviderInstallation.provider == "github",
                 ProviderInstallation.deleted_at.is_not(None),
             )
             .exists()

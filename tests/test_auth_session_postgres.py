@@ -238,6 +238,8 @@ def test_current_identity_omits_a_workspace_with_only_deleted_installations(
     retired = UUID("00000000-0000-4000-8000-000000000512")
     mixed = UUID("00000000-0000-4000-8000-000000000513")
     other_provider = UUID("00000000-0000-4000-8000-000000000514")
+    github_retired_live_other = UUID("00000000-0000-4000-8000-000000000515")
+    retired_other = UUID("00000000-0000-4000-8000-000000000516")
 
     async def exercise() -> tuple[UUID, ...]:
         async with factory.begin() as session:
@@ -248,9 +250,17 @@ def test_current_identity_omits_a_workspace_with_only_deleted_installations(
                 text(
                     "INSERT INTO workspaces (id, name, daily_budget_usd) VALUES "
                     "(:live, 'live', 0), (:retired, 'retired', 0), "
-                    "(:mixed, 'mixed', 0), (:other, 'other', 0)"
+                    "(:mixed, 'mixed', 0), (:other, 'other', 0), "
+                    "(:both, 'both', 0), (:retired_other, 'retired-other', 0)"
                 ),
-                {"live": live, "retired": retired, "mixed": mixed, "other": other_provider},
+                {
+                    "live": live,
+                    "retired": retired,
+                    "mixed": mixed,
+                    "other": other_provider,
+                    "both": github_retired_live_other,
+                    "retired_other": retired_other,
+                },
             )
             await session.execute(
                 text(
@@ -260,7 +270,11 @@ def test_current_identity_omits_a_workspace_with_only_deleted_installations(
                     "(:retired_id, :retired, 'github', 51102, '{}'::jsonb, clock_timestamp()), "
                     "(:mixed_live_id, :mixed, 'github', 51103, '{}'::jsonb, NULL), "
                     "(:mixed_dead_id, :mixed, 'github', 51104, '{}'::jsonb, clock_timestamp()), "
-                    "(:other_id, :other, 'bitbucket', 51105, '{}'::jsonb, NULL)"
+                    "(:other_id, :other, 'bitbucket', 51105, '{}'::jsonb, NULL), "
+                    "(:both_dead_id, :both, 'github', 51106, '{}'::jsonb, clock_timestamp()), "
+                    "(:both_live_id, :both, 'bitbucket', 51107, '{}'::jsonb, NULL), "
+                    "(:retired_other_id, :retired_other, 'bitbucket', 51108, '{}'::jsonb, "
+                    "clock_timestamp())"
                 ),
                 {
                     "live_id": UUID("00000000-0000-4000-8000-0000000005a1"),
@@ -268,18 +282,31 @@ def test_current_identity_omits_a_workspace_with_only_deleted_installations(
                     "mixed_live_id": UUID("00000000-0000-4000-8000-0000000005a3"),
                     "mixed_dead_id": UUID("00000000-0000-4000-8000-0000000005a4"),
                     "other_id": UUID("00000000-0000-4000-8000-0000000005a5"),
+                    "both_dead_id": UUID("00000000-0000-4000-8000-0000000005a6"),
+                    "both_live_id": UUID("00000000-0000-4000-8000-0000000005a7"),
+                    "retired_other_id": UUID("00000000-0000-4000-8000-0000000005a8"),
                     "live": live,
                     "retired": retired,
                     "mixed": mixed,
                     "other": other_provider,
+                    "both": github_retired_live_other,
+                    "retired_other": retired_other,
                 },
             )
             await session.execute(
                 text(
                     "INSERT INTO github_user_workspace_access (github_user_id, workspace_id) "
-                    "VALUES (511, :live), (511, :retired), (511, :mixed), (511, :other)"
+                    "VALUES (511, :live), (511, :retired), (511, :mixed), (511, :other), "
+                    "(511, :both), (511, :retired_other)"
                 ),
-                {"live": live, "retired": retired, "mixed": mixed, "other": other_provider},
+                {
+                    "live": live,
+                    "retired": retired,
+                    "mixed": mixed,
+                    "other": other_provider,
+                    "both": github_retired_live_other,
+                    "retired_other": retired_other,
+                },
             )
         async with SqlAlchemyAuthSessionUnitOfWork(factory) as uow:
             _user, workspace_ids = await uow.sessions.current_identity(511)
@@ -291,7 +318,7 @@ def test_current_identity_omits_a_workspace_with_only_deleted_installations(
         assert asyncio.run(
             exercise(),
             loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
-        ) == (live, mixed, other_provider)
+        ) == (live, mixed, other_provider, github_retired_live_other)
     finally:
         import selectors
 
