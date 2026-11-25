@@ -5,6 +5,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "docs" / "github-app-manifest.json"
+PAGE = ROOT / "docs" / "GITHUB_APP.md"
+
+# One call or event per repository permission, independent of the prose around it.
+PERMISSION_REASONS = {
+    "pull_requests: write": "POST /pulls/{n}/reviews",
+    "checks: write": "upsert_check_run",
+    "contents: read": "GET /git/blobs/{sha}",
+    "metadata: read": "GET /repos/{owner}/{repo}",
+    "issues: write": "POST /repos/{owner}/{repo}/labels",
+    "actions: read": "workflow_run",
+    "statuses: read": "combined status",
+}
 
 # SYSTEM_DESIGN §8.2 repository permissions, and the events that section subscribes
 # for the current MVP. installation* events are delivered without a toggle;
@@ -50,5 +62,28 @@ def test_prod_manifest_matches_sd_permissions_and_carries_no_secret() -> None:
     assert manifest["default_permissions"] == PROD_PERMISSIONS
     assert manifest["default_events"] == PROD_EVENTS
     text = MANIFEST.read_text(encoding="utf-8")
+    for marker in SECRET_MARKERS:
+        assert marker not in text
+
+
+def test_github_app_page_records_owners_transfer_and_each_permission() -> None:
+    text = PAGE.read_text(encoding="utf-8")
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+
+    assert "Владелец staging App — личный аккаунт `axyi`" in text
+    assert "slug `dmc268-t6-reviewer`" in text
+    assert "Владелец prod App — организация `dmc-268`" in text
+    assert "slug `ai-codereviewer-bot`" in text
+    assert "В организацию `larchanka-training` staging App не передан" in text
+    assert "Роль `axyi` в `larchanka-training` — `member`" in text
+    assert "роль в этом изменении не перечитывалась" in text
+    assert "https://github.com/apps/ai-codereviewer-bot" in text
+    assert "`installation` и `installation_repositories` приходят без отдельной подписки" in text
+    assert "`pull_request_review_thread` в MVP не подписан" in text
+    for event in manifest["default_events"]:
+        assert f"`{event}`" in text
+    for permission, reason in PERMISSION_REASONS.items():
+        assert f"`{permission}`" in text
+        assert reason in text
     for marker in SECRET_MARKERS:
         assert marker not in text
