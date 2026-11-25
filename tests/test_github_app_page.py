@@ -1,5 +1,7 @@
 """The prod GitHub App manifest is the public contract and holds no secrets."""
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
 
