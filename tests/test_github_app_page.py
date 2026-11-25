@@ -80,6 +80,7 @@ def test_github_app_page_records_owners_transfer_and_each_permission() -> None:
     assert "Роль `axyi` в `larchanka-training` — `member`" in text
     assert "роль в этом изменении не перечитывалась" in text
     assert "https://github.com/apps/ai-codereviewer-bot" in text
+    assert "https://github.com/identicons/app/app/ai-codereviewer-bot" in text
     assert "`installation` и `installation_repositories` приходят без отдельной подписки" in text
     assert "`pull_request_review_thread` в MVP не подписан" in text
     for event in PROD_EVENTS:

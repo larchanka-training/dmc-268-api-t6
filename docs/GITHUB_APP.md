@@ -59,6 +59,6 @@ Prod App уже принадлежит организации `dmc-268`, не `a
 
 ## Страница
 
-У prod уже выставлены имя, описание `AI code reviewer bot`, homepage `https://www.dmc268-t6.axyi.ru/` и публичная установка (анонимная страница открывается). Видимость «Any account» — пункт «Where can this GitHub App be installed?». Логотип заменяет только владелец App (общие настройки App, PNG или JPG, не меньше 200×200). Этот репозиторий файл логотипа не загружает в GitHub.
+У prod уже выставлены имя, описание `AI code reviewer bot`, homepage `https://www.dmc268-t6.axyi.ru/` и публичная установка. Анонимный `GET` страницы ответил `200` и отдал заголовок `GitHub Apps - AI CodeReviewer Bot · GitHub`. На странице стоит логотип App: `https://github.com/identicons/app/app/ai-codereviewer-bot` (идентикон GitHub, свой файл не загружен). Заменить его может только владелец App в общих настройках (PNG или JPG, не меньше 200×200). Видимость «Any account» — пункт «Where can this GitHub App be installed?».
 
 Шаги установки на чужой аккаунт и снятия страницы — в README, раздел «Установка». Ссылку на страницу в docs-site и на лендинге этот репозиторий не хардкодит: слаг UI получает на сборке (`VITE_GITHUB_APP_SLUG`).
