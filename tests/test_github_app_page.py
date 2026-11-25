@@ -91,6 +91,15 @@ def test_github_app_page_records_owners_transfer_and_each_permission() -> None:
         assert marker not in text
 
 
+def test_secrets_prod_events_include_repository() -> None:
+    secrets = (ROOT / "docs" / "SECRETS.md").read_text(encoding="utf-8")
+
+    assert (
+        "| Events | `check_suite`, `pull_request`, `push`, `repository`, "
+        "`status`, `workflow_run` |" in secrets
+    )
+
+
 def test_readme_explains_install_and_taking_the_page_down() -> None:
     text = (ROOT / "README.md").read_text(encoding="utf-8")
 
