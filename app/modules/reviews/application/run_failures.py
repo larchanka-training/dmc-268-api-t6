@@ -6,7 +6,7 @@ Only codes in ``RETRYABLE_ERROR_CODES`` can enter T9 before ``MAX_ATTEMPTS``;
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -246,3 +246,33 @@ class RetryDelays:
         if rate_limited or attempt >= 2:
             return "2m", self.medium
         return "30s", self.short
+
+
+_CONTEXT_DEGRADATION_NOTES: dict[str, str] = {
+    "bitbucket_request_budget_exceeded": (
+        "исчерпан лимит HTTP-запросов к Bitbucket для необязательного контекста — "
+        "ревью выполнено по diff без дополнительного контекста (L2/L3/RAG)."
+    ),
+    "bitbucket_response_budget_exceeded": (
+        "исчерпан бюджет объёма ответов Bitbucket для необязательного контекста — "
+        "ревью выполнено по diff без дополнительного контекста (L2/L3/RAG)."
+    ),
+}
+
+
+def context_degradation_note(error_code: str | None) -> str | None:
+    """Return user-visible degradation text when optional context hit a budget limit."""
+    if error_code is None:
+        return None
+    return _CONTEXT_DEGRADATION_NOTES.get(error_code)
+
+
+def context_degradation_note_from_response(response_value: object) -> str | None:
+    """Extract a user-visible degradation note from a stored ``context.build`` response."""
+    if not isinstance(response_value, Mapping):
+        return None
+    error = response_value.get("error")
+    if not isinstance(error, Mapping):
+        return None
+    code = error.get("code")
+    return context_degradation_note(code if isinstance(code, str) else None)

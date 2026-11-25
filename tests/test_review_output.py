@@ -1233,3 +1233,113 @@ def test_publish_review_output_persists_dropped_findings() -> None:
             )
         )
     assert str(RUN_ID) in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("error_code", "expected_phrase"),
+    [
+        ("bitbucket_request_budget_exceeded", "HTTP-запросов"),
+        ("bitbucket_response_budget_exceeded", "объёма ответов"),
+    ],
+)
+def test_bitbucket_budget_degradation_note_renders_in_review_body(
+    error_code: str,
+    expected_phrase: str,
+) -> None:
+    from app.modules.reviews.application.run_failures import context_degradation_note_from_response
+    from app.modules.reviews.application.store_review_output import (
+        PublishingGuard,
+        StoreReviewOutput,
+    )
+
+    assert context_degradation_note_from_response(None) is None
+    assert context_degradation_note_from_response({"error": {"code": "diff_fetch_failed"}}) is None
+    note = context_degradation_note_from_response(
+        {"error": {"type": "RunFailure", "message": "limit hit", "code": error_code}}
+    )
+    assert note is not None
+
+    ctx = FindingPostProcessingInput(
+        diff_map=_added_file_diff_map("app/example.py", 14),
+        checked_paths=frozenset({"app/example.py"}),
+        rule_names=frozenset(),
+        allowed_v2_rules=frozenset(),
+        context_degradation_note=note,
+    )
+
+    class CapturingRepo(RecordingRepository):
+        async def store_review_output(
+            self,
+            run_id: UUID,
+            model_output: dict[str, object] | None,
+            parsed: ReviewOutput,
+            processed: ProcessedReviewOutput,
+        ) -> ReviewPublication:
+            return ReviewPublication("a" * 40, (), processed.review_body, "stable-key")
+
+    provider = RecordingProvider()
+    repo = CapturingRepo(ctx, _publication())
+    assert (
+        asyncio.run(
+            PublishReviewOutput(RecordingFactory(repo), provider).execute(RUN_ID, valid_output())
+        )
+        is True
+    )
+    published_body = provider.calls[0][1]
+    assert "**Ограничение контекста:**" in published_body
+    assert expected_phrase in published_body
+
+    class FakeReviewRepo(InMemoryFinalization):
+        async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
+            return ctx
+
+        async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
+            return PublishingGuard(
+                state="running",
+                worker_id="test-worker",
+                cancel_requested=False,
+                head_sha="head_sha_123",
+                head_current=True,
+                repository_review_event="APPROVE",
+                attempt=1,
+            )
+
+    fake_repo = FakeReviewRepo()
+
+    class FakeUoW:
+        def __init__(self) -> None:
+            self.reviews = fake_repo
+
+        async def __aenter__(self) -> FakeUoW:
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            pass
+
+        async def commit(self) -> None:
+            pass
+
+        async def rollback(self) -> None:
+            pass
+
+    class FakeQueue:
+        async def publish_review(self, pointer: Any) -> None:
+            pass
+
+    store = StoreReviewOutput(
+        cast(Any, lambda: FakeUoW()),
+        FakeQueue(),
+        worker_id="test-worker",
+        expected_attempt=1,
+        run_url=lambda _: None,
+    )
+    assert asyncio.run(store.execute(RUN_ID, valid_output())) is True
+    assert fake_repo.finalized_processed is not None
+    stored_body = fake_repo.finalized_processed.review_body
+    assert "**Ограничение контекста:**" in stored_body
+    assert expected_phrase in stored_body

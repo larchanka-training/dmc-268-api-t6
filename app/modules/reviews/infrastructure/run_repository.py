@@ -82,7 +82,10 @@ from app.modules.reviews.application.run_coverage import (
     restore_context_coverage,
 )
 from app.modules.reviews.application.run_events import RunChange
-from app.modules.reviews.application.run_failures import RunCancelled
+from app.modules.reviews.application.run_failures import (
+    RunCancelled,
+    context_degradation_note_from_response,
+)
 from app.modules.reviews.application.store_review_output import (
     AcceptedReviewCheckpoint,
     FinalizedReviewPlan,
@@ -1169,6 +1172,7 @@ class SqlAlchemyReviewOutputRepository:
                 any(item.summary_only for item in durable) or is_summary_only_stop(response_value)
             ),
             summary_reason=summary_only_reason_of(response_value),
+            context_degradation_note=context_degradation_note_from_response(response_value),
             github_repository_full_name=full_name if provider == "github" else None,
         )
 

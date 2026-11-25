@@ -691,6 +691,8 @@ class FindingPostProcessingInput:
     summary_only: bool = False
     # ``context.build`` reason for a summary-only run; the saved summary names it.
     summary_reason: str | None = None
+    # User-visible note when optional ``context.build`` degraded due to a VCS budget limit.
+    context_degradation_note: str | None = None
     # Set only for a GitHub repository: the one provider whose comments link to the rules (#465).
     github_repository_full_name: str | None = None
 
@@ -902,6 +904,7 @@ class PublishReviewOutput:
             apply_severity_threshold=effective_threshold is None,
             coverage=coverage,
             summary_only=context.summary_only,
+            context_degradation_note=context.context_degradation_note,
             incomplete_paths=(
                 raw_output.incomplete_paths
                 if isinstance(raw_output, (VerifiedReviewOutput, NoModelAnswer))
