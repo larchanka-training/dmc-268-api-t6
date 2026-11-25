@@ -87,3 +87,15 @@ def test_github_app_page_records_owners_transfer_and_each_permission() -> None:
         assert reason in text
     for marker in SECRET_MARKERS:
         assert marker not in text
+
+
+def test_readme_explains_install_and_taking_the_page_down() -> None:
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "## Установка" in text
+    assert "### Снятие страницы" in text
+    assert "https://github.com/apps/ai-codereviewer-bot/installations/new" in text
+    assert "`installation.created`" in text
+    assert "лейбл `ai-review`" in text
+    assert "Only on this account" in text
+    assert "docs/GITHUB_APP.md" in text

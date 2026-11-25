@@ -323,6 +323,20 @@ Staging выкатывается автоматически при каждом 
 
 `https://dmc268-t6.axyi.ru` — публичный лендинг (пока staging-лендинг, до `landing-prod`); редиректа на prod UI больше нет. Браузер мог закэшировать старый постоянный редирект: проверять через `curl` или приватное окно.
 
+## Установка
+
+Prod App публичный: [ai-codereviewer-bot](https://github.com/apps/ai-codereviewer-bot). Владелец — организация `dmc-268`. Права, события и передача staging App — в [docs/GITHUB_APP.md](docs/GITHUB_APP.md).
+
+Поставить App на репозиторий аккаунта, который им не владеет:
+
+1. Открыть https://github.com/apps/ai-codereviewer-bot/installations/new от имени этого аккаунта и выбрать репозитории. Не ставить prod App туда, где уже стоит staging App `dmc268-t6-reviewer`.
+2. GitHub присылает `installation.created` на `https://api.dmc268-t6.axyi.ru/webhooks/github`. Пока установка не привязана к Workspace, webhook-worker её не проецирует. Вход на prod UI привязывает установку ([docs/SECRETS.md](docs/SECRETS.md), «Регистрация и проверка»).
+3. При проекции worker создаёт лейбл `ai-review` запросом `POST /repos/{owner}/{repo}/labels`. Ответ 422 значит, что лейбл уже есть.
+
+### Снятие страницы
+
+Чтобы страницу больше не предлагали чужим аккаунтам, owner организации `dmc-268` открывает настройки App и меняет «Where can this GitHub App be installed?» с Any account на Only on this account. Уже сделанные установки остаются, пока их не снимут в каждом аккаунте. App и секреты это не удаляет.
+
 ## Docs
 
 | Документ | Содержание |
@@ -331,6 +345,7 @@ Staging выкатывается автоматически при каждом 
 | [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) | Курсовой VPS и DNS, архитектура Hetzner, Terraform (`api-staging` + `ui-staging`), удаление стенда |
 | [docs/CICD.md](docs/CICD.md) | Пайплайн, deployment, rollback, цели выката и edge-прокси |
 | [docs/SECRETS.md](docs/SECRETS.md) | Перечень secrets, доставка на staging, git и логи |
+| [docs/GITHUB_APP.md](docs/GITHUB_APP.md) | Публичная страница GitHub App: владельцы, манифест, права |
 | [docs/WEBHOOK_WORKER.md](docs/WEBHOOK_WORKER.md) | webhook-worker: запуск, проекция событий PR и лейбла `ai-review`, повторы квитанций |
 | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Процесс работы: роли, путь задачи, треды ревью, вердикты, споры, мерж; §10 — автору вне команды |
 
