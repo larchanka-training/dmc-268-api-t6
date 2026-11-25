@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -21,6 +21,7 @@ from app.modules.auth.infrastructure.models import (
     AuthRefreshSession,
     GitHubUserProfile,
 )
+from app.modules.repositories.infrastructure.models import ProviderInstallation
 from app.modules.workspaces.infrastructure.models import GitHubUserWorkspaceAccess
 
 
@@ -102,10 +103,33 @@ class SqlAlchemyAuthSessionStore:
         )
         if profile is None:
             raise RuntimeError("refresh session has no user profile")
+        # A deleted installation is not a second workspace. A workspace with no
+        # deleted GitHub installation (none at all, or only another provider) stays.
+        live_installation = (
+            select(ProviderInstallation.id)
+            .where(
+                ProviderInstallation.workspace_id == GitHubUserWorkspaceAccess.workspace_id,
+                ProviderInstallation.provider == "github",
+                ProviderInstallation.deleted_at.is_(None),
+            )
+            .exists()
+        )
+        retired_installation = (
+            select(ProviderInstallation.id)
+            .where(
+                ProviderInstallation.workspace_id == GitHubUserWorkspaceAccess.workspace_id,
+                ProviderInstallation.provider == "github",
+                ProviderInstallation.deleted_at.is_not(None),
+            )
+            .exists()
+        )
         workspace_ids = (
             await self._session.scalars(
                 select(GitHubUserWorkspaceAccess.workspace_id)
-                .where(GitHubUserWorkspaceAccess.github_user_id == user_id)
+                .where(
+                    GitHubUserWorkspaceAccess.github_user_id == user_id,
+                    or_(live_installation, ~retired_installation),
+                )
                 .order_by(GitHubUserWorkspaceAccess.workspace_id)
             )
         ).all()

@@ -15,7 +15,10 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.bootstrap.portal_auth import get_auth_scope
+from app.main import app
 from app.modules.auth.application.scope import AuthScope
+from app.modules.auth.infrastructure.sessions import SqlAlchemyAuthSessionUnitOfWork
 from app.modules.repositories.application.installation_repositories import (
     RepositoryReference,
     RepositorySnapshot,
@@ -1922,3 +1925,39 @@ def test_sync_prelocks_archive_before_target_without_blocking_null_account_callb
             await engine.dispose()
 
     asyncio.run(exercise())
+
+
+@pytest.mark.integration
+def test_reinstall_with_a_new_installation_id_keeps_one_workspace_in_auth_me(
+    reinstall_env: Env,
+) -> None:
+    import selectors
+    import sys
+
+    if sys.platform == "win32":
+        from asyncio import WindowsSelectorEventLoopPolicy
+
+        asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())
+
+    with api(reinstall_env, AuthScope(42, (WS_A,))) as (client, factory):
+
+        async def linked_identity() -> tuple[tuple[UUID, ...], int]:
+            await seed_archive(factory)
+            linked = await apply(factory, FreshGitHub())
+            assert linked == (WS_A,)
+            async with SqlAlchemyAuthSessionUnitOfWork(factory) as uow:
+                _user, workspace_ids = await uow.sessions.current_identity(42)
+            async with factory() as session:
+                count = await session.scalar(text("SELECT count(*) FROM workspaces"))
+            return workspace_ids, int(count or 0)
+
+        workspace_ids, workspace_count = asyncio.run(
+            linked_identity(),
+            loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
+        )
+        assert workspace_ids == (WS_A,)
+        assert workspace_count == 2
+        app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, workspace_ids)
+        assert client.get("/api/auth/me").json()["workspaces"] == [
+            {"id": str(WS_A), "name": "W", "installationId": 29}
+        ]
