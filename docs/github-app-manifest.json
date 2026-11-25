@@ -11,7 +11,7 @@
   "callback_urls": ["https://ui.dmc268-t6.axyi.ru/auth/callback"],
   "setup_url": "https://ui.dmc268-t6.axyi.ru/repositories",
   "setup_on_update": true,
-  "request_oauth_on_install": true,
+  "request_oauth_on_install": false,
   "default_permissions": {
     "actions": "read",
     "checks": "write",

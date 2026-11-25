@@ -57,6 +57,7 @@ def test_prod_manifest_matches_sd_permissions_and_carries_no_secret() -> None:
     assert manifest["description"] == "AI code reviewer bot"
     assert manifest["url"] == "https://www.dmc268-t6.axyi.ru/"
     assert manifest["public"] is True
+    assert manifest["request_oauth_on_install"] is False
     assert manifest["hook_attributes"] == {
         "url": "https://api.dmc268-t6.axyi.ru/webhooks/github",
         "active": True,
