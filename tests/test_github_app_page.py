@@ -70,7 +70,6 @@ def test_prod_manifest_matches_sd_permissions_and_carries_no_secret() -> None:
 
 def test_github_app_page_records_owners_transfer_and_each_permission() -> None:
     text = PAGE.read_text(encoding="utf-8")
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
 
     assert "Владелец staging App — личный аккаунт `axyi`" in text
     assert "slug `dmc268-t6-reviewer`" in text
@@ -82,7 +81,7 @@ def test_github_app_page_records_owners_transfer_and_each_permission() -> None:
     assert "https://github.com/apps/ai-codereviewer-bot" in text
     assert "`installation` и `installation_repositories` приходят без отдельной подписки" in text
     assert "`pull_request_review_thread` в MVP не подписан" in text
-    for event in manifest["default_events"]:
+    for event in PROD_EVENTS:
         assert f"`{event}`" in text
     for permission, reason in PERMISSION_REASONS.items():
         assert f"`{permission}`" in text
