@@ -64,12 +64,10 @@ select = [
     "D",
 ]
 ignore = [
-    # Explicit Any covers 707 dynamic payloads/fakes/fixtures across the repo (29 in app/,
-    # 537 in tests/, 17 in scripts/, 2 in review/, 122 in .agents/); mypy --strict does not
-    # enforce disallow_any_explicit, so explicit Any is not checked by gates.
+    # See `.agents/rules/backend.md` §4 for the baseline census at merge-base `8f7d3046`.
+    # Explicit `Any` is pervasive across dynamic payloads/fakes/fixtures; mypy strict omits `disallow_any_explicit`.
     "ANN401",
-    # Docstring presence rules (12,229 existing symbols: 7,724 D103, 2,527 D102, 1,186 D101,
-    # 540 D107, 184 D105, 42 D100, 26 D104) are omitted so tests/helpers need no ceremony.
+    # Docstring presence rules omitted so tests and small helpers require no ceremony.
     "D100",
     "D101",
     "D102",
@@ -78,18 +76,17 @@ ignore = [
     "D105",
     "D106",
     "D107",
-    # Docstring formatting backlog (729 hits across repo, including 333 inside SYNC-mirrored
-    # `.agents/` files owned by dmc-268-ui-t6):
-    "D202",  # 8 hits (app: 4, tests: 4; all outside .agents)
-    "D205",  # 365 hits (app: 101, tests: 74, scripts: 2, review: 26, .agents: 162)
-    "D209",  # 327 hits (168 outside .agents, 159 in .agents)
-    "D210",  # 1 hit (1 in .agents)
-    "D301",  # 15 hits (14 outside .agents, 1 in .agents)
-    "D403",  # 13 hits (3 outside .agents, 10 in .agents)
+    # Legacy docstring formatting backlog (including SYNC-mirrored `.agents/` files owned by ui repo).
+    "D202",
+    "D205",
+    "D209",
+    "D210",
+    "D301",
+    "D403",
 ]
 
 [tool.ruff.lint.pydocstyle]
-# Disables conflicting blank-line/first-line rules (D203, D213) and D401 (647 imperative-mood hits).
+# Disables conflicting blank-line/first-line rules (D203, D213) and D401 (imperative-mood style).
 convention = "google"
 
 [tool.ruff.format]

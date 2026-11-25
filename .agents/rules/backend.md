@@ -110,10 +110,11 @@ from a missing scope.
 - Ruff: `select = ["E", "F", "I", "UP", "B", "SIM", "W", "FA", "G", "PIE", "T10", "TID", "PLE", "YTT", "ANN", "D"]`,
   line length 100, `[tool.ruff.lint.pydocstyle] convention = "google"`,
   `ignore` in `pyproject.toml` (no directory `per-file-ignores`, no package-wide `# noqa`).
-  - Baseline measurements on `main` (`ruff 0.16.6`, entire repository `.` including `.agents/`):
-    - Clean expanded families (0 hits on `main`): `W`, `FA`, `G`, `T10`, `TID`, `PLE`, `YTT`;
-      `PIE` (5 hits on `main` from `PIE810`, resolved in this PR).
-    - `D` (13,605 total hits):
+  - Baseline census at merge-base `8f7d3046` (`ruff 0.16.6`, entire repository `.` including `.agents/`):
+    - Clean expanded families (0 hits at `8f7d3046`): `W`, `FA`, `G`, `T10`, `TID`, `PLE`, `YTT`.
+      `PIE` had 5 `PIE810` hits at `8f7d3046`; all 5 are fixed in this PR, so all selected families
+      (outside the explicit `ignore` list in `pyproject.toml`) have **0 hits** after PR #594.
+    - `D` (13,605 total hits at `8f7d3046`):
       - Presence rules `D100`–`D107` (12,229 hits: 7,724 `D103`, 2,527 `D102`, 1,186 `D101`,
         540 `D107`, 184 `D105`, 42 `D100`, 26 `D104`) omitted to avoid boilerplate on helpers/tests.
       - `D401` (647 hits, repository docstring style favors descriptive noun phrases/summaries over imperative mood)
@@ -124,18 +125,17 @@ from a missing scope.
         10 in `.agents/`), `D202` (8 hits: 4 in `app/`, 4 in `tests/`),
         `D210` (1 hit in `.agents/`).
       - All other Google-convention rules (`D200`, `D201`, `D206`–`D208`, `D211`, `D212`, `D214`,
-        `D300`, `D402`, `D405`, `D410`–`D412`, `D414`–`D419`) have 0 hits and are strictly enforced.
-    - `ANN` (714 total hits): `ANN401` (707 `Any` usages: 29 `app/`, 537 `tests/`, 17 `scripts/`,
-      2 `review/`, 122 `.agents/`) ignored because explicit `Any` is pervasive across dynamic payloads,
-      test fakes, fixtures, and mocks; mypy strict mode does not enforce `disallow_any_explicit`, so
-      explicit `Any` is not checked by gates; remaining 7 hits in `tests/` typed directly.
-    - Deferred families:
-      - `ERA001` (3 hits: 2 in `tests/` addressed by #458 Part 1, 1 in `.agents/` SYNC copy;
-        deferred to #458 Part 1 merge).
-      - `RUF` (401 total homoglyph hits: 366 `RUF001` ambiguous characters in strings, 18 `RUF002`
-        in docstrings, 17 `RUF003` in comments; deferred because Cyrillic letters in Russian
-        test fixtures and requirement references, alongside punctuation characters like en-dash,
-        trigger ambiguous unicode warnings).
+        `D300`, `D402`, `D405`, `D410`–`D412`, `D414`–`D419`) had 0 hits and are strictly enforced.
+    - `ANN` (714 total hits at `8f7d3046`): `ANN401` (707 `Any` usages: 29 `app/`, 537 `tests/`,
+      17 `scripts/`, 2 `review/`, 122 `.agents/`) ignored because explicit `Any` is pervasive across
+      dynamic payloads, test fakes, fixtures, and mocks; mypy strict mode does not enforce
+      `disallow_any_explicit`, so explicit `Any` is not checked by gates; the remaining 7 hits in
+      `tests/` were typed directly in this PR.
+    - Deferred families (not yet in `select`):
+      - `ERA001` (3 hits at `8f7d3046`: 2 in `tests/` addressed by #458 Part 1, 1 in `.agents/` SYNC copy;
+        deferred until #458 Part 1 merges).
+      - `RUF` (401 homoglyph hits at `8f7d3046`: 366 `RUF001`, 18 `RUF002`, 17 `RUF003`; deferred because
+        Cyrillic letters in Russian test fixtures/requirements alongside en-dashes trigger false positives).
 - Zero warnings (gate pass criteria; policy expectation of clean code):
   - `uv run ruff check .`: exit code `0`, `All checks passed!`, 0 configuration warnings.
   - `uv run ruff format --check .`: exit code `0`, all files formatted, 0 warnings.
@@ -191,7 +191,8 @@ from a missing scope.
   `tests.deploy_prod_workflow_fakes`, `tests.monitoring_deploy_host`,
   `tests.code_index_postgres`, `tests.portal_postgres`,
   `tests.code_index_indexer_support`, `tests.gitlab_projection_support`,
-  `tests.github_webhook_fakes` and `tests.bitbucket_connection_postgres_support`).
+  `tests.telemetry_fakes`, `tests.github_webhook_fakes` and
+  `tests.bitbucket_connection_postgres_support`).
 - Assert literal values taken from the spec — never derive an expected value from
   the implementation under test.
 - One test per behavior. Before adding a test, grep the feature's file prefix for the
