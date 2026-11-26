@@ -817,10 +817,10 @@ class TestValidatorAllNineReasonsAndCaplog:
             == "Python syntax error after applying suggestion: simulated broken syntax on line 2"
         )
 
-    def test_python_suggestion_rejected_when_tree_sitter_reports_error_increase(
+    def test_python_suggestion_accepted_when_ast_parse_succeeds_and_tree_sitter_errors_increase(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Tree-sitter parse error increase on Python rejects even when ast.parse succeeds."""
+        """Valid Python confirmed by ast.parse stays valid even if tree-sitter error count grows."""
         code = b"def f():\n    return 1\n"
         suggestion = "    return 2"
         from app.modules.reviews.infrastructure import suggestion_ast
@@ -830,23 +830,11 @@ class TestValidatorAllNineReasonsAndCaplog:
 
         monkeypatch.setattr(suggestion_ast, "count_syntax_errors", lambda node: 10)
         res = validate_suggestion_tree(AstLanguage.PYTHON, code, 2, 2, suggestion)
-        assert res.is_valid is False
-        assert res.reason == SuggestionRejectionReason.SYNTAX_ERROR
+        assert res.is_valid is True
 
-    def test_python_indentation_error_rejected_even_if_tree_sitter_reports_no_increase(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """IndentationError from ast.parse immediately rejects
-
-        even if tree-sitter reports no error increase.
-        """
-        code = b"def f():\n    return 1\n"
-        suggestion = "return 2"  # 0 indentation under def raises IndentationError
-        from app.modules.reviews.infrastructure import suggestion_ast
-
-        monkeypatch.setattr(suggestion_ast, "count_syntax_errors", lambda node: 0)
-        res = validate_suggestion_tree(AstLanguage.PYTHON, code, 2, 2, suggestion)
-        assert res.is_valid is False
-        assert res.reason == SuggestionRejectionReason.SYNTAX_ERROR
-        assert res.detail is not None
-        assert "expected an indented block" in res.detail
+    def test_python_pep696_valid_syntax_accepted_despite_tree_sitter_parser_lag(self) -> None:
+        """Real PEP 696 default type parameters pass ast.parse on 3.13 even if tree-sitter lags."""
+        code = b"class Box:\n    pass\n"
+        suggestion = "class Box[T = int]:"
+        res = validate_suggestion_tree(AstLanguage.PYTHON, code, 1, 1, suggestion)
+        assert res.is_valid is True

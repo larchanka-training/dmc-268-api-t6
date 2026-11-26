@@ -190,7 +190,7 @@ def _check_python_syntax(new_text: str, *, orig_valid: bool) -> SuggestionValida
         return None
     try:
         ast.parse(new_text)
-    except (SyntaxError, ValueError, MemoryError, RecursionError) as exc:
+    except (SyntaxError, ValueError) as exc:
         return SuggestionValidationResult(
             is_valid=False,
             reason=SuggestionRejectionReason.SYNTAX_ERROR,
@@ -205,6 +205,7 @@ def _validate_tree_sitter_delta(
     new_text: str,
     errors_before: int,
     dups_before: int,
+    ast_confirms_valid: bool = False,
 ) -> SuggestionValidationResult:
     """Compare Tree-sitter error and duplicate-condition counts after substitution."""
     try:
@@ -217,7 +218,7 @@ def _validate_tree_sitter_delta(
         )
 
     errors_after = count_syntax_errors(tree_after.root_node)
-    if errors_after > errors_before:
+    if errors_after > errors_before and not ast_confirms_valid:
         return SuggestionValidationResult(
             is_valid=False,
             reason=SuggestionRejectionReason.SYNTAX_ERROR,
@@ -286,4 +287,5 @@ def validate_suggestion_tree(
         new_text=new_text,
         errors_before=errors_before,
         dups_before=dups_before,
+        ast_confirms_valid=language is AstLanguage.PYTHON and orig_valid,
     )
