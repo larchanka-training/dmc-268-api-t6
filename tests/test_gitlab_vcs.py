@@ -14,6 +14,7 @@ from app.modules.integrations.gitlab.infrastructure.run_http import (
     GitLabRunHttp,
     GitLabRunHttpError,
 )
+from app.modules.reviews.application.diff_map import VcsProviderName, build_diff_map
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.run_failures import (
     RequiredSourceUnavailable,
@@ -253,19 +254,20 @@ def test_bounded_positive_version_lookup_stops_at_match_and_rejects_observed_rep
 
 
 @pytest.mark.parametrize(
-    ("flag", "reason"),
+    ("flags", "reason"),
     [
-        ("too_large", OmissionReason.TOO_LARGE),
-        ("collapsed", OmissionReason.MISSING_PATCH),
-        ("generated_file", OmissionReason.GENERATED),
+        ({"too_large": True}, OmissionReason.TOO_LARGE),
+        ({"too_large": True, "collapsed": True}, OmissionReason.TOO_LARGE),
+        ({"generated_file": True}, OmissionReason.GENERATED),
+        ({"generated_file": True, "collapsed": True}, OmissionReason.GENERATED),
     ],
 )
 def test_newer_flags_are_real_omissions_without_invented_size_or_line_stats(
-    flag: str, reason: OmissionReason
+    flags: dict[str, bool], reason: OmissionReason
 ) -> None:
     async def scenario() -> None:
         router = Router()
-        router.files = [{**router.files[0], flag: True}]
+        router.files = [{**router.files[0], **flags}]
         router.canonical["changes_count"] = "1"
         async with GitLabRunHttp(
             credentials=Credentials(),
@@ -285,6 +287,53 @@ def test_newer_flags_are_real_omissions_without_invented_size_or_line_stats(
         assert value.changed_files == ()
 
     asyncio.run(scenario())
+
+
+def test_collapsed_file_leaves_file_list_incomplete_without_invented_zero_counts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A collapsed GitLab diff without too_large/generated_file hides unknown line counts,
+    # so the file is left out and inventory becomes incomplete (CVS §2.3) instead of 0 lines.
+    async def scenario() -> None:
+        router = Router()
+        router.files = [{**router.files[0], "diff": "", "collapsed": True}]
+        router.canonical["changes_count"] = "1"
+        async with GitLabRunHttp(
+            credentials=Credentials(),
+            origin_policy=POLICY,
+            transport=httpx.MockTransport(router.response),
+        ) as http:
+            value = await FetchVcsReviewInput(
+                HttpGitLabVcsProvider(http=http), checkpoint=checkpoint
+            ).execute(INPUT.locator, INPUT.head_sha, INPUT.base_sha)
+        assert value.files == ()
+        assert value.omissions == ()
+        assert value.changed_files == ()
+        assert value.pull_request.meta.files_changed == 1
+        diff_map = build_diff_map(
+            value.pull_request,
+            value.files,
+            provider=VcsProviderName.GITLAB,
+            repository_id=INPUT.repository_id,
+            diff_old_sha=None,
+        )
+        assert diff_map.file_list_complete is False
+        assert diff_map.incomplete_reasons == ("file_count_mismatch",)
+        assert not any("/repository/" in str(request.url) for request in router.requests)
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.reviews.infrastructure.gitlab_vcs"):
+        asyncio.run(scenario())
+    assert [
+        (record.levelname, record.getMessage())
+        for record in caplog.records
+        if record.name == "app.modules.reviews.infrastructure.gitlab_vcs"
+    ] == [
+        (
+            "WARNING",
+            "GitLab patch collapsed, file left out project_id=17 iid=12 "
+            "diff_version_id=9 path=src/new.py",
+        )
+    ]
 
 
 def test_an_unreadable_patch_leaves_the_file_list_incomplete_instead_of_failing(

@@ -401,12 +401,18 @@ def test_gitlab_empty_added_blob_without_regular_file_proof_stays_missing_patch(
                 checkpoint=provider_checkpoint,
             ).execute(INPUT.locator, INPUT.head_sha, INPUT.base_sha)
         assert result.changed_files == ()
-        assert [(item.file.filename, item.reason.value) for item in result.omissions] == [
-            ("pkg/__init__.py", "missing_patch")
-        ]
-        assert result.files[0].blob_sha == _EMPTY_BLOB
-        assert result.files[0].size == 0
-        assert result.files[0].git_mode is None
+        if collapsed:
+            # Collapsed omits line counts (CVS §2.3): file is left out, not 0-line missing_patch.
+            assert result.files == ()
+            assert result.omissions == ()
+            assert result.pull_request.meta.files_changed == 1
+        else:
+            assert [(item.file.filename, item.reason.value) for item in result.omissions] == [
+                ("pkg/__init__.py", "missing_patch")
+            ]
+            assert result.files[0].blob_sha == _EMPTY_BLOB
+            assert result.files[0].size == 0
+            assert result.files[0].git_mode is None
         assert all(request.url.host == "gitlab.com" for request in router.requests)
         assert not any("/git/trees/" in request.url.path for request in router.requests)
         blobs = [r for r in router.requests if "/repository/blobs/" in r.url.path]
