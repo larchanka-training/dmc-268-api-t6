@@ -589,8 +589,8 @@ def test_historical_run_keeps_todays_pins_and_digest(env: Env) -> None:
         ),
         pytest.param(
             True,
-            "v7",
-            "b5cdaac4f6185a3986942755f18f2543e5be3b41452ca2a8e4ffc8c6d0a49af9",
+            "v8",
+            "3d955c24ffc306bd3ead1305842ff41faf772e1e6ce772e81bba02e57519d8ea",
             id="full-seed",
         ),
     ],
@@ -599,7 +599,7 @@ def test_complete_pins_make_snapshot_ready_and_the_pinned_prompt_picks_the_path(
     env: Env, snapshot_packaged: bool, version: str, checksum: str
 ) -> None:
     # Up to v3 a new run stays legacy; the full seed activates the newest packaged
-    # review.system (v5) and the snapshot path.
+    # review.system (v8) and the snapshot path.
     assets = tuple(
         asset
         for asset in _packaged()

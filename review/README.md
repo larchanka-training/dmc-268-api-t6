@@ -111,7 +111,7 @@ the backend and is not part of the draft.
 ## Assembly order
 
 This order and the review tags of "Input envelope" below are those of the legacy path (a run pinned to
-`review.system.v3` or lower); a v4, v5 or v7 run's review request uses the envelope in "Policy snapshot v2 envelope and
+`review.system.v3` or lower); a v4, v5, v7 or v8 run's review request uses the envelope in "Policy snapshot v2 envelope and
 reflection pass" below, and the `review.conventions` tags are the same on both paths.
 
 One request is assembled as `system → <custom_instructions> → <agents_md> → <repo_conventions> → <pr_meta> →

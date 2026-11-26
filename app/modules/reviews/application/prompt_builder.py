@@ -17,6 +17,10 @@ from app.modules.reviews.application.commit_prefix_limits import (
     MAX_COMMIT_MESSAGES,
 )
 from app.modules.reviews.application.context_provenance import SourceRole
+from app.modules.reviews.application.policy_commands import (
+    neutralize_policy_commands,
+    removes_policy_commands,
+)
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
@@ -287,14 +291,20 @@ class PromptBuilder:
     def render_policy_rules(snapshot: PolicySnapshot) -> str:
         """Render the numbered repository-rules block, including absence and empty state."""
         return _render_policy_document(
-            snapshot.rules, tag="repository_rules", block_id="policy-rules"
+            snapshot.rules,
+            tag="repository_rules",
+            block_id="policy-rules",
+            neutralize_commands=_snapshot_removes_policy_commands(snapshot),
         )
 
     @staticmethod
     def render_policy_agents(snapshot: PolicySnapshot) -> str:
         """Render the numbered AGENTS.md block, including absence and empty state."""
         return _render_policy_document(
-            snapshot.agents, tag="project_conventions_document", block_id="policy-agents"
+            snapshot.agents,
+            tag="project_conventions_document",
+            block_id="policy-agents",
+            neutralize_commands=_snapshot_removes_policy_commands(snapshot),
         )
 
     @staticmethod
@@ -607,15 +617,29 @@ class PromptBuilder:
         )
 
 
-def _render_policy_document(document: PolicyDocument, *, tag: str, block_id: str) -> str:
+def _snapshot_removes_policy_commands(snapshot: PolicySnapshot) -> bool:
+    bindings = snapshot.prompt_bindings
+    return removes_policy_commands(bindings.review_system_key, bindings.review_system_version)
+
+
+def _render_policy_document(
+    document: PolicyDocument,
+    *,
+    tag: str,
+    block_id: str,
+    neutralize_commands: bool = False,
+) -> str:
     attributes = f'block_id="{block_id}" path="{_attribute(document.path)}"'
     if not document.is_present:
         return f'<{tag} {attributes} status="absent" />'
-    if not (document.text or ""):
+    text = document.text or ""
+    if not text:
         return f'<{tag} {attributes} status="empty" />'
+    if neutralize_commands:
+        text = neutralize_policy_commands(text)
     lines = "\n".join(
         f'<line n="{index}">{_text(line)}</line>'
-        for index, line in enumerate(_split_policy_lines(document.text or ""), start=1)
+        for index, line in enumerate(_split_policy_lines(text), start=1)
     )
     return f"<{tag} {attributes}>\n{lines}\n</{tag}>"
 
