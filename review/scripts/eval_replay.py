@@ -119,7 +119,7 @@ from review.scripts.eval_provenance import (  # noqa: E402
     rule_json_paths,
     static_input_paths,
 )
-from review.scripts.eval_score import ScoringCase, score_cases  # noqa: E402
+from review.scripts.eval_score import ScoringCase, metric_lines, score_cases  # noqa: E402
 from review.scripts.validate_dataset import (  # noqa: E402
     DEFAULT_ROOT,
     POLICY_ARMS,
@@ -807,6 +807,8 @@ def replay(
         warnings.extend(_rag_warnings(manifest, root, records))
     response_paths = _response_paths(responses, entries)
     usage = manifest["run_metadata"].get("usage")
+    # Latency is recorded only on a RAG capture, for every case. Other captures stay untimed.
+    latency_by_case = manifest["run_metadata"].get("latency_ms") if rag_arm is not None else None
     # A legacy capture saw no policy snapshot: score it on every truth, as before #163.
     recorded_arm = manifest["run_metadata"].get("policy_arm", "legacy")
     scoring_arm = None if recorded_arm == "legacy" else recorded_arm
@@ -830,6 +832,7 @@ def replay(
             usage=None if usage is None else tuple(usage[case_id]),
             arm=scoring_arm,
             must_not_flag=tuple(record.get("must_not_flag", ())),
+            latency_ms=None if latency_by_case is None else latency_by_case[case_id],
         )
         cases.append(case)
         answer = _normalized_answer(response_path, v2=v2)
@@ -857,7 +860,9 @@ def replay(
             }
         )
     normalized_scores = score_cases(normalized_cases)
-    del normalized_scores["usage"]  # The usage of the same calls as the strict column.
+    # Usage and latency belong to the capture, not to a scoring column.
+    del normalized_scores["usage"]
+    del normalized_scores["review_time"]
     custom_rule_sets = _custom_rule_sets(manifest["static_inputs"], prompt_root)
     return {
         "schema_version": 1,
@@ -933,6 +938,7 @@ def format_console(report: dict[str, Any]) -> str:
         f"Static digest: {provenance['static_digest']}",
         f"Corpus digest: {provenance['corpus_digest']}",
         *_quality_lines(report),
+        *metric_lines(report),
         "Per category:",
     ]
     for name, counts in report["per_category"].items():

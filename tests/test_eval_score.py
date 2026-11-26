@@ -35,6 +35,7 @@ def case(
     added_by_path: dict[str, set[int]] | None = None,
     expected_verdict: str = "clean",
     case_id: str = "SEC-01",
+    latency_ms: int | None = None,
 ) -> ScoringCase:
     if response_valid:
         assert predictions is None or isinstance(predictions, list)
@@ -48,6 +49,7 @@ def case(
         added_lines=added_by_path or {"src/a.py": added_lines if added_lines is not None else {10}},
         raw_response=response,
         response_valid=response_valid,
+        latency_ms=latency_ms,
     )
 
 
@@ -646,3 +648,125 @@ def test_rule_constraints_count_the_rule_truths_of_the_valid_arm_only(arm: str) 
     report = score_cases([_arm_case(arm, [_found(6, "correctness")], truths=(malicious_only,))])
 
     assert report["rule_constraints"] == {"found": 0, "total": 0, "expected": 0, "share": None}
+
+
+def test_clean_case_fpr_counts_alarms_on_interpretable_negative_cases_only() -> None:
+    report = score_cases(
+        [
+            case(
+                predictions=[finding(severity="info", category="readability")],
+                case_id="CLEAN-A",
+            ),
+            case(case_id="CLEAN-B"),
+            case(response_valid=False, predictions={"findings": []}, case_id="CLEAN-C"),
+            case(
+                truths=(finding(),),
+                predictions=[
+                    finding(),
+                    finding(line=12, severity="low", category="readability"),
+                ],
+                added_lines={10, 12},
+                expected_verdict="blocking",
+                case_id="SEC-01",
+            ),
+        ]
+    )
+
+    assert report["false_positive_rate"] == {
+        "method": "clean_case",
+        "flagged": 1,
+        "interpretable_negative_cases": 2,
+        "uninterpretable_negative_cases": 1,
+        "rate": 0.5,
+    }
+    assert report["micro"]["fp"] == 2
+
+
+def test_clean_case_fpr_is_undefined_without_an_interpretable_negative_case() -> None:
+    empty = score_cases([])
+    only_defects = score_cases(
+        [case(truths=(finding(),), predictions=[finding()], expected_verdict="blocking")]
+    )
+    only_invalid = score_cases([case(response_valid=False, case_id="CLEAN-C")])
+
+    for report in (empty, only_defects, only_invalid):
+        assert report["false_positive_rate"]["method"] == "clean_case"
+        assert report["false_positive_rate"]["rate"] is None
+        assert report["false_positive_rate"]["flagged"] == 0
+        assert report["false_positive_rate"]["interpretable_negative_cases"] == 0
+    assert only_invalid["false_positive_rate"]["uninterpretable_negative_cases"] == 1
+    assert empty["false_positive_rate"]["uninterpretable_negative_cases"] == 0
+
+
+def test_review_time_averages_a_complete_eval_capture_and_not_a_partial_one() -> None:
+    complete = score_cases([case(case_id="A", latency_ms=100), case(case_id="B", latency_ms=300)])
+    partial = score_cases([case(case_id="A", latency_ms=100), case(case_id="B")])
+    absent = score_cases([case()])
+
+    assert complete["review_time"] == {
+        "source": "eval_capture",
+        "unit": "ms",
+        "total_ms": 400,
+        "cases": 2,
+        "mean_ms": 200.0,
+        "recorded_cases": 2,
+        "corpus_cases": 2,
+    }
+    assert partial["review_time"] == {
+        "source": "eval_capture",
+        "unit": "ms",
+        "total_ms": 0,
+        "cases": 0,
+        "mean_ms": None,
+        "recorded_cases": 1,
+        "corpus_cases": 2,
+    }
+    assert absent["review_time"]["source"] == "eval_capture"
+    assert absent["review_time"]["mean_ms"] is None
+    assert absent["review_time"]["recorded_cases"] == 0
+    assert absent["review_time"]["total_ms"] == 0
+    assert absent["review_time"]["cases"] == 0
+
+
+def test_metric_lines_print_numerator_denominator_method_and_source() -> None:
+    from review.scripts.eval_score import metric_lines
+
+    timed = score_cases(
+        [
+            case(
+                predictions=[finding(severity="low", category="readability")],
+                case_id="CLEAN-A",
+                latency_ms=10,
+            ),
+            case(case_id="CLEAN-B", latency_ms=20),
+            case(case_id="CLEAN-C", latency_ms=30),
+        ]
+    )
+    undefined = score_cases([])
+    partial = score_cases([case(case_id="A", latency_ms=5), case(case_id="B")])
+    invalid = score_cases(
+        [
+            case(
+                predictions=[finding(severity="low", category="readability")],
+                case_id="CLEAN-A",
+            ),
+            case(response_valid=False, case_id="CLEAN-B"),
+        ]
+    )
+
+    assert metric_lines(timed) == [
+        "Clean-case FPR: 33.3% (1/3) method=clean_case",
+        "Mean review time: 20.0 ms (60/3) source=eval_capture",
+    ]
+    assert metric_lines(undefined) == [
+        "Clean-case FPR: undefined (0/0) method=clean_case",
+        "Mean review time: undefined (0/0) source=eval_capture",
+    ]
+    assert metric_lines(partial) == [
+        "Clean-case FPR: 0.0% (0/2) method=clean_case",
+        "Mean review time: undefined (0/0) source=eval_capture recorded=1/2",
+    ]
+    assert metric_lines(invalid) == [
+        "Clean-case FPR: 100.0% (1/1) method=clean_case uninterpretable_negative_cases=1",
+        "Mean review time: undefined (0/0) source=eval_capture",
+    ]

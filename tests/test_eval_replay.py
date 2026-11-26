@@ -308,6 +308,22 @@ def test_nonpublishable_case_ids_are_sorted() -> None:
     assert nonpublishable_case_ids(statuses) == ["A", "M", "Z"]
 
 
+def test_eval_score_cli_prints_fpr_and_mean_time_from_the_capture(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from review.scripts.eval_score import main
+
+    root = fixture_root(tmp_path, ("SEC-01", "CLEAN-01"))
+    record(root, {"SEC-01": review_output(findings=[finding()]), "CLEAN-01": review_output()})
+
+    assert main(["--root", str(root)]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "Clean-case FPR: 0.0% (0/1) method=clean_case" in lines
+    assert "Mean review time: undefined (0/0) source=eval_capture" in lines
+    assert not any("succeededAverageDurationSeconds" in line for line in lines)
+
+
 def test_replay_scores_valid_responses_and_preserves_provenance(tmp_path: Path) -> None:
     root = fixture_root(tmp_path, ("SEC-01", "CLEAN-01"))
     record(root, {"SEC-01": review_output(findings=[finding()]), "CLEAN-01": review_output()})
@@ -315,6 +331,23 @@ def test_replay_scores_valid_responses_and_preserves_provenance(tmp_path: Path) 
     report = replay(root)
 
     assert report["schema_version"] == 1
+    assert report["false_positive_rate"] == {
+        "method": "clean_case",
+        "flagged": 0,
+        "interpretable_negative_cases": 1,
+        "uninterpretable_negative_cases": 0,
+        "rate": 0.0,
+    }
+    assert report["review_time"]["source"] == "eval_capture"
+    assert report["review_time"]["mean_ms"] is None
+    assert report["review_time"]["total_ms"] == 0
+    assert report["review_time"]["cases"] == 0
+    assert "succeededAverageDurationSeconds" not in format_console(report)
+    assert "Clean-case FPR: 0.0% (0/1) method=clean_case" in format_console(report).splitlines()
+    assert (
+        "Mean review time: undefined (0/0) source=eval_capture"
+        in format_console(report).splitlines()
+    )
     manifest = json.loads((root / "responses/manifest.json").read_text())
     assert report["provenance"] == {
         "model_id": "test-model",
@@ -1571,6 +1604,20 @@ def test_replay_of_a_recorded_rag_capture_reproduces_it_without_a_warning(
     assert report["provenance"]["run_metadata"]["rag_arm"] == arm
     assert report["provenance"]["run_metadata"] == manifest["run_metadata"]
     assert "RAG arm: " + arm in format_console(report).splitlines()
+    latencies = manifest["run_metadata"]["latency_ms"]
+    assert report["review_time"]["source"] == "eval_capture"
+    assert report["review_time"]["unit"] == "ms"
+    assert report["review_time"]["cases"] == len(latencies)
+    assert report["review_time"]["total_ms"] == sum(latencies.values())
+    assert report["review_time"]["mean_ms"] == sum(latencies.values()) / len(latencies)
+    assert "review_time" not in report["gateway_normalized"]
+    assert report["gateway_normalized"]["false_positive_rate"]["method"] == "clean_case"
+    total_ms = sum(latencies.values())
+    case_count = len(latencies)
+    assert (
+        f"Mean review time: {total_ms / case_count:.1f} ms ({total_ms}/{case_count}) "
+        "source=eval_capture"
+    ) in format_console(report).splitlines()
 
 
 def test_replay_of_a_capture_whose_rag_slot_the_gateway_fitted_away_reproduces_it(
@@ -1881,6 +1928,18 @@ def test_replaying_the_main_baseline_asks_for_no_rag_code_and_adds_no_rag_field(
     assert set(report["warnings"]) <= {
         "Static input digest mismatch; refresh the complete baseline"
     }
+    assert report["review_time"]["source"] == "eval_capture"
+    assert report["review_time"]["mean_ms"] is None
+    assert report["review_time"]["total_ms"] == 0
+    assert report["review_time"]["cases"] == 0
+    assert report["false_positive_rate"]["method"] == "clean_case"
+    console = format_console(report)
+    assert any(
+        line.startswith("Clean-case FPR:") and "method=clean_case" in line
+        for line in console.splitlines()
+    )
+    assert "Mean review time: undefined (0/0) source=eval_capture" in console.splitlines()
+    assert "succeededAverageDurationSeconds" not in console
 
 
 @pytest.mark.parametrize("budget", [0, -5, 1.5, "100", True, None])
