@@ -384,34 +384,210 @@ def test_run_worker_consumes_index_repo_beside_the_review_queues(
     }
 
 
-def test_github_adapters_makes_exactly_one_compare_request_per_run() -> None:
+def test_github_adapters_makes_exactly_one_compare_request_per_run(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from app.modules.reviews.application.policy_snapshot import (
+        ExecutionProfile,
+        PolicySnapshot,
+        PromptBindings,
+    )
+    from app.modules.reviews.application.process_run import RunVcsInput
+    from app.modules.reviews.application.review_ignore import parse_review_ignore
+    from app.modules.reviews.application.run_failures import RunSkipped
+    from app.modules.reviews.application.vcs_diff import FetchVcsReviewInput
+    from tests.policy_snapshot_fakes import make_policy_document_missing
+
+    run_id = UUID("00000000-0000-0000-0000-000000000100")
+    repo_id = UUID("00000000-0000-0000-0000-000000000200")
+    head_sha = "e" * 40
+    base_sha = "b" * 40
+    locator = PullRequestLocator(17, "octo/repo", 7)
+    snapshot = PolicySnapshot(
+        schema_version=1,
+        snapshot_id=uuid4(),
+        run_id=run_id,
+        repository_id=repo_id,
+        policy_base_sha=base_sha,
+        rules=make_policy_document_missing(".review/rules.md"),
+        agents=make_policy_document_missing("AGENTS.md"),
+        ignore_patterns=(),
+        ignore_digest=parse_review_ignore(None).digest,
+        parser_profile="rules-markdown/v1",
+        parser_version="4.0.0",
+        matcher_version="review-ignore/v1",
+        limits_version="policy-limits/v1",
+        builtin_exclusions_version="builtin-exclusions/v1",
+        priority_matcher_version="priority-matcher/v1",
+        service_defaults_rule_version_id=uuid4(),
+        defaults_checksum="2" * 64,
+        prompt_bindings=PromptBindings("cs1", "cs2", "cs3"),
+        execution_profile=ExecutionProfile.fast("m1", "m2"),
+        policy_digest="digest_base",
+    )
+
+    class Runs:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def get_run_vcs_input(self, received_run_id: UUID) -> RunVcsInput:
+            assert received_run_id == run_id
+            return RunVcsInput(uuid4(), repo_id, head_sha, base_sha, locator)
+
+        async def get_run_snapshots(self, received_run_id: UUID) -> list[DiffSnapshot]:
+            assert received_run_id == run_id
+            return [
+                DiffSnapshot(
+                    filename="package-lock.json",
+                    patch="@@ -1 +1 @@\n-a\n+b\n",
+                    blob_sha="a" * 40,
+                    status="modified",
+                    additions=1,
+                    deletions=0,
+                    changes=1,
+                )
+            ]
+
+    class PolicyStore:
+        async def get_snapshot(self, received_run_id: UUID) -> PolicySnapshot:
+            assert received_run_id == run_id
+            return snapshot
+
+    class SnapshotUow:
+        policy = PolicyStore()
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> SnapshotUow:
+            return self
+
+        async def __aexit__(
+            self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object
+        ) -> None:
+            pass
+
+    monkeypatch.setattr(worker, "SqlAlchemyRunRepository", Runs)
+    monkeypatch.setattr(worker, "SqlAlchemyPolicySnapshotUnitOfWork", SnapshotUow)
+
+    private_key_pem = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode("ascii")
+    )
 
     compare_requests: list[str] = []
 
     def github_handler(request: httpx.Request) -> httpx.Response:
-        if "/compare" in request.url.path:
-            compare_requests.append(request.url.path)
+        path = request.url.path
+        if "/access_tokens" in path:
+            return httpx.Response(
+                201,
+                json={
+                    "token": "ghs_test",
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                },
+            )
+        if "/compare" in path:
+            compare_requests.append(path)
             return httpx.Response(200, json={"merge_base_commit": {"sha": "c" * 40}})
-        if "/commits" in request.url.path:
+        if path.endswith("/commits"):
             return httpx.Response(200, json=[{"commit": {"message": "msg"}}])
-        if "/pulls/" in request.url.path:
-            return httpx.Response(200, json={"head": {"sha": "h" * 40}, "base": {"sha": "b" * 40}})
+        if path.endswith("/files"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "filename": "package-lock.json",
+                        "status": "modified",
+                        "sha": "a" * 40,
+                        "additions": 1,
+                        "deletions": 0,
+                        "changes": 1,
+                        "patch": "@@ -1 +1 @@\n-a\n+b\n",
+                    }
+                ],
+            )
+        if path.endswith("/pulls/7"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": 101,
+                    "number": 7,
+                    "title": "Title",
+                    "body": None,
+                    "user": {"login": "octo"},
+                    "head": {
+                        "ref": "feature",
+                        "sha": head_sha,
+                        "repo": {"full_name": "octo/repo"},
+                    },
+                    "base": {
+                        "ref": "main",
+                        "sha": base_sha,
+                        "repo": {"full_name": "octo/repo"},
+                    },
+                    "labels": [],
+                    "draft": False,
+                    "changed_files": 1,
+                    "additions": 1,
+                    "deletions": 0,
+                },
+            )
         return httpx.Response(200, json={})
 
-    transport = httpx.MockTransport(github_handler)
-    client = httpx.AsyncClient(base_url="https://api.github.test", transport=transport)
-    env = {**_BASE_ENV, "GITHUB_APP_ID": "42", "GITHUB_APP_PRIVATE_KEY": "key"}
+    async def checkpoint() -> None:
+        pass
+
+    env = {
+        **_BASE_ENV,
+        "GITHUB_APP_ID": "42",
+        "GITHUB_APP_PRIVATE_KEY": private_key_pem,
+        "GITHUB_API_URL": "https://api.github.test",
+    }
     settings = worker.WorkerSettings.from_environment(env)
     factory = cast(async_sessionmaker[AsyncSession], object())
-    adapters = worker.github_adapters(
-        settings=settings,
-        client=client,
-        session_factory=factory,
-        redis=None,
-    )
-    assert adapters is not None
-    run_source = adapters.run_source(UUID("00000000-0000-0000-0000-000000000100"))
-    assert getattr(run_source, "_merge_base", None) is None
+
+    async def exercise() -> httpx.AsyncClient:
+        transport = httpx.MockTransport(github_handler)
+        async with httpx.AsyncClient(
+            base_url="https://api.github.test", transport=transport
+        ) as client:
+            adapters = worker.github_adapters(
+                settings=settings,
+                client=client,
+                session_factory=factory,
+                redis=None,
+            )
+            assert adapters is not None
+            assert adapters.context_stage is not None
+            fetched = await FetchVcsReviewInput(adapters.vcs, checkpoint=checkpoint).execute(
+                locator, head_sha, base_sha
+            )
+            assert len(fetched.files) == 1
+            stage = adapters.context_stage(None, checkpoint)
+            await stage.begin(run_id)
+            with pytest.raises(RunSkipped, match="all_changes_ignored"):
+                await stage.run(run_id)
+            assert stage.diff_old_sha == "c" * 40
+            meta = await adapters.run_source(run_id).get_pull_request_meta(run_id)
+            assert meta is not None
+            assert meta.diff_old_sha is None
+            return client
+
+    client = asyncio.run(exercise())
+    assert client.is_closed
+    assert compare_requests == [f"/repos/octo/repo/compare/{base_sha}...{head_sha}"]
 
 
 def test_compose_worker_passes_portal_run_url_to_store_review_output(
