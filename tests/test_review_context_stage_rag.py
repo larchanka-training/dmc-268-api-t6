@@ -15,8 +15,14 @@ from sqlalchemy.exc import OperationalError
 from app.modules.code_index.domain.enums import EdgeKind, IndexStatus, RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
 from app.modules.reviews.application import rag_index
+from app.modules.reviews.application.ast_resolution import RevisionTree
 from app.modules.reviews.application.context_provenance import LineRange, SourceRef, SourceRole
-from app.modules.reviews.application.diff_map import DiffMap, DiffSide, VcsProviderName
+from app.modules.reviews.application.diff_map import (
+    DiffMap,
+    DiffSide,
+    VcsProviderName,
+)
+from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.graph_retriever import (
     GraphHints,
     GraphTarget,
@@ -43,6 +49,7 @@ from app.modules.reviews.application.run_failures import RunCancelled, RunFailur
 from tests.review_context_stage_support import (
     _BASE,
     _HEAD,
+    _IMPORTER_BLOB,
     _INDEXED,
     _PINNED,
     _REPOSITORY,
@@ -61,6 +68,7 @@ from tests.review_context_stage_support import (
     _rag_builder,
     _readiness,
     _stage,
+    _stored,
 )
 
 
@@ -599,3 +607,93 @@ def test_context_trace_lists_retrieved_blocks_with_their_side_and_revision() -> 
         "reason": "rag_broken_reference",
     }
     assert "def main" not in repr(summary)
+
+
+@pytest.mark.usefixtures("capable")
+def test_rag_slot_budget_failure_records_degraded_code_in_context_build() -> None:
+    graph = FailingGraph(RunFailure("bitbucket_response_budget_exceeded", "budget exhausted"))
+    trace = Trace()
+    gate, _ = _gate(_readiness(RagIndexStatus.READY))
+
+    payload = asyncio.run(_stage(trace, rag=gate, context_builder=_rag_builder(graph)).run(_RUN))
+
+    assert payload is not None
+    assert payload.degraded_error_codes == ("bitbucket_response_budget_exceeded",)
+    build = next(response for tool, _, response in trace.steps if tool == "context.build")
+    assert build["degraded_error_codes"] == ["bitbucket_response_budget_exceeded"]
+
+
+@pytest.mark.usefixtures("capable")
+def test_rag_blob_budget_failure_records_degraded_code_in_context_build() -> None:
+    class BudgetRagBlobRepo(RagRepository):
+        async def read_blob(self, blob_sha: str) -> bytes:
+            if blob_sha == _IMPORTER_BLOB:
+                raise RunFailure("bitbucket_request_budget_exceeded", "budget exhausted")
+            return await super().read_blob(blob_sha)
+
+    graph = _greet_hints("src/main.py")
+    trace = Trace()
+    gate, _ = _gate(_readiness(RagIndexStatus.READY))
+
+    payload = asyncio.run(
+        _stage(trace, rag=gate, context_builder=_rag_builder(graph, BudgetRagBlobRepo())).run(_RUN)
+    )
+
+    assert payload is not None
+    assert payload.degraded_error_codes == ("bitbucket_request_budget_exceeded",)
+    build = next(response for tool, _, response in trace.steps if tool == "context.build")
+    assert build["degraded_error_codes"] == ["bitbucket_request_budget_exceeded"]
+
+
+@pytest.mark.usefixtures("capable")
+def test_rag_base_tree_budget_failure_records_degraded_code_in_context_build() -> None:
+    class BudgetBaseTreeRepo(RagRepository):
+        async def tree(self, revision: str) -> RevisionTree:
+            if revision == "c" * 40:
+                raise RunFailure("bitbucket_request_budget_exceeded", "budget exhausted")
+            return await super().tree(revision)
+
+    snapshots = [
+        DiffSnapshot(
+            "src/app.py",
+            _stored(
+                "src/app.py",
+                "@@ -1,3 +1,3 @@\n def greet(name):\n"
+                "-    extra = 1\n+    extra = 2\n     return name",
+            ),
+            "d" * 40,
+            "modified",
+            None,
+            1,
+            1,
+            2,
+        ),
+        DiffSnapshot(
+            "generated/api.py",
+            _stored("generated/api.py", "@@ -1 +1 @@\n-a\n+b"),
+            "e" * 40,
+            "modified",
+            None,
+            1,
+            1,
+            2,
+            omission_reason="generated",
+        ),
+    ]
+    graph = _greet_hints("src/main.py")
+    trace = Trace()
+    gate, _ = _gate(_readiness(RagIndexStatus.READY))
+
+    payload = asyncio.run(
+        _stage(
+            trace,
+            snapshots=snapshots,
+            rag=gate,
+            context_builder=_rag_builder(graph, BudgetBaseTreeRepo()),
+        ).run(_RUN)
+    )
+
+    assert payload is not None
+    assert payload.degraded_error_codes == ("bitbucket_request_budget_exceeded",)
+    build = next(response for tool, _, response in trace.steps if tool == "context.build")
+    assert build["degraded_error_codes"] == ["bitbucket_request_budget_exceeded"]

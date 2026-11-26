@@ -253,6 +253,8 @@ CONTEXT_DEGRADATION_BASE_TEXTS: dict[str, str] = {
     "bitbucket_response_budget_exceeded": "Исчерпан бюджет ответов Bitbucket для одного прогона.",
 }
 
+_CONTEXT_DEGRADATION_TAIL = "Часть дополнительного контекста репозитория в ревью не попала."
+
 
 def degraded_budget_error_code(exc: BaseException) -> str | None:
     """Return catalog error_code if ``exc`` is a Bitbucket budget failure for optional context."""
@@ -268,25 +270,28 @@ def context_degradation_note(error_code: str | None) -> str | None:
     base = CONTEXT_DEGRADATION_BASE_TEXTS.get(error_code)
     if base is None:
         return None
-    return f"{base} Ревью выполнено только по diff без дополнительного контекста репозитория."
+    return f"{base} {_CONTEXT_DEGRADATION_TAIL}"
 
 
 def context_degradation_note_from_response(response_value: object) -> str | None:
     """Extract a user-visible degradation note from a stored ``context.build`` response."""
     if not isinstance(response_value, Mapping):
         return None
-    notes: list[str] = []
+    bases: list[str] = []
     degraded_codes = response_value.get("degraded_error_codes")
     if isinstance(degraded_codes, Sequence) and not isinstance(degraded_codes, (str, bytes)):
         for code in degraded_codes:
             if isinstance(code, str):
-                note = context_degradation_note(code)
-                if note is not None and note not in notes:
-                    notes.append(note)
+                base = CONTEXT_DEGRADATION_BASE_TEXTS.get(code)
+                if base is not None and base not in bases:
+                    bases.append(base)
     error = response_value.get("error")
     if isinstance(error, Mapping):
         code = error.get("code")
-        note = context_degradation_note(code if isinstance(code, str) else None)
-        if note is not None and note not in notes:
-            notes.append(note)
-    return " ".join(notes) if notes else None
+        if isinstance(code, str):
+            base = CONTEXT_DEGRADATION_BASE_TEXTS.get(code)
+            if base is not None and base not in bases:
+                bases.append(base)
+    if not bases:
+        return None
+    return f"{' '.join(bases)} {_CONTEXT_DEGRADATION_TAIL}"

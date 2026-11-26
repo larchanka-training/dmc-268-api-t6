@@ -1384,6 +1384,22 @@ def test_store_review_output_surfaces_bitbucket_budget_note(
     assert expected_phrase in stored_body
 
 
+def test_context_degradation_note_from_response_joins_multiple_codes_with_single_tail() -> None:
+    from app.modules.reviews.application.run_failures import context_degradation_note_from_response
+
+    note = context_degradation_note_from_response(
+        {
+            "degraded_error_codes": ["bitbucket_request_budget_exceeded"],
+            "error": {"code": "bitbucket_response_budget_exceeded"},
+        }
+    )
+    assert note == (
+        "Лимит запросов к Bitbucket для ревью исчерпан. "
+        "Исчерпан бюджет ответов Bitbucket для одного прогона. "
+        "Часть дополнительного контекста репозитория в ревью не попала."
+    )
+
+
 def test_finalize_stored_review_body_repack_preserves_context_degradation_note() -> None:
     from app.modules.reviews.application.findings_post_processor import (
         FindingsPostProcessor,
@@ -1401,12 +1417,12 @@ def test_finalize_stored_review_body_repack_preserves_context_degradation_note()
             "severity": "low",
             "category": "correctness",
             "title": f"Overflow {number}",
-            "body": "x" * (1173 + (number % 3)),
+            "body": "x" * 955,
             "suggestion": None,
             "confidence": 0.4,
             "rule_name": None,
         }
-        for number in range(1, 7)
+        for number in range(1, 5)
     ]
     parsed = parse_review_output(
         {
@@ -1432,6 +1448,7 @@ def test_finalize_stored_review_body_repack_preserves_context_degradation_note()
         run_url="https://ui.test/runs/00000000-0000-0000-0000-000000000408",
     )
     assert len(repacked.review_body) <= 4000
-    assert repacked.omitted_body_only_count > 0
+    assert repacked.omitted_body_only_count > processed.omitted_body_only_count
     assert "**Ограничение контекста:**" in repacked.review_body
     assert "Исчерпан бюджет ответов Bitbucket" in repacked.review_body
+    assert "Часть дополнительного контекста репозитория в ревью не попала." in repacked.review_body
