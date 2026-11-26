@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.common.application.languages import LANGUAGE_BY_SUFFIX, classify_languages
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.reviews.application.policy_documents import normalize_document_text
 from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
     ManifestBlock,
@@ -162,9 +163,7 @@ def build_conventions_manifest(
         ):
             agents_text = effective_snapshot.agents.text
         else:
-            agents_text = (
-                request.agents_md.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
-            )
+            agents_text = normalize_document_text(request.agents_md)
         agents_rev = (
             effective_snapshot.policy_base_sha if effective_snapshot is not None else effective_sha
         )

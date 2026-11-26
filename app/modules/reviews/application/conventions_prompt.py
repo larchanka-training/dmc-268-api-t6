@@ -8,6 +8,7 @@ from app.modules.reviews.application.conventions import (
     ConventionsRequest,
     render_repository_file,
 )
+from app.modules.reviews.application.policy_documents import normalize_document_text
 from app.modules.reviews.application.prompt_budget import TokenCounter
 from app.modules.reviews.application.prompt_builder import (
     ReviewPrompt,
@@ -48,10 +49,7 @@ def build_conventions_prompt(request: ConventionsRequest) -> ReviewPrompt:
         if request.snapshot is not None
         and request.snapshot.agents.is_present
         and request.snapshot.agents.text is not None
-        else (request.agents_md or "")
-        .removeprefix("\ufeff")
-        .replace("\r\n", "\n")
-        .replace("\r", "\n")
+        else normalize_document_text(request.agents_md or "")
     )
     user = "\n".join(
         (

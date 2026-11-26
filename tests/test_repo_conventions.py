@@ -995,6 +995,90 @@ def test_conventions_execution_with_bom_and_lone_cr_in_agents_md() -> None:
     assert req.snapshot is snapshot
 
 
+@pytest.mark.parametrize(
+    ("raw_agents_md", "expected_agents_md"),
+    [
+        ("\ufeffAlways use uv.\nKeep diffs small.\n", "Always use uv.\nKeep diffs small.\n"),
+        ("Always use uv.\rKeep diffs small.\n", "Always use uv.\nKeep diffs small.\n"),
+        (
+            "\ufeffAlways use uv.\r\nKeep diffs small.\rDone.\n",
+            "Always use uv.\nKeep diffs small.\nDone.\n",
+        ),
+    ],
+)
+def test_conventions_without_snapshot_normalizes_bom_and_line_endings(
+    raw_agents_md: str, expected_agents_md: str
+) -> None:
+    from hashlib import sha256
+
+    from app.modules.reviews.application.llm import RunCallContext
+    from app.modules.reviews.application.prompt_builder import xml_container, xml_text
+    from app.modules.reviews.infrastructure.llm.gateway import (
+        HeuristicTokenCounter,
+        StructuredTask,
+    )
+    from app.modules.reviews.infrastructure.llm.models import GatewayConventionsModel
+
+    class RawAgentsSource(FakeSource):
+        async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot:
+            return RepositorySnapshot(content=raw_agents_md, sha=AGENTS_SHA)
+
+    captured_tasks: list[StructuredTask] = []
+
+    class FakeGateway:
+        def max_prompt_tokens(self, engine: object = None) -> int:
+            return 4_000
+
+        def call_timeout_s(self, engine: object = None) -> float:
+            return 90.0
+
+        def token_counter(self) -> HeuristicTokenCounter:
+            return HeuristicTokenCounter(4.0)
+
+        async def generate(self, task: StructuredTask, run: object) -> object:
+            captured_tasks.append(task)
+
+            class Resp:
+                output = draft()
+
+            return Resp()
+
+    run_ctx = RunCallContext(
+        run_id=RUN_ID,
+        workspace_id=uuid4(),
+        attempt=1,
+        engine="fast",
+        deadline=datetime(2026, 10, 23, 18, 0, tzinfo=UTC),
+    )
+    store = FakeStore()
+    factory = FakeUnitOfWorkFactory(store)
+
+    _ = asyncio.run(
+        GenerateRepoConventions(
+            RawAgentsSource(),
+            GatewayConventionsModel(FakeGateway(), run_ctx),  # type: ignore[arg-type]
+            factory,
+        ).execute(
+            repository_id=REPOSITORY_ID,
+            conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
+            run_id=RUN_ID,
+            changed_files=("app/main.py",),
+            snapshot=None,
+        )
+    )
+    assert len(captured_tasks) == 1
+    task = captured_tasks[0]
+    user_prompt = task.messages[1].content
+    assert "\ufeff" not in user_prompt
+    assert "\r" not in user_prompt
+    assert xml_container("agents_md", xml_text(expected_agents_md)) in user_prompt
+
+    assert task.base_manifest is not None
+    agents_block = next(b for b in task.base_manifest.blocks if b.block_id == "agents-md")
+    assert agents_block.content_sha256 == sha256(expected_agents_md.encode("utf-8")).hexdigest()
+    assert agents_block.shown_line_count == len(expected_agents_md.splitlines())
+
+
 def test_draft_conventions_counter_v1_matches_transport() -> None:
     import json
     from dataclasses import replace
