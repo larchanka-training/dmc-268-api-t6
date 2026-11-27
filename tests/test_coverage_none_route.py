@@ -229,8 +229,49 @@ def _too_large(lines: int) -> list[DiffSnapshot]:
     )
 
 
-def test_a_too_large_change_takes_the_route_up_to_the_summary_only_threshold() -> None:
-    at_limit, over = _too_large(3000), _too_large(3001)
+def _missing_patch(lines: int) -> list[DiffSnapshot]:
+    """A missing-patch text file stored as the processor stores it: counted allowed."""
+
+    @dataclass
+    class Snapshots:
+        async def store_diff_snapshots(
+            self, run_id: UUID, code_change_id: UUID, head_sha: str, snapshots: list[DiffSnapshot]
+        ) -> list[DiffSnapshot]:
+            return snapshots
+
+    files = [
+        DiffSnapshot(
+            "src/missing.txt",
+            None,
+            "d" * 40,
+            additions=lines,
+            changes=lines,
+            omission_reason="missing_patch",
+        )
+    ]
+    return asyncio.run(
+        StoreDiffSnapshot(Snapshots()).execute(
+            run_id=RUN_ID,
+            code_change_id=UUID(int=7),
+            head_sha="a" * 40,
+            files=files,
+            excluded=lambda snapshot: False,
+        )
+    )
+
+
+def test_too_large_only_stays_none_and_missing_patch_keeps_the_summary_only_threshold() -> None:
+    large = _too_large(25_000)
+    assert [item.summary_only for item in large] == [False]
+    large_run = _stage(large)
+    with pytest.raises(NoReviewableText):
+        asyncio.run(large_run.stage.run(RUN_ID))
+    assert large_run.builder.runs == []
+    [large_response] = large_run.steps("context.build")
+    assert large_response["coverage"]["status"] == "none"
+    assert large_response["status"] == "no_reviewable_text"
+
+    at_limit, over = _missing_patch(3000), _missing_patch(3001)
     assert [item.summary_only for item in (*at_limit, *over)] == [False, True]
 
     routed = _stage(at_limit)
@@ -238,7 +279,7 @@ def test_a_too_large_change_takes_the_route_up_to_the_summary_only_threshold() -
         asyncio.run(routed.stage.run(RUN_ID))
     assert routed.builder.runs == []
 
-    # Over the threshold the change stops before the builder (#313).
+    # Over the threshold the incomplete change stops before the builder (#313).
     summary = _stage(over)
     with pytest.raises(SummaryOnlyReview):
         asyncio.run(summary.stage.run(RUN_ID))

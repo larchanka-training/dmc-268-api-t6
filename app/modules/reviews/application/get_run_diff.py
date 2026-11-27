@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 from uuid import UUID
 
+from app.modules.reviews.application.diff_map import is_supported_path
 from app.modules.reviews.application.prompt_builder import ChangedFile, FileStatus
 from app.modules.reviews.application.vcs_diff import (
     VcsFile,
@@ -177,9 +178,33 @@ def _normalize_snapshot(snapshot: DiffSnapshot) -> DiffSnapshot:
     )
 
 
-# Binary and generated files are exclusions and add nothing to the threshold. A text file
-# whose patch is missing or too large is incompleteness: its lines still count.
-_UNCOUNTED_OMISSIONS = frozenset({"binary", "generated"})
+# Proven exclusions E and technical skips T do not enter the counted-allowed LLM
+# threshold (CVS §2.2-§2.3). Incomplete text files (e.g. missing/truncated/malformed)
+# still count their lines.
+_UNCOUNTED_OMISSIONS = frozenset(
+    {
+        "binary",
+        "generated",
+        "empty_file",
+        "too_large",
+        "unsupported_change",
+        "unsupported_path",
+        "identity_unresolved",
+    }
+)
+
+
+def _is_uncounted_snapshot(file: DiffSnapshot) -> bool:
+    """Whether ``file`` is an exclusion E or technical skip T outside counted allowed."""
+    if file.omission_reason in _UNCOUNTED_OMISSIONS:
+        return True
+    if not is_supported_path(file.filename):
+        return True
+    if file.status == "renamed" and (
+        file.previous_filename is None or not is_supported_path(file.previous_filename)
+    ):
+        return True
+    return file.patch is not None and "\x00" in file.patch
 
 
 def over_max_diff_lines(
@@ -200,15 +225,14 @@ def over_max_diff_lines(
 
 
 def _changed_line_count(files: list[DiffSnapshot]) -> int:
-    """Added and removed lines of the allowed changes by the counters of the VCS.
+    """Added and removed lines of counted-allowed changes by the counters of the VCS.
 
     Hunk headers and context lines of a patch are not changes, and a file whose patch
-    the provider did not send is not zero changes.
+    the provider did not send is not zero changes. Exclusions E and technical skips T
+    are excluded from the threshold (CVS §2.3).
     """
     return sum(
-        file.additions + file.deletions
-        for file in files
-        if file.omission_reason not in _UNCOUNTED_OMISSIONS
+        file.additions + file.deletions for file in files if not _is_uncounted_snapshot(file)
     )
 
 

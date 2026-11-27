@@ -648,6 +648,76 @@ def test_exactly_three_thousand_allowed_lines_still_calls_the_review_model() -> 
     assert any(call.get("operation") == "review" for call in _calls(outcome.trace))
 
 
+def _too_large(lines: int) -> VcsFile:
+    """One technical-skip ``too_large`` file whose raw VCS counters exceed the threshold."""
+    return VcsFile(
+        "data/large.txt",
+        "modified",
+        _TEXT_BLOB,
+        None,
+        lines,
+        0,
+        lines,
+        None,
+        omission_reason=OmissionReason.TOO_LARGE,
+    )
+
+
+def test_too_large_next_to_allowed_code_reviews_allowed_lines_with_partial_coverage() -> None:
+    outcome = _run((_too_large(20_001), _text(1)), files_changed=2, version="v5")
+    build = _context(outcome.trace)
+
+    assert outcome.skipped is None
+    assert outcome.result is True
+    assert build["status"] != "summary_only"
+    assert build["reason"] != "diff_too_large"
+    assert build["coverage"]["status"] == "partial"
+    assert build["coverage"]["reason_counts"] == {"too_large": 1}
+    assert build["coverage"]["reviewed_files"] == 1
+    assert any(call.get("operation") == "review" for call in _calls(outcome.trace))
+
+
+def test_too_large_only_over_threshold_is_not_diff_too_large() -> None:
+    outcome = _run((_too_large(20_001),), files_changed=1, version="v5")
+    build = _context(outcome.trace)
+
+    assert outcome.skipped is None
+    assert outcome.result is True
+    assert build["status"] == "no_reviewable_text"
+    assert build["reason"] == "no_reviewable_text"
+    assert build["coverage"]["status"] == "none"
+    assert build["coverage"]["reason_counts"] == {"too_large": 1}
+    _assert_no_model_call(outcome.trace)
+
+
+def test_three_thousand_allowed_lines_next_to_technical_and_excluded_files_calls_model() -> None:
+    bad_path = VcsFile("src\\bad.py", "modified", _TEXT_BLOB, None, 4_000, 0, 4_000, None)
+    unresolved = VcsFile("src/moved.py", "renamed", _TEXT_BLOB, None, 4_000, 0, 4_000, None)
+    outcome = _run(
+        (_text(3_000), _too_large(20_001), _LOCK, bad_path, unresolved),
+        files_changed=5,
+        version="v5",
+    )
+    build = _context(outcome.trace)
+
+    assert outcome.skipped is None
+    assert outcome.result is True
+    assert build["status"] != "summary_only"
+    assert build["coverage"]["reviewed_files"] == 1
+    assert any(call.get("operation") == "review" for call in _calls(outcome.trace))
+
+
+def test_three_thousand_one_allowed_lines_next_to_too_large_stops_as_diff_too_large() -> None:
+    outcome = _run((_text(3_001), _too_large(20_001)), files_changed=2, version="v5")
+    build = _context(outcome.trace)
+
+    assert outcome.skipped is None
+    assert outcome.result is True
+    assert build["status"] == "summary_only"
+    assert build["reason"] == "diff_too_large"
+    _assert_no_model_call(outcome.trace)
+
+
 def test_legacy_technical_only_change_is_not_summary_only_no_reviewable_files() -> None:
     # v2 is legacy. One too-large line is the inventory #130 left on the model path.
     too_large = VcsFile(
