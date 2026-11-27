@@ -19,7 +19,8 @@ from app.modules.reviews.application.conventions import RepositoryFile
 from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsMetadataProvider
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
-from tests.github_run_source_fakes import BASE, HEAD, Blobs, Runs
+from tests.github_run_source_fakes import BASE, HEAD, LOCATOR, Blobs, Runs
+from tests.github_vcs_payload_fakes import _pull_payload
 
 
 def _source(tree: dict[str, Any], blobs: Blobs, *, revision: str = HEAD) -> GitHubRunSource:
@@ -204,31 +205,7 @@ def test_get_pull_request_meta_makes_zero_compare_requests() -> None:
         if request.url.path.endswith("/commits"):
             return httpx.Response(200, json=[{"commit": {"message": "commit msg"}}])
         if request.url.path.endswith("/pulls/7"):
-            return httpx.Response(
-                200,
-                json={
-                    "id": 101,
-                    "number": 7,
-                    "title": "Title",
-                    "body": None,
-                    "user": {"login": "octo"},
-                    "head": {
-                        "ref": "feature",
-                        "sha": HEAD,
-                        "repo": {"full_name": "octo/repo"},
-                    },
-                    "base": {
-                        "ref": "main",
-                        "sha": BASE,
-                        "repo": {"full_name": "octo/repo"},
-                    },
-                    "labels": [],
-                    "draft": False,
-                    "changed_files": 1,
-                    "additions": 1,
-                    "deletions": 0,
-                },
-            )
+            return httpx.Response(200, json=_pull_payload(changed_files=1, head_sha=HEAD))
         return httpx.Response(200, json={})
 
     from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
@@ -250,7 +227,8 @@ def test_get_pull_request_meta_makes_zero_compare_requests() -> None:
             )
             meta = await source.get_pull_request_meta(uuid4())
             assert meta is not None
-            assert meta.title == "Title"
+            assert LOCATOR.repository_full_name == "octo/repo"
+            assert meta.title == "Fix parser"
             assert meta.commit_messages == ("commit msg",)
             assert meta.diff_old_sha is None
             return client
