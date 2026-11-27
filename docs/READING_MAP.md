@@ -45,6 +45,7 @@
 | Таблица, поле, миграция | [SD §11](SYSTEM_DESIGN.md#11-данные-согласование-с-erd-роли-6), [CVS §8.3](CONTEXT_AND_VERIFICATION_SPEC.md#83-хранилище-и-миграция) |
 | Вход и сессия | [SD §6.5](SYSTEM_DESIGN.md#65-вход-и-сессия-d4) |
 | GitHub App: установка и переустановка | [SD §6.9](SYSTEM_DESIGN.md#69-подключение-репозиториев-установка-github-app-d10) |
+| Удаление workspace и отвязка App | [ADR 0003](adr/0003-workspace-deletion.md), [SD §6.9](SYSTEM_DESIGN.md#69-подключение-репозиториев-установка-github-app-d10) |
 | Выбор модели LLM, OQ-2, аудит #178 | [SYSTEM_DESIGN_LLM_LOG.md](SYSTEM_DESIGN_LLM_LOG.md) |
 
 ## SYSTEM_DESIGN.md
