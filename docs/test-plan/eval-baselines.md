@@ -1,4 +1,4 @@
-# TEST_PLAN §3.2.1–3.2.6: зафиксированные raw baselines
+# TEST_PLAN §3.2.1–3.2.7: зафиксированные raw baselines
 
 Вынесено из [TEST_PLAN §3.2.1–3.2.5](../TEST_PLAN.md#321-зафиксированный-raw-baseline-82-2026-10-13) в #380. Правила сопоставления и счётчики — в TEST_PLAN §3.2.
 
@@ -357,3 +357,11 @@ repair/latency/cost saving не измерены. Effective settings полно�
 На v2 → v3 strict вырос, а колонка после нормализации упала. У v5 ответ идёт по контракту ReviewOutput v2 без префикса атрибуции: 31 находка из 34 несёт `service-defaults:<id>`, 3 без правила, поэтому потери нет. Это разные съёмки, а не контролируемый эксперимент.
 
 Воспроизведение исторической строки: `git archive <revision> test-prs-dataset/responses | tar -x -C <dir>`, затем `uv run python review/scripts/eval_replay.py --responses-dir <dir>/test-prs-dataset/responses`. Ревизии: 2026-10-15 — `47f9add7`, 2026-10-20 — `973218054ef2c9a32f1e75a955284323196ffafd`. Такой прогон печатает предупреждения о pinned-входах: байты старше текущего списка.
+
+## 3.2.7. Метрика корректности suggestion на зафиксированном baseline (#446)
+
+Нормативный контракт классификации (`valid`, `invalid`, `unchecked`) зафиксирован в [TEST_PLAN.md §3.2.7](../TEST_PLAN.md#327-метрика-корректности-предложений-правок-suggestions-446).
+
+Замер на зафиксированном 24-кейсном baseline `review.system.v5` (`§3.2.5`, через `eval_replay.py`):
+- Строгая колонка (strict): **`10/15` валидных замен (`66.7%`, `unchecked=0`)**.
+- После нормализации шлюза (gateway_normalized): **`15/23` валидных (`65.2%`, `unchecked=0`)**.

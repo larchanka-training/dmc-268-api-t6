@@ -131,6 +131,59 @@ def _git_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 
 
+def apply_case_patch(
+    base: Path,
+    patch: Path,
+    *,
+    apply_directory: str | None = None,
+    check_only: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, bytes]]:
+    """Apply a unified patch onto a copy of ``base``, optionally checking only.
+
+    Returns ``(completed_process, file_bytes_by_relative_posix_path)``.
+    When ``check_only=True`` or when git apply fails, the second tuple element is empty.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        workdir = Path(tmp) / "worktree"
+        shutil.copytree(base, workdir)
+        command = ["git"]
+        if not check_only:
+            command.extend(["-c", "core.autocrlf=false"])
+        command.append("apply")
+        if check_only:
+            command.append("--check")
+        else:
+            command.append("--whitespace=nowarn")
+        if isinstance(apply_directory, str) and apply_directory:
+            command.append(f"--directory={apply_directory}")
+        # GIT_CEILING_DIRECTORIES prevents git from walking above the temporary tree
+        # to find an enclosing repository, which would cause git apply to evaluate
+        # against the parent index rather than the isolated temporary worktree.
+        env = {**_git_env(), "GIT_CEILING_DIRECTORIES": tmp}
+        applied = subprocess.run(
+            [*command, str(patch)],
+            cwd=workdir,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if applied.returncode != 0 or check_only:
+            return applied, {}
+
+        source_root = (
+            workdir / apply_directory
+            if isinstance(apply_directory, str) and apply_directory
+            else workdir
+        )
+        files = {
+            path.relative_to(source_root).as_posix(): path.read_bytes()
+            for path in source_root.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        }
+        return applied, files
+
+
 def _patch_lines(patch: Path) -> list[str]:
     """The patch split on LF only, a CR before the LF dropped, as production reads a diff.
 
@@ -500,23 +553,12 @@ def validate_case(
         return errors, None
     assert base is not None and patch is not None
 
-    with tempfile.TemporaryDirectory(prefix="dataset-case-") as tmp:
-        workdir = Path(tmp) / "worktree"
-        shutil.copytree(base, workdir)
-        command = ["git", "apply", "--check"]
-        if apply_directory is not None:
-            command.append(f"--directory={apply_directory}")
-        # The ceiling keeps git from finding a repository above the temp dir (TMPDIR inside a
-        # work tree): there ``git apply`` applies only what the index tracks and exits 0.
-        env = {**_git_env(), "GIT_CEILING_DIRECTORIES": tmp}
-        applied = subprocess.run(
-            [*command, str(patch)],
-            cwd=workdir,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+    applied, _ = apply_case_patch(
+        base,
+        patch,
+        apply_directory=apply_directory,
+        check_only=True,
+    )
     if applied.returncode != 0:
         detail = applied.stderr.strip() or applied.stdout.strip() or "git apply --check failed"
         return [f"patch_path: {detail}"], None
