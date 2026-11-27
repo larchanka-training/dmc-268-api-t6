@@ -52,7 +52,7 @@ class GitHubInstallationLinkStore(Protocol):
 
     async def current_workspace_ids(self, user_id: int) -> tuple[UUID, ...]: ...
 
-    async def link(self, user_id: int, installation: GitHubInstallation) -> UUID: ...
+    async def link(self, user_id: int, installation: GitHubInstallation) -> UUID | None: ...
 
     async def reconcile_repositories(
         self,
@@ -138,6 +138,8 @@ class LinkGitHubInstallations:
             await uow.links.lock_installations(tuple(unique_installations))
             for installation in unique_installations:
                 workspace_id = await uow.links.link(user_id, installation)
+                if workspace_id is None:
+                    continue
                 await uow.links.reconcile_repositories(
                     user_id,
                     installation.id,

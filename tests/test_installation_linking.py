@@ -81,6 +81,8 @@ class FakeLinks:
     commits: int = 0
     generations: dict[int, int] = field(default_factory=dict)
     applied: dict[int, int] = field(default_factory=dict)
+    link_results: dict[int, UUID | None] = field(default_factory=dict)
+    revoked: list[tuple[int, tuple[UUID, ...], tuple[int, ...]]] = field(default_factory=list)
 
     @property
     def links(self) -> FakeLinks:
@@ -120,9 +122,15 @@ class FakeLinks:
     async def current_workspace_ids(self, user_id: int) -> tuple[UUID, ...]:
         return tuple(sorted(workspace for owner, workspace in self.access if owner == user_id))
 
-    async def link(self, user_id: int, installation: GitHubInstallation) -> UUID:
+    async def link(self, user_id: int, installation: GitHubInstallation) -> UUID | None:
         self.link_order.append(installation.id)
         self.account_ids[installation.id] = installation.account_external_id
+        if installation.id in self.link_results:
+            result = self.link_results[installation.id]
+            if result is not None:
+                self.installations[installation.id] = result
+                self.access.add((user_id, result))
+            return result
         workspace_id = self.installations.setdefault(installation.id, uuid4())
         self.access.add((user_id, workspace_id))
         return workspace_id
@@ -148,6 +156,7 @@ class FakeLinks:
     async def revoke_unlisted(
         self, user_id: int, workspace_ids: tuple[UUID, ...], installation_ids: tuple[int, ...]
     ) -> None:
+        self.revoked.append((user_id, workspace_ids, installation_ids))
         self.access = {
             entry for entry in self.access if entry[0] != user_id or entry[1] in workspace_ids
         }
@@ -894,3 +903,29 @@ def test_database_fresh_oauth_establishes_only_exact_legacy_installation_identit
             await engine.dispose()
 
     asyncio.run(exercise())
+
+
+def test_deleted_workspace_installation_skips_reconcile_and_preserves_other_installations() -> None:
+    inst_deleted = GitHubInstallation(17, "deleted-org", (101,))
+    inst_active = GitHubInstallation(29, "active-org", (201,))
+    github = FakeGitHub(AuthenticatedGitHubInstallations(41, (inst_deleted, inst_active)))
+    links = FakeLinks()
+    active_ws = uuid4()
+    links.link_results = {17: None, 29: active_ws}
+
+    use_case = LinkGitHubInstallations(github=github, uow_factory=lambda: links)
+    workspace_ids = asyncio.run(use_case.execute("user-token"))
+
+    # Result contains only the workspace of the active installation
+    assert workspace_ids == (active_ws,)
+
+    # For deleted installation (17): no reconcile_repositories and no wake_receipts
+    assert 17 not in links.replayable
+    assert not any(entry[1] == 17 for entry in links.repository_access)
+
+    # For active installation (29): reconcile_repositories and wake_receipts called
+    assert 29 in links.replayable
+    assert (41, 29, 201) in links.repository_access
+
+    # revoke_unlisted called with user_id, (active_ws,), and (17, 29)
+    assert links.revoked == [(41, (active_ws,), (17, 29))]

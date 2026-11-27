@@ -46,6 +46,7 @@ from app.modules.repositories.infrastructure.rule_version_repository import (
 )
 from app.modules.reviews.infrastructure.models import PromptVersion, Run
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunStore
+from app.modules.workspaces.domain.status import WorkspaceStatus
 from app.modules.workspaces.infrastructure.models import Workspace
 
 
@@ -95,7 +96,10 @@ class SqlAlchemyGitLabConnectionStore:
         self._rules = SqlAlchemyRepositoryRuleVersionStore(session)
 
     async def workspace_exists(self, workspace_id: UUID, *, lock: bool = False) -> bool:
-        statement = select(Workspace.id).where(Workspace.id == workspace_id)
+        statement = select(Workspace.id).where(
+            Workspace.id == workspace_id,
+            Workspace.status != WorkspaceStatus.DELETED,
+        )
         if lock:
             statement = statement.with_for_update()
         return await self._session.scalar(statement) is not None
