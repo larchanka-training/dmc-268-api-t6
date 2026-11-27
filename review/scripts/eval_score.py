@@ -50,6 +50,17 @@ class ScoringCase:
     usage: tuple[Mapping[str, Any], ...] | None = None
     arm: str | None = None
     must_not_flag: tuple[dict[str, Any], ...] = ()
+    # Per-case review latency from the capture (``run_metadata.latency_ms``). ``None`` when
+    # that capture did not record one. Never a production duration.
+    latency_ms: int | None = None
+
+
+# Finding-level FP/(FP+TN) is undefined: the corpus does not list non-defects. The rate below
+# is the share of interpretable cases that have no truth and at least one finding.
+CLEAN_CASE_FPR_METHOD = "clean_case"
+# The only duration this scorer reads. Production ``succeededAverageDurationSeconds`` is a
+# different source and is never filled in here.
+EVAL_CAPTURE_TIME_SOURCE = "eval_capture"
 
 
 def _in_arm(item: Mapping[str, Any], arm: str | None) -> bool:
@@ -63,6 +74,40 @@ def _rule_made(truth: Mapping[str, Any]) -> bool:
 
 def _ratio(numerator: int, denominator: int) -> float | None:
     return numerator / denominator if denominator else None
+
+
+def _percent(value: float | None) -> str:
+    return "undefined" if value is None else f"{value * 100:.1f}%"
+
+
+def metric_lines(scored: Mapping[str, Any]) -> list[str]:
+    """Console lines for clean-case FPR and mean review time, each with both counts.
+
+    Empty when the report predates these fields, so older console fixtures stay exact.
+    """
+    if "false_positive_rate" not in scored or "review_time" not in scored:
+        return []
+    fpr = scored["false_positive_rate"]
+    timing = scored["review_time"]
+    fpr_line = (
+        f"Clean-case FPR: {_percent(fpr['rate'])} "
+        f"({fpr['flagged']}/{fpr['interpretable_negative_cases']}) method={fpr['method']}"
+    )
+    if fpr["uninterpretable_negative_cases"]:
+        fpr_line += f" uninterpretable_negative_cases={fpr['uninterpretable_negative_cases']}"
+    if timing["mean_ms"] is None:
+        shown = "undefined"
+    else:
+        shown = f"{timing['mean_ms']:.1f} {timing['unit']}"
+    time_line = (
+        f"Mean review time: {shown} ({timing['total_ms']}/{timing['cases']}) "
+        f"source={timing['source']}"
+    )
+    recorded = timing["recorded_cases"]
+    corpus = timing["corpus_cases"]
+    if recorded not in (0, corpus):
+        time_line += f" recorded={recorded}/{corpus}"
+    return [fpr_line, time_line]
 
 
 def _predictions(case: ScoringCase) -> list[dict[str, Any]] | None:
@@ -179,6 +224,7 @@ def score_cases(cases: Sequence[ScoringCase]) -> dict[str, Any]:
     valid_count = verdict_agreed = 0
     rule_total = rule_found = rule_expected = 0
     exceptions_total = exceptions_exempt = exceptions_flagged = 0
+    flagged_negative = interpretable_negative = uninterpretable_negative = 0
 
     for case in cases:
         # Positions in case.truths, so reported indices stay those of case.json.
@@ -207,6 +253,13 @@ def score_cases(cases: Sequence[ScoringCase]) -> dict[str, Any]:
         total_tp += case_tp
         total_fp += case_fp
         total_fn += case_fn
+        if not truths:
+            if valid:
+                interpretable_negative += 1
+                if case_fp:
+                    flagged_negative += 1
+            else:
+                uninterpretable_negative += 1
         unmatched = [
             item for index, item in enumerate(predictions) if index not in matched_predictions
         ]
@@ -324,5 +377,83 @@ def score_cases(cases: Sequence[ScoringCase]) -> dict[str, Any]:
             "share": _ratio(exceptions_total - exceptions_flagged, exceptions_total),
         },
         "usage": _usage_totals(cases),
+        "false_positive_rate": {
+            "method": CLEAN_CASE_FPR_METHOD,
+            "flagged": flagged_negative,
+            "interpretable_negative_cases": interpretable_negative,
+            "uninterpretable_negative_cases": uninterpretable_negative,
+            "rate": _ratio(flagged_negative, interpretable_negative),
+        },
+        "review_time": _review_time(cases),
         "cases": case_reports,
     }
+
+
+def _review_time(cases: Sequence[ScoringCase]) -> dict[str, Any]:
+    """Mean of a complete eval-capture latency sample. A gap makes the mean undefined.
+
+    The ratio is ``0/0`` unless every case recorded a non-negative ``latency_ms``. A partial
+    sum is not reported as the mean, and no other source is consulted.
+    """
+    recorded = [
+        case.latency_ms for case in cases if type(case.latency_ms) is int and case.latency_ms >= 0
+    ]
+    complete = len(cases) > 0 and len(recorded) == len(cases)
+    total_ms = sum(recorded) if complete else 0
+    timed_cases = len(cases) if complete else 0
+    return {
+        "source": EVAL_CAPTURE_TIME_SOURCE,
+        "unit": "ms",
+        "total_ms": total_ms,
+        "cases": timed_cases,
+        "mean_ms": (total_ms / timed_cases) if complete else None,
+        "recorded_cases": len(recorded),
+        "corpus_cases": len(cases),
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Score a recorded capture and print clean-case FPR and mean review time."""
+    import argparse
+    import sys
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Score recorded raw responses. Prints clean-case false positive rate and "
+            "mean review time, each with its numerator and denominator. "
+            "Does not call a model."
+        )
+    )
+    parser.add_argument("--root", type=Path, default=None, help="dataset root")
+    parser.add_argument(
+        "--responses-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="capture directory (<root>/responses)",
+    )
+    args = parser.parse_args(argv)
+    from review.scripts.eval_replay import DEFAULT_ROOT, ReplayError, format_console, replay
+
+    try:
+        report = replay(
+            DEFAULT_ROOT if args.root is None else args.root,
+            responses_dir=args.responses_dir,
+        )
+    except (ReplayError, OSError) as exc:
+        print(f"eval_score: {exc}", file=sys.stderr)
+        return 1
+    print(format_console(report))
+    if not report["provenance"]["run_metadata"]["baseline_publishable"]:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+
+    if __package__ in (None, ""):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    raise SystemExit(main())
