@@ -336,6 +336,87 @@ def test_collapsed_file_leaves_file_list_incomplete_without_invented_zero_counts
     ]
 
 
+def test_collapsed_normal_file_alongside_code_marks_inventory_incomplete() -> None:
+    async def scenario() -> None:
+        router = Router()
+        router.files = [
+            router.files[0],
+            {**router.files[1], "diff": "", "collapsed": True},
+        ]
+        router.canonical["changes_count"] = "2"
+        async with GitLabRunHttp(
+            credentials=Credentials(),
+            origin_policy=POLICY,
+            transport=httpx.MockTransport(router.response),
+        ) as http:
+            value = await FetchVcsReviewInput(
+                HttpGitLabVcsProvider(http=http), checkpoint=checkpoint
+            ).execute(INPUT.locator, INPUT.head_sha, INPUT.base_sha)
+        assert [item.filename for item in value.files] == ["src/new.py"]
+        assert [item.path for item in value.changed_files] == ["src/new.py"]
+        assert value.pull_request.meta.files_changed == 2
+        diff_map = build_diff_map(
+            value.pull_request,
+            value.files,
+            provider=VcsProviderName.GITLAB,
+            repository_id=INPUT.repository_id,
+            diff_old_sha=None,
+        )
+        assert diff_map.file_list_complete is False
+        assert diff_map.incomplete_reasons == ("file_count_mismatch",)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "generated_path",
+    ["package-lock.json", "dist/app.js", "src/__snapshots__/a.test.ts.snap"],
+)
+def test_collapsed_built_in_generated_file_stays_generated_alongside_code(
+    generated_path: str,
+) -> None:
+    async def scenario() -> None:
+        router = Router()
+        router.files = [
+            router.files[0],
+            {
+                "old_path": generated_path,
+                "new_path": generated_path,
+                "new_file": False,
+                "deleted_file": False,
+                "renamed_file": False,
+                "diff": "",
+                "collapsed": True,
+                "generated_file": False,
+            },
+        ]
+        router.canonical["changes_count"] = "2"
+        async with GitLabRunHttp(
+            credentials=Credentials(),
+            origin_policy=POLICY,
+            transport=httpx.MockTransport(router.response),
+        ) as http:
+            value = await FetchVcsReviewInput(
+                HttpGitLabVcsProvider(http=http), checkpoint=checkpoint
+            ).execute(INPUT.locator, INPUT.head_sha, INPUT.base_sha)
+        assert [(item.file.filename, item.reason) for item in value.omissions] == [
+            (generated_path, OmissionReason.GENERATED)
+        ]
+        assert [item.path for item in value.changed_files] == ["src/new.py"]
+        assert value.pull_request.meta.files_changed == 2
+        diff_map = build_diff_map(
+            value.pull_request,
+            value.files,
+            provider=VcsProviderName.GITLAB,
+            repository_id=INPUT.repository_id,
+            diff_old_sha=None,
+        )
+        assert diff_map.file_list_complete is True
+        assert diff_map.incomplete_reasons == ()
+
+    asyncio.run(scenario())
+
+
 def test_an_unreadable_patch_leaves_the_file_list_incomplete_instead_of_failing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

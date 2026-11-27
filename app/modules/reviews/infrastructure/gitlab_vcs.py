@@ -39,6 +39,7 @@ from app.modules.reviews.application.commit_prefix_limits import (
     MAX_COMMIT_MESSAGES,
     commit_prefix_incomplete,
 )
+from app.modules.reviews.application.diff_map import is_supported_path
 from app.modules.reviews.application.prompt_builder import (
     FileStatus,
     PullRequestMeta,
@@ -59,6 +60,7 @@ from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
     VcsFile,
     VcsPullRequest,
+    is_generated_path,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -432,11 +434,18 @@ class HttpGitLabVcsProvider:
         patch = data.get("diff")
         if patch is not None:
             patch = _text(patch, 8388608, empty=True) or None
-        reason = None
-        if _flag(data, "too_large"):
-            reason = OmissionReason.TOO_LARGE
+        too_large = _flag(data, "too_large")
         collapsed = _flag(data, "collapsed")
-        if _flag(data, "generated_file"):
+        generated = _flag(data, "generated_file")
+        reason: OmissionReason | None = None
+        if too_large:
+            reason = OmissionReason.TOO_LARGE
+        if generated or (
+            collapsed
+            and is_supported_path(new)
+            and (not renamed or is_supported_path(old))
+            and is_generated_path(new)
+        ):
             reason = OmissionReason.GENERATED
         if collapsed and reason is None:
             raise _UnknownLineCounts(new, cause="collapsed")

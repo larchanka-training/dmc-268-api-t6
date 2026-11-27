@@ -146,8 +146,14 @@ counted allowed, даже если patch отсутствует. Raw counters E/
 идут в backend partial. При malformed parser error текущий DiffMap не сохраняет
 hunks; raw malformed patch не становится L1. Оба триггера §2.3 проверяются раньше.
 Patch GitHub, который парсер не читает, сохраняется как неполный файл, а не роняет run.
-GitLab считает строки файла по его hunks: такой файл не попадает в список, и inventory
-становится неполным (§2.3). Пока сборка L1 не берёт hunks truncated, truncated-only
+GitLab считает строки файла по его hunks: collapsed-запись без флага `too_large` /
+`generated_file` сохраняется в списке только при достоверных путях со
+встроенным `is_generated_path` (`OmissionReason.GENERATED`, чьи строки не входят
+в counted allowed по §2.3); прочие collapsed-файлы и нечитаемый patch не
+попадают в список, и inventory становится неполным (§2.3). Включая пути, которые
+могли бы совпасть с маской `review-ignore` (`.review/rules.md`): VCS-адаптер
+выполняется до загрузки policy/масок репозитория и при скрытых счётчиках не может
+доказать исключение по маске без чтения сырого patch. Пока сборка L1 не берёт hunks truncated, truncated-only
 с сохранившимися строками публикуется как summary-only `no_reviewable_files`.
 
 | Состав согласованного inventory | Исход целевого профиля #107 |
