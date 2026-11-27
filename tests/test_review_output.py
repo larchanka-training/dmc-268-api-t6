@@ -1292,7 +1292,9 @@ def test_publish_review_output_surfaces_bitbucket_budget_note(
     repo = CapturingRepo(ctx, _publication())
     assert (
         asyncio.run(
-            PublishReviewOutput(RecordingFactory(repo), provider).execute(RUN_ID, valid_output())
+            PublishReviewOutput(
+                RecordingFactory(repo), provider, parser=NullSuggestionParser()
+            ).execute(RUN_ID, valid_output())
         )
         is True
     )
@@ -1348,6 +1350,7 @@ def test_store_review_output_surfaces_bitbucket_budget_note(
     class FakeUoW:
         def __init__(self) -> None:
             self.reviews = fake_repo
+            self.blob_cache = None
 
         async def __aenter__(self) -> FakeUoW:
             return self
@@ -1376,6 +1379,7 @@ def test_store_review_output_surfaces_bitbucket_budget_note(
         worker_id="test-worker",
         expected_attempt=1,
         run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
     assert asyncio.run(store.execute(RUN_ID, valid_output())) is True
     assert fake_repo.finalized_processed is not None
