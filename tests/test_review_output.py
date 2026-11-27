@@ -1405,9 +1405,11 @@ def test_finalize_stored_review_body_repack_preserves_context_degradation_note()
         FindingsPostProcessor,
         finalize_stored_review_body,
     )
-    from app.modules.reviews.application.run_failures import context_degradation_note
+    from app.modules.reviews.application.run_failures import context_degradation_note_from_response
 
-    note = context_degradation_note("bitbucket_response_budget_exceeded")
+    note = context_degradation_note_from_response(
+        {"error": {"code": "bitbucket_response_budget_exceeded"}}
+    )
     assert note is not None
     notes = [
         {

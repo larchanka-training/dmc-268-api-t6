@@ -263,16 +263,6 @@ def degraded_budget_error_code(exc: BaseException) -> str | None:
     return None
 
 
-def context_degradation_note(error_code: str | None) -> str | None:
-    """Return user-visible degradation text when optional context hit a budget limit."""
-    if error_code is None:
-        return None
-    base = CONTEXT_DEGRADATION_BASE_TEXTS.get(error_code)
-    if base is None:
-        return None
-    return f"{base} {_CONTEXT_DEGRADATION_TAIL}"
-
-
 def context_degradation_note_from_response(response_value: object) -> str | None:
     """Extract a user-visible degradation note from a stored ``context.build`` response."""
     if not isinstance(response_value, Mapping):
