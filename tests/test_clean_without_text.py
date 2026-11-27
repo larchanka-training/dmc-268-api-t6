@@ -5,9 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import asdict, dataclass, field, replace
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import pytest
+
+if TYPE_CHECKING:
+    import httpx
 
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.get_run_diff import (
@@ -19,6 +23,7 @@ from app.modules.reviews.application.get_run_diff import (
 from app.modules.reviews.application.process_run import ReviewRunProcessor, RunVcsInput
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.vcs_diff import (
+    FetchedVcsReviewInput,
     FetchVcsReviewInput,
     PullRequestLocator,
     VcsFile,
@@ -347,10 +352,9 @@ def test_processor_does_not_fetch_empty_blob_for_optional_cache_on_first_run_or_
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("collapsed", [False, True])
-def test_gitlab_empty_added_blob_without_regular_file_proof_stays_missing_patch(
-    collapsed: bool,
-) -> None:
+async def _fetch_gitlab_empty_added(
+    *, collapsed: bool
+) -> tuple[FetchedVcsReviewInput, list[httpx.Request]]:
     import httpx
 
     from app.modules.integrations.gitlab.infrastructure.run_http import GitLabRunHttp
@@ -359,47 +363,55 @@ def test_gitlab_empty_added_blob_without_regular_file_proof_stays_missing_patch(
     from tests.test_gitlab_run_http import INPUT, POLICY, Credentials
     from tests.test_gitlab_vcs import Router
 
+    router = Router()
+    router.canonical["changes_count"] = "1"
+    router.files = [
+        {
+            "old_path": "pkg/__init__.py",
+            "new_path": "pkg/__init__.py",
+            "new_file": True,
+            "deleted_file": False,
+            "renamed_file": False,
+            "diff": "",
+            "collapsed": collapsed,
+        }
+    ]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if "/repository/files/" in request.url.path:
+            router.requests.append(request)
+            return httpx.Response(
+                200,
+                headers={
+                    "X-Gitlab-Blob-Id": _EMPTY_BLOB,
+                    "X-Gitlab-Size": "0",
+                    "X-Gitlab-Ref": INPUT.head_sha,
+                },
+                stream=Stream((b"",)),
+            )
+        if "/repository/blobs/" in request.url.path:
+            router.requests.append(request)
+            return httpx.Response(200, stream=Stream((b"",)))
+        return router.response(request)
+
+    async with GitLabRunHttp(
+        credentials=Credentials(),
+        origin_policy=POLICY,
+        transport=httpx.MockTransport(respond),
+    ) as http:
+        result = await FetchVcsReviewInput(
+            HttpGitLabVcsProvider(http=http),
+            checkpoint=provider_checkpoint,
+        ).execute(INPUT.locator, INPUT.head_sha, INPUT.base_sha)
+    assert all(request.url.host == "gitlab.com" for request in router.requests)
+    assert not any("/git/trees/" in request.url.path for request in router.requests)
+    blobs = [r for r in router.requests if "/repository/blobs/" in r.url.path]
+    return result, blobs
+
+
+def test_gitlab_empty_added_blob_without_regular_file_proof_stays_missing_patch() -> None:
     async def scenario() -> None:
-        router = Router()
-        router.canonical["changes_count"] = "1"
-        router.files = [
-            {
-                "old_path": "pkg/__init__.py",
-                "new_path": "pkg/__init__.py",
-                "new_file": True,
-                "deleted_file": False,
-                "renamed_file": False,
-                "diff": "",
-                "collapsed": collapsed,
-            }
-        ]
-
-        def respond(request: httpx.Request) -> httpx.Response:
-            if "/repository/files/" in request.url.path:
-                router.requests.append(request)
-                return httpx.Response(
-                    200,
-                    headers={
-                        "X-Gitlab-Blob-Id": _EMPTY_BLOB,
-                        "X-Gitlab-Size": "0",
-                        "X-Gitlab-Ref": INPUT.head_sha,
-                    },
-                    stream=Stream((b"",)),
-                )
-            if "/repository/blobs/" in request.url.path:
-                router.requests.append(request)
-                return httpx.Response(200, stream=Stream((b"",)))
-            return router.response(request)
-
-        async with GitLabRunHttp(
-            credentials=Credentials(),
-            origin_policy=POLICY,
-            transport=httpx.MockTransport(respond),
-        ) as http:
-            result = await FetchVcsReviewInput(
-                HttpGitLabVcsProvider(http=http),
-                checkpoint=provider_checkpoint,
-            ).execute(INPUT.locator, INPUT.head_sha, INPUT.base_sha)
+        result, blobs = await _fetch_gitlab_empty_added(collapsed=False)
         assert result.changed_files == ()
         assert [(item.file.filename, item.reason.value) for item in result.omissions] == [
             ("pkg/__init__.py", "missing_patch")
@@ -407,9 +419,19 @@ def test_gitlab_empty_added_blob_without_regular_file_proof_stays_missing_patch(
         assert result.files[0].blob_sha == _EMPTY_BLOB
         assert result.files[0].size == 0
         assert result.files[0].git_mode is None
-        assert all(request.url.host == "gitlab.com" for request in router.requests)
-        assert not any("/git/trees/" in request.url.path for request in router.requests)
-        blobs = [r for r in router.requests if "/repository/blobs/" in r.url.path]
-        assert len(blobs) == (0 if collapsed else 1)
+        assert len(blobs) == 1
+
+    asyncio.run(scenario())
+
+
+def test_gitlab_empty_added_collapsed_file_is_omitted_without_blob_read() -> None:
+    # Collapsed omits line counts (CVS §2.3): file is left out, not 0-line missing_patch.
+    async def scenario() -> None:
+        result, blobs = await _fetch_gitlab_empty_added(collapsed=True)
+        assert result.changed_files == ()
+        assert result.files == ()
+        assert result.omissions == ()
+        assert result.pull_request.meta.files_changed == 1
+        assert blobs == []
 
     asyncio.run(scenario())

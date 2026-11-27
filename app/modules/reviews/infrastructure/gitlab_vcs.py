@@ -12,6 +12,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from functools import partial
+from typing import Literal
 from urllib.parse import parse_qs, urlsplit
 
 from sqlalchemy.exc import DisconnectionError, InterfaceError, OperationalError
@@ -38,6 +39,7 @@ from app.modules.reviews.application.commit_prefix_limits import (
     MAX_COMMIT_MESSAGES,
     commit_prefix_incomplete,
 )
+from app.modules.reviews.application.diff_map import is_supported_path
 from app.modules.reviews.application.prompt_builder import (
     FileStatus,
     PullRequestMeta,
@@ -58,6 +60,7 @@ from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
     VcsFile,
     VcsPullRequest,
+    is_generated_path,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -69,12 +72,13 @@ class _InvalidResponse(Exception):
     pass
 
 
-class _UnreadablePatch(Exception):
-    """A file whose patch the parser cannot read: GitLab gives no line counts for it."""
+class _UnknownLineCounts(Exception):
+    """A file whose line counts GitLab omitted (unreadable or collapsed patch)."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, *, cause: Literal["unreadable", "collapsed"]) -> None:
         super().__init__(path)
         self.path = path
+        self.cause = cause
 
 
 def _object(value: JsonValue) -> dict[str, JsonValue]:
@@ -362,20 +366,21 @@ class HttpGitLabVcsProvider:
         for record in records:
             try:
                 item = self._file(_object(record))
-            except _UnreadablePatch as unreadable:
+            except _UnknownLineCounts as missing:
                 # Its line counts are unknown, so the file is left out: the list no longer
                 # matches changes_count and the run is summary-only diff_inventory_incomplete
                 # (CVS §2.3), not a failed diff fetch. The warning tells it apart from a
                 # short page.
                 _LOGGER.warning(
-                    "GitLab patch unreadable, file left out project_id=%s iid=%s "
+                    "GitLab patch %s, file left out project_id=%s iid=%s "
                     "diff_version_id=%s path=%s",
+                    missing.cause,
                     snapshot.target_project_id,
                     snapshot.iid,
                     selected,
-                    unreadable.path,
+                    missing.path,
                 )
-                names.add(unreadable.path)
+                names.add(missing.path)
                 continue
             names.add(item.filename)
             listed.append(item)
@@ -429,13 +434,21 @@ class HttpGitLabVcsProvider:
         patch = data.get("diff")
         if patch is not None:
             patch = _text(patch, 8388608, empty=True) or None
-        reason = None
-        if _flag(data, "too_large"):
+        too_large = _flag(data, "too_large")
+        collapsed = _flag(data, "collapsed")
+        generated = _flag(data, "generated_file")
+        reason: OmissionReason | None = None
+        if too_large:
             reason = OmissionReason.TOO_LARGE
-        if _flag(data, "collapsed") and reason is None:
-            reason = OmissionReason.MISSING_PATCH
-        if _flag(data, "generated_file"):
+        if generated or (
+            collapsed
+            and is_supported_path(new)
+            and (not renamed or is_supported_path(old))
+            and is_generated_path(new)
+        ):
             reason = OmissionReason.GENERATED
+        if collapsed and reason is None:
+            raise _UnknownLineCounts(new, cause="collapsed")
         additions = deletions = 0
         if patch is not None and reason is None:
             if len(patch.encode("utf-8")) > 1048576 or len(split_lf(patch)) > 20000:
@@ -444,7 +457,7 @@ class HttpGitLabVcsProvider:
                 try:
                     hunks = parse_hunks(split_lf(patch))
                 except UnifiedDiffError:
-                    raise _UnreadablePatch(new) from None
+                    raise _UnknownLineCounts(new, cause="unreadable") from None
                 additions = sum(row.kind == "added" for hunk in hunks for row in hunk.rows)
                 deletions = sum(row.kind == "removed" for hunk in hunks for row in hunk.rows)
         return VcsFile(

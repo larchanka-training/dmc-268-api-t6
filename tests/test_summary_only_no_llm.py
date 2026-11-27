@@ -552,8 +552,20 @@ def test_three_thousand_one_allowed_lines_make_no_model_call(version: str, file:
 
 
 @pytest.mark.parametrize("version", ["v2", "v5"])
-def test_incomplete_file_list_is_summary_only_without_a_model_call(version: str) -> None:
-    outcome = _run((_text(1),), files_changed=2, version=version)
+@pytest.mark.parametrize(
+    ("files", "files_changed", "expected_stored_summary_only"),
+    [
+        ((_text(1),), 2, [True]),
+        ((), 1, []),
+    ],
+)
+def test_incomplete_file_list_is_summary_only_without_a_model_call(
+    version: str,
+    files: tuple[VcsFile, ...],
+    files_changed: int,
+    expected_stored_summary_only: list[bool],
+) -> None:
+    outcome = _run(files, files_changed=files_changed, version=version)
     build = _context(outcome.trace)
 
     assert outcome.skipped is None
@@ -563,8 +575,10 @@ def test_incomplete_file_list_is_summary_only_without_a_model_call(version: str)
     assert build["reason"] == "diff_inventory_incomplete"
     assert build["coverage"]["status"] == "partial"
     assert build["coverage"]["reviewed_files"] == 0
-    assert outcome.stored and all(row.summary_only for row in outcome.stored)
-    assert all(row.review_patch is None and row.patch for row in outcome.stored)
+    assert [row.summary_only for row in outcome.stored] == expected_stored_summary_only
+    assert [
+        row.review_patch is None and bool(row.patch) for row in outcome.stored
+    ] == expected_stored_summary_only
     _assert_summary_only_trace(outcome.trace)
     _assert_no_model_call(outcome.trace)
     _assert_published_without_a_model(outcome.published)
