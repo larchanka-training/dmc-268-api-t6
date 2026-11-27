@@ -838,3 +838,12 @@ class TestValidatorAllNineReasonsAndCaplog:
         suggestion = "class Box[T = int]:"
         res = validate_suggestion_tree(AstLanguage.PYTHON, code, 1, 1, suggestion)
         assert res.is_valid is True
+
+    def test_python_unparseable_original_uses_tree_sitter_delta_to_reject_broken_suggestion(
+        self,
+    ) -> None:
+        """When ast.parse fails on original Python source, added tree-sitter errors reject."""
+        code = b"print 'legacy'\ny = 1\n"
+        res = validate_suggestion_tree(AstLanguage.PYTHON, code, 2, 2, "y = (1")
+        assert res.is_valid is False
+        assert res.reason == SuggestionRejectionReason.SYNTAX_ERROR
