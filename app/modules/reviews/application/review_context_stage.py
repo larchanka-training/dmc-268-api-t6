@@ -65,6 +65,7 @@ from app.modules.reviews.application.review_ignore import (
     IgnoreMatcher,
     IgnoreResult,
     apply_ignore,
+    resolve_unknown_line_counts,
     snapshot_ignore_policy,
 )
 from app.modules.reviews.application.review_path import ReviewBinding, snapshot_for_review
@@ -615,6 +616,9 @@ class ReviewContextStage:
         self._diff_old_sha = diff_map.diff_old_sha
         self._head_sha = diff_map.head_sha
         ignore = apply_ignore(matcher, diff_map, builtin_excluded=self._builtin_excluded)
+        diff_map = resolve_unknown_line_counts(
+            diff_map, ignore, builtin_excluded=self._builtin_excluded
+        )
         # The snapshot path counts an unsupported path and an unresolved identity as
         # technical skips; a legacy run keeps them incomplete (#130 F5, TL-Q3).
         coverage = project_run_coverage(

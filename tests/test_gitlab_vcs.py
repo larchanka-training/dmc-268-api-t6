@@ -289,11 +289,9 @@ def test_newer_flags_are_real_omissions_without_invented_size_or_line_stats(
     asyncio.run(scenario())
 
 
-def test_collapsed_file_leaves_file_list_incomplete_without_invented_zero_counts(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # A collapsed GitLab diff without too_large/generated_file hides unknown line counts,
-    # so the file is left out and inventory becomes incomplete (CVS §2.3) instead of 0 lines.
+def test_collapsed_file_leaves_file_list_incomplete_without_invented_zero_counts() -> None:
+    # A collapsed GitLab diff with supported paths stays marked with unknown line counts so
+    # policy masks can later resolve it; without exclusion it still leaves inventory incomplete.
     async def scenario() -> None:
         router = Router()
         router.files = [{**router.files[0], "diff": "", "collapsed": True}]
@@ -306,8 +304,12 @@ def test_collapsed_file_leaves_file_list_incomplete_without_invented_zero_counts
             value = await FetchVcsReviewInput(
                 HttpGitLabVcsProvider(http=http), checkpoint=checkpoint
             ).execute(INPUT.locator, INPUT.head_sha, INPUT.base_sha)
-        assert value.files == ()
-        assert value.omissions == ()
+        assert [
+            (item.filename, item.unknown_line_counts, item.changes) for item in value.files
+        ] == [("src/new.py", True, 0)]
+        assert [(item.file.filename, item.reason) for item in value.omissions] == [
+            ("src/new.py", OmissionReason.MISSING_PATCH)
+        ]
         assert value.changed_files == ()
         assert value.pull_request.meta.files_changed == 1
         diff_map = build_diff_map(
@@ -318,8 +320,47 @@ def test_collapsed_file_leaves_file_list_incomplete_without_invented_zero_counts
             diff_old_sha=None,
         )
         assert diff_map.file_list_complete is False
-        assert diff_map.incomplete_reasons == ("file_count_mismatch",)
+        assert diff_map.incomplete_reasons == ("unknown_line_counts",)
         assert not any("/repository/" in str(request.url) for request in router.requests)
+
+    asyncio.run(scenario())
+
+
+def test_collapsed_unsafe_path_leaves_file_out_without_exposing_it_to_masks(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def scenario() -> None:
+        router = Router()
+        router.files = [
+            {
+                **router.files[0],
+                "old_path": "src/a\x85b.py",
+                "new_path": "src/new.py",
+                "diff": "",
+                "collapsed": True,
+            }
+        ]
+        router.canonical["changes_count"] = "1"
+        async with GitLabRunHttp(
+            credentials=Credentials(),
+            origin_policy=POLICY,
+            transport=httpx.MockTransport(router.response),
+        ) as http:
+            value = await FetchVcsReviewInput(
+                HttpGitLabVcsProvider(http=http), checkpoint=checkpoint
+            ).execute(INPUT.locator, INPUT.head_sha, INPUT.base_sha)
+        assert value.files == ()
+        assert value.omissions == ()
+        assert value.changed_files == ()
+        diff_map = build_diff_map(
+            value.pull_request,
+            value.files,
+            provider=VcsProviderName.GITLAB,
+            repository_id=INPUT.repository_id,
+            diff_old_sha=None,
+        )
+        assert diff_map.file_list_complete is False
+        assert diff_map.incomplete_reasons == ("file_count_mismatch",)
 
     with caplog.at_level(logging.WARNING, logger="app.modules.reviews.infrastructure.gitlab_vcs"):
         asyncio.run(scenario())
@@ -352,7 +393,10 @@ def test_collapsed_normal_file_alongside_code_marks_inventory_incomplete() -> No
             value = await FetchVcsReviewInput(
                 HttpGitLabVcsProvider(http=http), checkpoint=checkpoint
             ).execute(INPUT.locator, INPUT.head_sha, INPUT.base_sha)
-        assert [item.filename for item in value.files] == ["src/new.py"]
+        assert [(item.filename, item.unknown_line_counts) for item in value.files] == [
+            ("src/new.py", False),
+            ("asset.dat", True),
+        ]
         assert [item.path for item in value.changed_files] == ["src/new.py"]
         assert value.pull_request.meta.files_changed == 2
         diff_map = build_diff_map(
@@ -363,7 +407,7 @@ def test_collapsed_normal_file_alongside_code_marks_inventory_incomplete() -> No
             diff_old_sha=None,
         )
         assert diff_map.file_list_complete is False
-        assert diff_map.incomplete_reasons == ("file_count_mismatch",)
+        assert diff_map.incomplete_reasons == ("unknown_line_counts",)
 
     asyncio.run(scenario())
 

@@ -147,13 +147,16 @@ counted allowed, даже если patch отсутствует. Raw counters E/
 hunks; raw malformed patch не становится L1. Оба триггера §2.3 проверяются раньше.
 Patch GitHub, который парсер не читает, сохраняется как неполный файл, а не роняет run.
 GitLab считает строки файла по его hunks: collapsed-запись без флага `too_large` /
-`generated_file` сохраняется в списке только при достоверных путях со
-встроенным `is_generated_path` (`OmissionReason.GENERATED`, чьи строки не входят
-в counted allowed по §2.3); прочие collapsed-файлы и нечитаемый patch не
-попадают в список, и inventory становится неполным (§2.3). Включая пути, которые
-могли бы совпасть с маской `review-ignore` (`.review/rules.md`): VCS-адаптер
-выполняется до загрузки policy/масок репозитория и при скрытых счётчиках не может
-доказать исключение по маске без чтения сырого patch. Пока сборка L1 не берёт hunks truncated, truncated-only
+`generated_file` проверяется по путям (`is_supported_path` на обеих сторонах
+переименования). При достоверных путях встроенный `is_generated_path` сразу даёт
+`OmissionReason.GENERATED`, а прочие collapsed-записи с достоверными путями
+остаются в списке с маркером неизвестных счётчиков (`unknown_line_counts`), чтобы
+`apply_ignore` / маски `review-ignore` могли исключить их с причиной `ignored`:
+если все такие записи исключены политикой или `generated` при полном списке файлов,
+инвентарь считается полным, а их неизвестные строки не попадают в порог 3 000 по §2.3.
+Collapsed-запись без такого исключения, с недостоверным путём или нечитаемым patch
+оставляет inventory неполным (`diff_inventory_incomplete` по §2.3) и не подменяет
+счётчики нулями. Пока сборка L1 не берёт hunks truncated, truncated-only
 с сохранившимися строками публикуется как summary-only `no_reviewable_files`.
 
 | Состав согласованного inventory | Исход целевого профиля #107 |

@@ -101,6 +101,7 @@ class VcsFile:
     size: int | None = None
     omission_reason: OmissionReason | None = None
     git_mode: str | None = None
+    unknown_line_counts: bool = False
 
 
 class OmissionReason(StrEnum):
@@ -295,6 +296,8 @@ def _known_omission(file: VcsFile) -> OmissionReason | None:
         return OmissionReason.GENERATED
     if file.omission_reason is not None:
         return file.omission_reason
+    if file.unknown_line_counts:
+        return OmissionReason.MISSING_PATCH
     if file.patch is not None and "\x00" in file.patch:
         return OmissionReason.BINARY
     if (
@@ -329,6 +332,7 @@ def is_empty_addition_candidate(file: VcsFile) -> bool:
 
     return (
         file.status == "added"
+        and not file.unknown_line_counts
         and is_supported_path(file.filename)
         and file.previous_filename is None
         and file.blob_sha == GIT_EMPTY_BLOB_SHA

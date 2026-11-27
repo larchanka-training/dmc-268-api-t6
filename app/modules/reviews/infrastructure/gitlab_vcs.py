@@ -437,18 +437,17 @@ class HttpGitLabVcsProvider:
         too_large = _flag(data, "too_large")
         collapsed = _flag(data, "collapsed")
         generated = _flag(data, "generated_file")
+        valid_paths = is_supported_path(new) and (not renamed or is_supported_path(old))
         reason: OmissionReason | None = None
         if too_large:
             reason = OmissionReason.TOO_LARGE
-        if generated or (
-            collapsed
-            and is_supported_path(new)
-            and (not renamed or is_supported_path(old))
-            and is_generated_path(new)
-        ):
+        if generated or (collapsed and valid_paths and is_generated_path(new)):
             reason = OmissionReason.GENERATED
-        if collapsed and reason is None:
+        unknown_line_counts = collapsed and reason is None
+        if unknown_line_counts and not valid_paths:
             raise _UnknownLineCounts(new, cause="collapsed")
+        if unknown_line_counts:
+            patch = None
         additions = deletions = 0
         if patch is not None and reason is None:
             if len(patch.encode("utf-8")) > 1048576 or len(split_lf(patch)) > 20000:
@@ -470,6 +469,7 @@ class HttpGitLabVcsProvider:
             additions + deletions,
             patch,
             omission_reason=reason,
+            unknown_line_counts=unknown_line_counts,
         )
 
     async def get_pull_request(
@@ -502,7 +502,7 @@ class HttpGitLabVcsProvider:
             assert self._files is not None and self._snapshot is not None
             result: list[VcsFile] = []
             for item in self._files:
-                if item.status == "removed":
+                if item.status == "removed" or item.unknown_line_counts:
                     result.append(item)
                     continue
                 response = await self._read(

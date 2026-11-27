@@ -50,10 +50,13 @@ def snapshot_vcs_file(snapshot: DiffSnapshot) -> VcsFile:
         snapshot.deletions,
         snapshot.changes,
         patch,
+        unknown_line_counts=snapshot.unknown_line_counts,
     )
 
 
 def empty_addition_candidate(snapshot: DiffSnapshot) -> bool:
+    if snapshot.unknown_line_counts:
+        return False
     # DiffMap conversion strips no-hunk metadata, but such raw metadata is not
     # proof of an absent patch. Only the exact stored empty wrapper may be removed.
     empty_wrapper = (
