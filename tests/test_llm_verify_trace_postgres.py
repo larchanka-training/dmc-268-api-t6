@@ -67,6 +67,7 @@ from tests.test_clean_without_text_result_postgres import prepare_result
 from tests.test_context_manifests_postgres import INSERT_POLICY_SNAPSHOT, policy_snapshot_values
 from tests.test_run_step_postgres import allow_run_steps
 from tests.test_run_stream_postgres import insert_queued_run
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 STARTED = datetime(2026, 10, 24, 9, 0, 0, tzinfo=UTC)
 VERIFY_REQUEST: dict[str, Any] = {
@@ -213,6 +214,7 @@ def test_candidate_checkpoint_commits_in_running_and_reuses_across_attempts(env:
                 worker_id="worker",
                 expected_attempt=1,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             )
             assert await store.checkpoint_candidates(
                 run_id,
@@ -256,6 +258,7 @@ def test_candidate_checkpoint_commits_in_running_and_reuses_across_attempts(env:
                 worker_id="worker",
                 expected_attempt=2,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             )
             assert await retry_store.checkpoint_candidates(
                 run_id,
@@ -337,6 +340,7 @@ def test_large_accepted_checkpoint_reloads_without_exposing_fitted_diff(env: Env
                 worker_id="worker",
                 expected_attempt=1,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             )
             assert await store.checkpoint_candidates(
                 run_id,
@@ -510,6 +514,7 @@ def test_execute_review_retry_reloads_committed_candidate_checkpoint(env: Env) -
                         worker_id="worker",
                         expected_attempt=attempt,
                         run_url=lambda _: None,
+                        parser=NullSuggestionParser(),
                     ),
                     reflection_pass=ReflectionPass(Verifier()),
                 )
@@ -526,6 +531,7 @@ def test_execute_review_retry_reloads_committed_candidate_checkpoint(env: Env) -
                 worker_id="worker",
                 expected_attempt=2,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             )
             saved = await store.load_accepted_output(run_id)
             assert saved is not None
@@ -689,6 +695,7 @@ def test_retry_after_final_commit_skips_reviewer_and_verifier(
                         worker_id="worker",
                         expected_attempt=attempt,
                         run_url=lambda _: None,
+                        parser=NullSuggestionParser(),
                     ),
                     reflection_pass=ReflectionPass(verifier),
                 )

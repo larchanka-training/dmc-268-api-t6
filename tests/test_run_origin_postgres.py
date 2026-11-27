@@ -56,6 +56,7 @@ from tests.portal_postgres import (
 from tests.test_app_reinstall_postgres import FreshGitHub, apply, seed_archive
 from tests.test_effective_review_eligibility_postgres import Publisher
 from tests.test_retired_enqueue_postgres import Ci, prepare
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 
 @pytest.fixture
@@ -570,6 +571,7 @@ def test_fresh_oauth_cancels_source_work_before_rebind_and_late_finalization_can
                 worker_id="old-worker",
                 expected_attempt=1,
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             )
             assert (
                 await late_output.execute(

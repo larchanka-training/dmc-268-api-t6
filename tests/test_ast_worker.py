@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import math
 import os
-import resource
 import signal
 import subprocess
 import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
+
+try:
+    import resource
+except ImportError:
+    resource = None  # type: ignore[assignment]
 
 import pytest
 
@@ -26,6 +31,7 @@ from app.modules.reviews.application.ast_symbols import (
 from app.modules.reviews.infrastructure import ast_worker, subprocess_source_parser
 from app.modules.reviews.infrastructure.subprocess_source_parser import SubprocessSourceParser
 
+_HAS_RESOURCE = resource is not None
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -56,6 +62,7 @@ def _patch_limits(monkeypatch: pytest.MonkeyPatch, hard: int) -> list[tuple[int,
     return calls
 
 
+@pytest.mark.skipif(not _HAS_RESOURCE, reason="resource module requires Unix")
 def test_limit_keeps_an_unlimited_hard_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _patch_limits(monkeypatch, resource.RLIM_INFINITY)
 
@@ -64,6 +71,7 @@ def test_limit_keeps_an_unlimited_hard_limit(monkeypatch: pytest.MonkeyPatch) ->
     assert calls == [(resource.RLIMIT_CPU, (29, resource.RLIM_INFINITY))]
 
 
+@pytest.mark.skipif(not _HAS_RESOURCE, reason="resource module requires Unix")
 @pytest.mark.parametrize(("hard", "soft"), [(100, 29), (29, 29), (12, 12)])
 def test_limit_keeps_a_finite_hard_limit_and_never_goes_above_it(
     monkeypatch: pytest.MonkeyPatch, hard: int, soft: int
@@ -81,6 +89,7 @@ def _patch_setrlimit(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, tuple[i
     return calls
 
 
+@pytest.mark.skipif(not _HAS_RESOURCE, reason="resource module requires Unix")
 def test_core_dumps_are_disabled_for_good(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _patch_setrlimit(monkeypatch)
 
@@ -146,6 +155,9 @@ def _run_cpu_bound(*burns: float) -> tuple[subprocess.CompletedProcess[str], flo
     return completed, usage.ru_utime + usage.ru_stime
 
 
+@pytest.mark.skipif(
+    not _HAS_RESOURCE or not hasattr(os, "wait4"), reason="requires Unix wait4 and resource"
+)
 def test_request_over_its_cpu_allowance_is_killed_by_sigxcpu() -> None:
     completed, spent = _run_cpu_bound(30.0)
 
@@ -156,6 +168,9 @@ def test_request_over_its_cpu_allowance_is_killed_by_sigxcpu() -> None:
     assert armed - 0.5 < spent < armed + 1.0
 
 
+@pytest.mark.skipif(
+    not _HAS_RESOURCE or not hasattr(os, "wait4"), reason="requires Unix wait4 and resource"
+)
 def test_cheap_requests_outlive_the_limit_armed_for_the_first_one() -> None:
     completed, _ = _run_cpu_bound(*[0.5] * 6)
 
@@ -200,6 +215,7 @@ def _read_real_worker[T](read: Callable[[int], T]) -> T:
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+@pytest.mark.skipif(not _HAS_RESOURCE, reason="resource module requires Unix")
 def test_real_worker_arms_the_cpu_limit_before_a_request() -> None:
     (soft, hard), cpu = _read_real_worker(
         lambda pid: (_proc_limit(pid, "Max cpu time"), _cpu_seconds(pid))
@@ -216,3 +232,47 @@ def test_real_worker_arms_the_cpu_limit_before_a_request() -> None:
 def test_real_worker_writes_no_core_dump() -> None:
     # A worker killed by SIGXCPU or a crash would dump the repository sources it holds.
     assert _read_real_worker(lambda pid: _proc_limit(pid, "Max core file size")) == ("0", "0")
+
+
+def test_ast_worker_handle_validate_suggestion_memory_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*args: object, **kwargs: object) -> object:
+        raise MemoryError("out of memory")
+
+    monkeypatch.setattr(ast_worker, "validate_suggestion_tree", boom)
+    req = {
+        "action": "validate_suggestion",
+        "key": "k1",
+        "language": "python",
+        "source": base64.b64encode(b"x = 1\n").decode("ascii"),
+        "start_line": 1,
+        "line": 1,
+        "suggestion": "x = 2",
+    }
+    res = ast_worker._handle(json.dumps(req))
+    assert res["is_valid"] is True
+    assert res["reason"] == "worker_error"
+    assert res["detail"] == "Parser memory limit"
+
+
+def test_ast_worker_handle_validate_suggestion_unexpected_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("ast boom")
+
+    monkeypatch.setattr(ast_worker, "validate_suggestion_tree", boom)
+    req = {
+        "action": "validate_suggestion",
+        "key": "k1",
+        "language": "python",
+        "source": base64.b64encode(b"x = 1\n").decode("ascii"),
+        "start_line": 1,
+        "line": 1,
+        "suggestion": "x = 2",
+    }
+    res = ast_worker._handle(json.dumps(req))
+    assert res["is_valid"] is True
+    assert res["reason"] == "worker_error"
+    assert res["detail"] == "ast boom"

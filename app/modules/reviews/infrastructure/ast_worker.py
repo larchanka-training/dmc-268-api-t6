@@ -13,17 +13,23 @@ from __future__ import annotations
 import base64
 import json
 import math
-import resource
 import sys
 import time
+
+try:
+    import resource
+except ImportError:
+    resource = None  # type: ignore[assignment]
 
 from app.modules.reviews.application.ast_symbols import (
     MAX_PARSE_CPU_SECONDS_PER_FILE,
     MAX_PARSER_MEMORY_BYTES,
     AstFailureReason,
     AstLanguage,
+    SuggestionRejectionReason,
     facts_to_json,
 )
+from app.modules.reviews.infrastructure.suggestion_ast import validate_suggestion_tree
 from app.modules.reviews.infrastructure.tree_sitter_facts import (
     ParseTimeout,
     _grammar,
@@ -37,6 +43,8 @@ def _disable_core_dumps() -> None:
     SIGXCPU from the CPU limit dumps core by default, and so does a parser crash. The hard
     limit goes to zero too, since the worker never needs a core.
     """
+    if resource is None:
+        return
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
@@ -46,6 +54,8 @@ def _limit_memory() -> None:
     The current size is read from ``/proc``, which only Linux has. Elsewhere (a developer
     machine) the cap is skipped: the parent still stops a worker that does not answer.
     """
+    if resource is None:
+        return
     try:
         with open("/proc/self/statm", encoding="ascii") as statm:
             current = int(statm.read().split()[0]) * resource.getpagesize()
@@ -76,6 +86,8 @@ def _limit_cpu() -> None:
     the soft limit the kernel sends SIGXCPU, which ends the worker; the parent handles that
     like any worker that died.
     """
+    if resource is None:
+        return
     _, hard = resource.getrlimit(resource.RLIMIT_CPU)
     soft = _cpu_soft_limit(time.process_time())
     if hard != resource.RLIM_INFINITY:
@@ -87,6 +99,32 @@ def _handle(line: str) -> dict[str, object]:
     request = json.loads(line)
     started = time.process_time()
     result: dict[str, object] = {"key": request["key"]}
+
+    if request.get("action") == "validate_suggestion":
+        try:
+            val_res = validate_suggestion_tree(
+                AstLanguage(request["language"]),
+                base64.b64decode(request["source"]),
+                request["start_line"],
+                request["line"],
+                request["suggestion"],
+            )
+            result["is_valid"] = val_res.is_valid
+            if val_res.reason is not None:
+                result["reason"] = val_res.reason.value
+            if val_res.detail is not None:
+                result["detail"] = val_res.detail
+        except MemoryError:
+            result["is_valid"] = True
+            result["reason"] = SuggestionRejectionReason.WORKER_ERROR.value
+            result["detail"] = "Parser memory limit"
+        except Exception as exc:
+            result["is_valid"] = True
+            result["reason"] = SuggestionRejectionReason.WORKER_ERROR.value
+            result["detail"] = str(exc)
+        result["cpu"] = time.process_time() - started
+        return result
+
     try:
         facts = extract_facts(
             AstLanguage(request["language"]),
@@ -107,6 +145,8 @@ def _handle(line: str) -> dict[str, object]:
 
 
 def main() -> None:
+    if resource is None:
+        sys.stderr.write("resource module unavailable; running without OS limits\n")
     _disable_core_dumps()
     for language in AstLanguage:
         _grammar(language)

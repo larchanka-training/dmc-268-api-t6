@@ -52,7 +52,7 @@ from tests.review_publication_fakes import (
     PublicationUowFake,
     RecordingRunTrace,
 )
-from tests.verifier_pipeline_fakes import FakeProcessor, verifier_snapshot
+from tests.verifier_pipeline_fakes import FakeProcessor, NullSuggestionParser, verifier_snapshot
 
 _RUN_ID = UUID("00000000-0000-0000-0000-000000004610")
 _NOW = datetime(2026, 11, 12, 7, 0, tzinfo=UTC)
@@ -209,6 +209,7 @@ def _make_store_bundle(
         expected_attempt=1,
         run_url=lambda _: None,
         now=lambda: _NOW,
+        parser=NullSuggestionParser(),
     )
     review_gateway = CapturingReviewGateway()
     check_runs = CapturingCheckRunGateway()

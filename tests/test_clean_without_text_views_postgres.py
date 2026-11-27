@@ -32,6 +32,7 @@ from tests.run_coverage_fakes import code_snapshot, empty_snapshot
 from tests.test_clean_without_text_result_postgres import prepare_result
 from tests.test_clean_without_text_result_postgres import result_env as result_env
 from tests.test_severity_threshold_postgres import RecordingQueue
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 
 async def finalize_run(
@@ -51,6 +52,7 @@ async def finalize_run(
             worker_id="worker",
             expected_attempt=1,
             run_url=lambda _: None,
+            parser=NullSuggestionParser(),
         ).execute(RUN_ATTEMPTED, answer() if output is None else output)
 
     await perform()

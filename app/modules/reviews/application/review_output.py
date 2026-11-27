@@ -12,6 +12,11 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.reviews.application.ast_symbols import SuggestionParser
+from app.modules.reviews.application.suggestion_validator import (
+    preload_suggestion_blobs,
+    validate_review_suggestions,
+)
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 if TYPE_CHECKING:
@@ -20,6 +25,7 @@ if TYPE_CHECKING:
         ProcessedFinding,
         ProcessedReviewOutput,
     )
+    from app.modules.reviews.application.get_run_file_lines import BlobCache
     from app.modules.reviews.application.policy_snapshot import CallManifest, PolicySnapshot
     from app.modules.reviews.application.prompt_builder import ChangedFile, PullRequestMeta
     from app.modules.reviews.application.run_coverage import RunCoverage
@@ -713,6 +719,9 @@ class ReviewOutputUnitOfWork(UnitOfWork, Protocol):
     @property
     def reviews(self) -> ReviewOutputRepository: ...
 
+    @property
+    def blob_cache(self) -> BlobCache | None: ...
+
 
 class ReviewOutputUnitOfWorkFactory(Protocol):
     """Create a fresh UoW after a provider crash or successful publication."""
@@ -743,6 +752,71 @@ class ReviewOutputHandler(Protocol):
     ) -> bool: ...
 
 
+class _PostProcessingRepository(Protocol):
+    async def get_post_processing_input(
+        self, run_id: UUID
+    ) -> FindingPostProcessingInput | None: ...
+
+
+class _PostProcessingUnitOfWork(UnitOfWork, Protocol):
+    @property
+    def reviews(self) -> _PostProcessingRepository: ...
+
+    @property
+    def blob_cache(self) -> BlobCache | None: ...
+
+
+class _PostProcessingUnitOfWorkFactory(Protocol):
+    def __call__(self) -> _PostProcessingUnitOfWork: ...
+
+
+async def load_validated_review_output(
+    uow_factory: _PostProcessingUnitOfWorkFactory,
+    run_id: UUID,
+    parsed: ReviewOutput | None,
+    *,
+    parser: SuggestionParser,
+) -> tuple[FindingPostProcessingInput, ReviewOutput, RunCoverage] | None:
+    """Load context/blobs in one session, then validate suggestions outside DB transactions."""
+    from app.modules.reviews.application.run_coverage import (
+        CoverageItem,
+        CoverageStatus,
+        RunCoverage,
+    )
+
+    try:
+        async with uow_factory() as uow:
+            context = await uow.reviews.get_post_processing_input(run_id)
+            preloaded_blobs = (
+                await preload_suggestion_blobs(
+                    parsed,
+                    diff_map=context.diff_map,
+                    blob_cache=uow.blob_cache,
+                )
+                if context is not None and parsed is not None
+                else {}
+            )
+        if context is None:
+            return None
+        coverage = context.coverage or RunCoverage(
+            CoverageStatus.PARTIAL,
+            0,
+            reasons=(CoverageItem(None, "classification_unavailable"),),
+        )
+        if parsed is None:
+            parsed = empty_review_output(context, coverage)
+        validated = await validate_review_suggestions(
+            parsed,
+            diff_map=context.diff_map,
+            preloaded_blobs=preloaded_blobs,
+            parser=parser,
+            run_id=run_id,
+        )
+    finally:
+        await parser.aclose()
+    return context, validated, coverage
+
+
 class PublishReviewOutput:
     """Persist a validated model answer, then publish outside database transactions.
 
@@ -755,9 +829,12 @@ class PublishReviewOutput:
         self,
         uow_factory: ReviewOutputUnitOfWorkFactory,
         provider: ReviewProvider,
+        *,
+        parser: SuggestionParser,
     ) -> None:
         self._uow_factory = uow_factory
         self._provider = provider
+        self._parser = parser
 
     async def execute(
         self,
@@ -768,11 +845,6 @@ class PublishReviewOutput:
         severity_threshold: SeverityThresholdValue | None = None,
     ) -> bool:
         from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
-        from app.modules.reviews.application.run_coverage import (
-            CoverageItem,
-            CoverageStatus,
-            RunCoverage,
-        )
 
         effective_dropped_input = (
             dropped_findings
@@ -803,23 +875,21 @@ class PublishReviewOutput:
         # Anchoring and custom-rule attribution are an immutable run boundary:
         # accepting caller data here would let a model response choose its own
         # hunk lines or valid rule names.
-        async with self._uow_factory() as uow:
-            context = await uow.reviews.get_post_processing_input(run_id)
-        if context is None:
+        loaded = await load_validated_review_output(
+            self._uow_factory,
+            run_id,
+            parsed,
+            parser=self._parser,
+        )
+        if loaded is None:
             return False
+        context, parsed, coverage = loaded
         threshold_to_use = (
             effective_threshold if effective_threshold is not None else context.severity_threshold
         )
         v2_rules_to_use = (
             effective_v2_rules if effective_v2_rules is not None else context.allowed_v2_rules
         )
-        coverage = context.coverage or RunCoverage(
-            CoverageStatus.PARTIAL,
-            0,
-            reasons=(CoverageItem(None, "classification_unavailable"),),
-        )
-        if parsed is None:
-            parsed = empty_review_output(context, coverage)
         processed = FindingsPostProcessor.from_default_patterns().process(
             parsed,
             diff_map=context.diff_map,

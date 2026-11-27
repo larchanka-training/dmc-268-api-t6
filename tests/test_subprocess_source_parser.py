@@ -11,6 +11,9 @@ from app.modules.reviews.application.ast_symbols import (
     AstFailureReason,
     AstLanguage,
     ParseRequest,
+    SuggestionRejectionReason,
+    SuggestionValidationRequest,
+    SuggestionValidationResult,
 )
 from app.modules.reviews.infrastructure import subprocess_source_parser
 from app.modules.reviews.infrastructure.subprocess_source_parser import SubprocessSourceParser
@@ -140,3 +143,44 @@ def test_no_attempt_budget_leaves_only_the_per_file_limit(
         "b.py": AstFailureReason.AST_FAILED,
         "c.py": AstFailureReason.AST_FAILED,
     }
+
+
+def test_hung_worker_during_validate_suggestions_returns_ast_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(subprocess_source_parser, "_WORKER_MODULE", "tests.ast_workers.hanging")
+    monkeypatch.setattr(subprocess_source_parser, "_WALL_SLACK_SECONDS", -0.7)
+    monkeypatch.setattr(subprocess_source_parser, "_STARTUP_SECONDS", 10.0)
+
+    async def run() -> dict[str, SuggestionValidationResult]:
+        parser = SubprocessSourceParser()
+        try:
+            req1 = SuggestionValidationRequest("k1", AstLanguage.PYTHON, b"x = 1\n", 1, 1, "x = 2")
+            req2 = SuggestionValidationRequest("k2", AstLanguage.PYTHON, b"x = 1\n", 1, 1, "x = 2")
+            return await parser.validate_suggestions((req1, req2))
+        finally:
+            await parser.aclose()
+
+    res = asyncio.run(run())
+    result = res["k2"]
+    assert result.reason == SuggestionRejectionReason.AST_TIMEOUT
+    assert result.is_valid is True
+
+
+def test_dying_worker_during_validate_suggestions_returns_worker_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(subprocess_source_parser, "_WORKER_MODULE", "tests.ast_workers.dying")
+
+    async def run() -> dict[str, SuggestionValidationResult]:
+        parser = SubprocessSourceParser()
+        try:
+            req = SuggestionValidationRequest("k1", AstLanguage.PYTHON, b"x = 1\n", 1, 1, "x = 2")
+            return await parser.validate_suggestions((req,))
+        finally:
+            await parser.aclose()
+
+    res = asyncio.run(run())
+    result = res["k1"]
+    assert result.reason == SuggestionRejectionReason.WORKER_ERROR
+    assert result.is_valid is True

@@ -329,7 +329,11 @@ async def process_review_run(
         context_stage=context_stage,
     )
     publisher: ReviewRunPublisher = output or InlineReviewPublisher(
-        PublishReviewOutput(lambda: SqlAlchemyReviewOutputUnitOfWork(session_factory), provider)
+        PublishReviewOutput(
+            lambda: SqlAlchemyReviewOutputUnitOfWork(session_factory),
+            provider,
+            parser=SubprocessSourceParser(),
+        )
     )
     prompts: ReviewPromptRepository = SqlAlchemyReviewPromptRepository(session_factory)
     claim_syntax = TreeSitterClaimSyntaxInspector()
@@ -939,6 +943,7 @@ def compose_worker_process(
             expected_attempt=claimed.attempt,
             run_url=run_url,
             now=now,
+            parser=SubprocessSourceParser(),
         )
 
         async def execute(
