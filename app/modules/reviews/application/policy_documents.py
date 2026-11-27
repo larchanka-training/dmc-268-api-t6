@@ -126,6 +126,16 @@ def missing_document(path: str) -> PolicyDocument:
     return PolicyDocument(path, DocumentPresence.MISSING, None, None, None, None, None, None)
 
 
+def normalize_line_endings(text: str) -> str:
+    """Normalize CRLF and lone CR line endings to LF."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def normalize_document_text(text: str) -> str:
+    """Strip a leading UTF-8 BOM character and normalize CR line endings to LF."""
+    return normalize_line_endings(text.removeprefix("\ufeff"))
+
+
 def normalize_document(
     path: str, raw: bytes, *, blob_oid: str, policy_base_sha: str | None = None
 ) -> PolicyDocument:
@@ -148,7 +158,7 @@ def normalize_document(
             source_path=path,
             policy_base_sha=policy_base_sha,
         ) from exc
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = normalize_line_endings(text)
     for line_number, line in enumerate(text.split("\n"), start=1):
         for column, char in enumerate(line, start=1):
             if (ord(char) < 0x20 and char != "\t") or ord(char) == 0x7F:
