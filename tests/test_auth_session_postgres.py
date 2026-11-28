@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -223,3 +223,106 @@ def test_repeated_http_callback_expands_scope_and_repository_access_without_logo
         del app.state.github_auth_http_clients
         del app.state.reviews_api_resources
         asyncio.run(close())
+
+
+@pytest.mark.integration
+def test_current_identity_omits_a_workspace_with_only_deleted_installations(
+    migrated_db: MigratedDatabase,
+) -> None:
+    database_url, schema = migrated_db.url, migrated_db.schema
+    engine = create_async_engine(
+        database_url, connect_args={"options": f"-csearch_path={schema}"}, poolclass=NullPool
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    live = UUID("00000000-0000-4000-8000-000000000511")
+    retired = UUID("00000000-0000-4000-8000-000000000512")
+    mixed = UUID("00000000-0000-4000-8000-000000000513")
+    other_provider = UUID("00000000-0000-4000-8000-000000000514")
+    github_retired_live_other = UUID("00000000-0000-4000-8000-000000000515")
+    retired_other = UUID("00000000-0000-4000-8000-000000000516")
+
+    async def exercise() -> tuple[UUID, ...]:
+        async with factory.begin() as session:
+            await session.execute(
+                text("INSERT INTO github_user_profiles (id, login) VALUES (511, 'octocat')")
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO workspaces (id, name, daily_budget_usd) VALUES "
+                    "(:live, 'live', 0), (:retired, 'retired', 0), "
+                    "(:mixed, 'mixed', 0), (:other, 'other', 0), "
+                    "(:both, 'both', 0), (:retired_other, 'retired-other', 0)"
+                ),
+                {
+                    "live": live,
+                    "retired": retired,
+                    "mixed": mixed,
+                    "other": other_provider,
+                    "both": github_retired_live_other,
+                    "retired_other": retired_other,
+                },
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO provider_installations "
+                    "(id, workspace_id, provider, external_id, metadata, deleted_at) VALUES "
+                    "(:live_id, :live, 'github', 51101, '{}'::jsonb, NULL), "
+                    "(:retired_id, :retired, 'github', 51102, '{}'::jsonb, clock_timestamp()), "
+                    "(:mixed_live_id, :mixed, 'github', 51103, '{}'::jsonb, NULL), "
+                    "(:mixed_dead_id, :mixed, 'github', 51104, '{}'::jsonb, clock_timestamp()), "
+                    "(:other_id, :other, 'bitbucket', 51105, '{}'::jsonb, NULL), "
+                    "(:both_dead_id, :both, 'github', 51106, '{}'::jsonb, clock_timestamp()), "
+                    "(:both_live_id, :both, 'bitbucket', 51107, '{}'::jsonb, NULL), "
+                    "(:retired_other_id, :retired_other, 'bitbucket', 51108, '{}'::jsonb, "
+                    "clock_timestamp())"
+                ),
+                {
+                    "live_id": UUID("00000000-0000-4000-8000-0000000005a1"),
+                    "retired_id": UUID("00000000-0000-4000-8000-0000000005a2"),
+                    "mixed_live_id": UUID("00000000-0000-4000-8000-0000000005a3"),
+                    "mixed_dead_id": UUID("00000000-0000-4000-8000-0000000005a4"),
+                    "other_id": UUID("00000000-0000-4000-8000-0000000005a5"),
+                    "both_dead_id": UUID("00000000-0000-4000-8000-0000000005a6"),
+                    "both_live_id": UUID("00000000-0000-4000-8000-0000000005a7"),
+                    "retired_other_id": UUID("00000000-0000-4000-8000-0000000005a8"),
+                    "live": live,
+                    "retired": retired,
+                    "mixed": mixed,
+                    "other": other_provider,
+                    "both": github_retired_live_other,
+                    "retired_other": retired_other,
+                },
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO github_user_workspace_access (github_user_id, workspace_id) "
+                    "VALUES (511, :live), (511, :retired), (511, :mixed), (511, :other), "
+                    "(511, :both), (511, :retired_other)"
+                ),
+                {
+                    "live": live,
+                    "retired": retired,
+                    "mixed": mixed,
+                    "other": other_provider,
+                    "both": github_retired_live_other,
+                    "retired_other": retired_other,
+                },
+            )
+        async with SqlAlchemyAuthSessionUnitOfWork(factory) as uow:
+            _user, workspace_ids = await uow.sessions.current_identity(511)
+            return workspace_ids
+
+    try:
+        import selectors
+
+        assert asyncio.run(
+            exercise(),
+            loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
+        ) == (live, mixed, other_provider, github_retired_live_other)
+    finally:
+        import selectors
+
+        asyncio.run(
+            engine.dispose(),
+            loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
+        )
