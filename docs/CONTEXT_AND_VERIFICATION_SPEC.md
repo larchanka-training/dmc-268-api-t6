@@ -225,8 +225,6 @@ VCS; отсутствие patch не считается нулём измене�
 Счётчик порога не подменяет общий VCS total_lines или метрики coverage.
 Too_large с 20 001 изменённой строкой + 50 анализируемых строк даёт обычное
 ревью 50 строк с partial; только too_large при полном inventory даёт none по §2.2.
-Это целевой контракт #107: legacy main ещё считает too_large в пороге
-(`get_run_diff._changed_line_count`), его внедрение требует изменения кода.
 
 Ignore применяется до подсчёта: 4 000 исключённых строк + 50 разрешённых дают
 обычное ревью этих 50 строк. Backend сохраняет исходный доступный `patch` для UI,
@@ -2144,7 +2142,7 @@ review. Подтверждённый legacy-object связывается с run
 | Один путь unsupported, остальные изменения доступны | Файл отсутствует во всех LLM-источниках и inline; остальные проверяются, coverage partial; при пустых findings или только info verdict null |
 | Полный inventory: хотя бы один T, остальные только E/T (§2.2) | Каноническая ветка none: 0 LLM, пустые findings, verdict null; publishing → succeeded/neutral, без summaryOnly |
 | Доказанный binary-only; доказанный binary + код | E только по bounded evidence §9.2: skipped в первом случае; во втором возможны complete/clean |
-| Too_large-only; too_large >20 000 строк + 50 строк кода; маска assets/** + слишком большой assets/a.txt | Соответственно none; обычное ревью 50 строк с partial; skipped/ignored, так как маска побеждает too_large. Пока строки T входят в счётчик 3 000, too_large больше 3 000 строк — summary-only `diff_too_large`, coverage partial: соседние строки не ревьюятся |
+| Too_large-only; too_large >20 000 строк + 50 строк кода; маска assets/** + слишком большой assets/a.txt | Соответственно none; обычное ревью 50 строк с partial; skipped/ignored, так как маска побеждает too_large |
 | Identity_unresolved, submodule либо доказанный pure rename/mode-only, отдельно и с ignored, incomplete нет | T с каноническими исходами none/partial; отсутствие строк не превращается в clean |
 | Неполный inventory либо неизвестные relevant counters; отдельно missing-patch-only 4 000 known строк | Сначала summary-only/partial, summaryOnly=true, 0 LLM; none/skipped и no-text partial неприменимы |
 | Только incomplete без hunks (missing/malformed/truncated patch), а также I+E, I+T и I+E+T; полный inventory, known counters 0/3 000, текста нет | Backend partial, summaryOnly=false, findings=[], verdict=null, 0 LLM включая conventions/verifier; pins и below_severity_threshold_count=0 сохранены, reviewed_changed_lines=0 (поле — цель #107; сейчас тест закрепляет coverage.reviewed_files=0), неизвестная статистика null; publishing → succeeded/neutral. Построен на snapshot path (v4+) с #497 ч.3; legacy (≤ v3) публикует этот набор как summary-only `no_reviewable_files`, coverage partial, 0 LLM |

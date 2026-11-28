@@ -289,9 +289,9 @@ verifier нет, `llm.review_output` не пишется; trace — `policy.load
 `context.build → review.finalize → review.publish_start → github|gitlab|bitbucket.publish_review`, review — COMMENT.
 Legacy (≤ v3) по этому маршруту не идёт и вызывает conventions и ревью: unsupported_path и
 identity_unresolved там остаются incomplete (partial), too_large и unsupported_change дают
-none с вызовом модели, как с #283. Too_large сверх 3 000 counted строк остаётся summary-only
-(см. ниже): пока строки T входят в счётчик 3 000, такой файл вместе с соседними строками
-кода останавливается как `diff_too_large`, coverage partial, а не ревью тех строк.
+none с вызовом модели, как с #283. `too_large` не входит в порог 3 000 counted allowed строк
+(CVS §2.2–§2.3), поэтому такой файл вместе с соседними строками кода идёт в обычное
+ревью этих строк с coverage partial, а отдельно при полном inventory даёт backend none.
 Обычный missing patch или неполный inventory не разрешают эту ветку.
 Если нет анализируемого текста, есть incomplete (возможно E/T), inventory полный,
 relevant counters известны и counted allowed ≤3 000, целевой исход — backend partial:
@@ -306,7 +306,6 @@ counted allowed, в том числе missing-patch-only 4 000 строк. Вс�
 пишут `context.build`, сохраняют pins и below_severity_threshold_count=0,
 обходят conventions/reviewer/verifier и идут в общий review.finalize/publication plan; T19 завершает
 попытку без публикации. Классификация сохраняется до любого выхода, включая T19.
-Legacy main ещё включает too_large в порог; указанные маршруты — цель #107/#175.
 
 | `tool` | `request` (JSONB, только метаданные, ≤ 64 КБ) | `response` |
 |---|---|---|
