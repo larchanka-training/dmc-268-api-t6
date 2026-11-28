@@ -767,6 +767,7 @@ class SqlAlchemyRunRepository:
                 cost_usd=Decimal(cost_usd),
             ),
             triggered_by=run.triggered_by,
+            data_purged=run.data_purged_at is not None,
         )
 
     @staticmethod

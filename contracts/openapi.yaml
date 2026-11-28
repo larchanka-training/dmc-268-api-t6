@@ -307,7 +307,10 @@ paths:
       x-service: portal-api
       responses:
         "200":
-          description: One entry per changed file.
+          description: >-
+            One entry per changed file. A run whose diff text the retention job has cleared
+            (`dataPurged` on the run detail) still lists its files, each with `patch: null`; a
+            purged run that had no files returns `[]`.
           content:
             application/json:
               schema:
@@ -1750,6 +1753,7 @@ components:
         - verdict
         - severityCounts
         - budget
+        - dataPurged
       properties:
         id:
           type: string
@@ -1837,6 +1841,15 @@ components:
             - $ref: "#/components/schemas/RunBudget"
             - type: "null"
           description: Null before the first LLM call.
+        dataPurged:
+          type: boolean
+          description: >-
+            True once the retention job has cleared the run's stored diff text and contexts,
+            90 days after `finishedAt` of a run in a terminal state by default
+            (`RUN_DATA_RETENTION_DAYS`). Context payloads with the `summary_only` status stay.
+            `verdict`, `findings`, `severityCounts` and `summaryOnly` stay as they were, and
+            `/diff` still lists the run's files, each with `patch: null`. It does not depend on
+            `summaryOnly` or on the number of files: a cleared run that had no files lists none.
       additionalProperties: false
     FindingView:
       type: object
@@ -2101,6 +2114,8 @@ components:
             non-null `patch` does not mean the model reviewed the file. Null when no provider
             patch is available for the file (for example a binary or oversized file), in any
             run. `patch` does not tell a summary-only run apart: read `summaryOnly` on the run.
+            Null for every file once the run's diff text has been cleared after the retention
+            period: read `dataPurged` on the run detail.
       additionalProperties: false
     FileSlice:
       type: object

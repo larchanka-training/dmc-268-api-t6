@@ -556,6 +556,8 @@ def test_the_run_answers_do_not_change_after_the_cleanup(
         after = _run_answers(client)
         _on_database(portal_env, report)
 
+    assert before["detail"].pop("dataPurged") is False
+    assert after["detail"].pop("dataPurged") is True
     assert after == before
     assert reports[1] == reports[0]
     assert after["detail"]["summaryOnly"] is summary_only
@@ -570,10 +572,32 @@ def test_the_run_answers_do_not_change_after_the_cleanup(
     assert pull["latestRun"]["verdict"] == verdict
 
 
-def test_the_diff_of_a_purged_run_answers_with_its_files_without_text(portal_env: Env) -> None:
+_FILES = ("src/a.py", "vendor/big.js")
+
+
+@pytest.mark.parametrize(
+    ("files", "marked", "finished_at", "data_purged", "summary_only", "patched"),
+    [
+        pytest.param(True, False, _OLD, True, False, [False, False], id="purged"),
+        pytest.param(False, False, _OLD, True, False, [], id="purged-without-files"),
+        pytest.param(True, False, _NOW, False, False, [True, True], id="ordinary"),
+        pytest.param(True, True, _NOW, False, True, [True, True], id="summary-only"),
+        pytest.param(False, False, _NOW, False, False, [], id="without-files"),
+    ],
+)
+def test_the_run_detail_and_diff_tell_a_purged_run_apart(
+    portal_env: Env,
+    files: bool,
+    marked: bool,
+    finished_at: datetime,
+    data_purged: bool,
+    summary_only: bool,
+    patched: list[bool],
+) -> None:
     async def prepare(factory: Factory) -> None:
-        await _store_run_data(factory, RUN_DONE, PR_OPEN)
-        await _finish(factory, RUN_DONE, "succeeded")
+        if files:
+            await _store_run_data(factory, RUN_DONE, PR_OPEN, marked=marked)
+        await _finish(factory, RUN_DONE, "succeeded", finished_at=finished_at)
 
     async def purge(factory: Factory) -> None:
         assert await _task(factory).run(30) is False
@@ -581,13 +605,17 @@ def test_the_diff_of_a_purged_run_answers_with_its_files_without_text(portal_env
     _on_database(portal_env, prepare)
     _on_database(portal_env, purge)
     with api(portal_env, AuthScope(42, (WS_A,))) as (client, _factory):
-        answer = client.get(f"/api/runs/{RUN_DONE}/diff")
+        detail = client.get(f"/api/runs/{RUN_DONE}")
+        diff = client.get(f"/api/runs/{RUN_DONE}/diff")
 
-    assert answer.status_code == 200
-    assert answer.json() == [
-        {"filename": "src/a.py", "patch": None},
-        {"filename": "vendor/big.js", "patch": None},
-    ]
+    assert detail.status_code == 200
+    assert detail.json()["dataPurged"] is data_purged
+    assert detail.json()["summaryOnly"] is summary_only
+    # A run without files, purged or not, answers an empty list, never 404.
+    assert diff.status_code == 200
+    assert [(item["filename"], item["patch"] is not None) for item in diff.json()] == list(
+        zip(_FILES, patched, strict=False)
+    )
 
 
 _SOURCE = "print('client code')\n"
