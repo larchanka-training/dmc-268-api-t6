@@ -1,0 +1,43 @@
+[project]
+name = "review-bot"
+version = "0.1.0"
+description = "Assigns reviewers to pull requests and sends a review digest to Telegram (#601)"
+requires-python = "==3.13.*"
+dependencies = [
+    "pyjwt[crypto]>=2.10.1",
+    "tzdata>=2025.2",
+]
+
+[project.scripts]
+review-bot = "review_bot.main:main"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/review_bot"]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18.2",
+    "pytest>=8.4.2",
+    "ruff>=0.14.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["src", "tests"]
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

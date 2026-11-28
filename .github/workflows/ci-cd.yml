@@ -658,6 +658,40 @@ jobs:
           retention-days: 7
           overwrite: true
 
+  review-bot-checks:
+    # The review bot (#601) is its own uv project in review_bot/; the root gates exclude it from
+    # mypy, so its lint, types and tests run here. Not a required check of ruleset `main`.
+    name: Review bot lint / type / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: review_bot
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.11"
+          python-version: "3.13"
+
+      - name: uv sync
+        run: uv sync --locked
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format
+        run: uv run ruff format --check .
+
+      - name: mypy
+        run: uv run mypy
+
+      - name: Tests
+        run: uv run pytest -rs
+
   openapi-lint:
     # The name is a required status check on main; keep it verbatim.
     name: OpenAPI lint
@@ -1406,6 +1440,121 @@ jobs:
             set +o xtrace
             chmod +x "${MONITORING_DIR}/deploy.sh"
             "${MONITORING_DIR}/deploy.sh"
+
+  # Review bot (#601, docs/CICD.md "Review bot"): its own compose project on the same host, built
+  # there from review_bot/. Deployed after a successful application deploy, like the monitoring
+  # stack, only when review_bot/ changed in the push (any manual run deploys). Until its secrets
+  # exist in Environment staging the job skips with a notice and stays green.
+  deploy-review-bot:
+    name: Deploy review bot
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.deploy-staging.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    needs: deploy-staging
+    concurrency:
+      group: review-bot-deploy
+      cancel-in-progress: false
+    environment:
+      name: staging
+    env:
+      REVIEW_BOT_DIR: /opt/dmc-268-review-bot
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether to deploy
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          HAS_APP_ID: ${{ secrets.REVIEW_BOT_APP_ID != '' || vars.REVIEW_BOT_APP_ID != '' }}
+          HAS_APP_PRIVATE_KEY: ${{ secrets.REVIEW_BOT_APP_PRIVATE_KEY != '' }}
+          HAS_TELEGRAM_BOT_TOKEN: ${{ secrets.REVIEW_BOT_TELEGRAM_BOT_TOKEN != '' }}
+          HAS_TELEGRAM_CHAT_ID: ${{ secrets.REVIEW_BOT_TELEGRAM_CHAT_ID != '' }}
+          HAS_TEAM: ${{ secrets.REVIEW_BOT_TEAM != '' }}
+        run: |
+          deploy=true
+          if [[ "${EVENT}" == "push" ]]; then
+            # A new branch tip or a force push has no usable "before": deploy to be safe.
+            if [[ "${BEFORE}" =~ ^[0-9a-f]{40}$ && ! "${BEFORE}" =~ ^0+$ ]] && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+              if git diff --quiet "${BEFORE}" "${GITHUB_SHA}" -- review_bot; then
+                deploy=false
+                echo "::notice::Review bot: review_bot/ unchanged in this push, deploy skipped"
+              fi
+            fi
+          fi
+          if [[ "${deploy}" == true ]]; then
+            missing=()
+            [[ "${HAS_APP_ID}" == true ]] || missing+=(REVIEW_BOT_APP_ID)
+            [[ "${HAS_APP_PRIVATE_KEY}" == true ]] || missing+=(REVIEW_BOT_APP_PRIVATE_KEY)
+            [[ "${HAS_TELEGRAM_BOT_TOKEN}" == true ]] || missing+=(REVIEW_BOT_TELEGRAM_BOT_TOKEN)
+            [[ "${HAS_TELEGRAM_CHAT_ID}" == true ]] || missing+=(REVIEW_BOT_TELEGRAM_CHAT_ID)
+            [[ "${HAS_TEAM}" == true ]] || missing+=(REVIEW_BOT_TEAM)
+            if (( ${#missing[@]} )); then
+              deploy=false
+              echo "::notice::Review bot: deploy skipped, Environment staging lacks: ${missing[*]} (docs/CICD.md, Review bot)"
+            fi
+          fi
+          echo "deploy=${deploy}" >> "${GITHUB_OUTPUT}"
+
+      - name: Bundle review bot secrets
+        id: secrets
+        if: steps.plan.outputs.deploy == 'true'
+        env:
+          REVIEW_BOT_APP_ID: ${{ secrets.REVIEW_BOT_APP_ID || vars.REVIEW_BOT_APP_ID }}
+          REVIEW_BOT_APP_PRIVATE_KEY: ${{ secrets.REVIEW_BOT_APP_PRIVATE_KEY }}
+          REVIEW_BOT_TELEGRAM_BOT_TOKEN: ${{ secrets.REVIEW_BOT_TELEGRAM_BOT_TOKEN }}
+          REVIEW_BOT_TELEGRAM_CHAT_ID: ${{ secrets.REVIEW_BOT_TELEGRAM_CHAT_ID }}
+          REVIEW_BOT_TEAM: ${{ secrets.REVIEW_BOT_TEAM }}
+        run: |
+          # The bundle format of deploy/scripts/env-file.sh: one opaque base64 line, so the PEM and
+          # the roster JSON survive the SSH action; review_bot/deploy.sh decodes it on the host.
+          names=(REVIEW_BOT_APP_ID REVIEW_BOT_APP_PRIVATE_KEY REVIEW_BOT_TELEGRAM_BOT_TOKEN REVIEW_BOT_TELEGRAM_CHAT_ID REVIEW_BOT_TEAM)
+          bundle="$(
+            for name in "${names[@]}"; do
+              printf '%s=%s\n' "${name}" "$(printf '%s' "${!name}" | base64 | tr -d '\n')"
+            done | base64 | tr -d '\n'
+          )"
+          echo "::add-mask::${bundle}"
+          echo "bundle=${bundle}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload review bot files
+        if: steps.plan.outputs.deploy == 'true'
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
+        with:
+          host: ${{ needs.deploy-staging.outputs.host }}
+          port: ${{ needs.deploy-staging.outputs.port }}
+          username: ${{ needs.deploy-staging.outputs.mode == 'course' && secrets.VPS_DMC268_U || vars.STAGING_SSH_USER }}
+          key: ${{ needs.deploy-staging.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
+          password: ${{ needs.deploy-staging.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          source: "review_bot/Dockerfile,review_bot/compose.yml,review_bot/deploy.sh,review_bot/pyproject.toml,review_bot/uv.lock,review_bot/src"
+          target: ${{ env.REVIEW_BOT_DIR }}
+          strip_components: 1
+
+      - name: Deploy review bot
+        if: steps.plan.outputs.deploy == 'true'
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          REVIEW_BOT_SECRETS_B64: ${{ steps.secrets.outputs.bundle }}
+        with:
+          host: ${{ needs.deploy-staging.outputs.host }}
+          port: ${{ needs.deploy-staging.outputs.port }}
+          username: ${{ needs.deploy-staging.outputs.mode == 'course' && secrets.VPS_DMC268_U || vars.STAGING_SSH_USER }}
+          key: ${{ needs.deploy-staging.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
+          password: ${{ needs.deploy-staging.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          debug: false
+          envs: REVIEW_BOT_DIR,REVIEW_BOT_SECRETS_B64
+          script: |
+            set -euo pipefail
+            set +o xtrace
+            chmod +x "${REVIEW_BOT_DIR}/deploy.sh"
+            "${REVIEW_BOT_DIR}/deploy.sh"
 
   promote-staging:
     name: Promote staging tag

@@ -18,6 +18,7 @@ flowchart TD
   pr --> tf["terraform fmt / validate\n(api + ui stacks)"]
   pr --> caddy["caddy validate\n(deploy/edge/Caddyfile)\n(required check)"]
   pr --> mon["promtool / amtool / blackbox / compose config\n(deploy/monitoring)"]
+  pr --> rbc["review-bot-checks\n(review_bot)"]
   pr --> lint["tflint + checkov"]
   pr --> unit["ruff check / format, mypy, replay,\npytest без integration, xdist"]
   pr --> integ["pytest -m integration:\n4 шарда pytest-split, свои PG и RabbitMQ"]
@@ -44,6 +45,7 @@ flowchart TD
   health -->|ok| promote["promote digest → :staging"]
   promote --> done["staging обновлён"]
   health -->|ok| monitoring["deploy-monitoring: Prometheus, Grafana,\nAlertmanager (docs/MONITORING.md)"]
+  health -->|ok| review_bot["deploy-review-bot: review_bot (§9)"]
   health -->|fail| rb["rollback: previous или bootstrap\n(§5: Действия при отказе)"]
   deploy -->|fail| switched{"релиз переключён?\n(§5: Действия при отказе)"}
   switched -->|да| rb
@@ -59,6 +61,7 @@ flowchart TD
 | `Terraform fmt / validate` | PR и `main` | `contents: read` | `fmt -check`, `validate` для `api-staging` и `ui-staging` |
 | `Edge Caddyfile validate` | PR и `main` | `contents: read` | `caddy validate` для `deploy/edge/Caddyfile` с `APP_DOMAIN=example.test` — та же команда, что вручную (§8.2); образ caddy читается из `deploy/edge/compose.yml`, второго тега в workflow нет. Имя — required check в правилах `main`, менять только вместе с ними. Входит в `needs` у `Push Docker image`: Caddyfile с ошибкой не доходит до `caddy reload` при выкате |
 | `Monitoring config validate` | PR и `main` | `contents: read` | `scripts/validate_monitoring.sh`: `promtool check config` и `promtool test rules` (`tests/monitoring/alerts.test.yml`), `amtool check-config` обоих вариантов Alertmanager (Telegram и без получателя) и шаблона сообщения, `--config.check` blackbox exporter, `docker compose config` в режимах edge и ports (и с `compose.prod.yml`), `nginx -t` конфига ретранслятора prod, JSON дашбордов. Образы — из `deploy/monitoring/compose.yml` ([MONITORING.md](MONITORING.md)) |
+| `Review bot lint / type / test` | PR и `main` | `contents: read` | `review-bot-checks`: в `review_bot/` (свой `pyproject.toml`, исключён из корневого `mypy`) запускает `uv sync --locked`, `ruff check .`, `ruff format --check .`, `mypy` и `pytest` (§9); в required checks правил `main` не входит |
 | `Terraform lint / security` | PR и `main` | `contents: read` | TFLint + Checkov (встроенные и custom policies `.checkov/policies`); отдельный шаг проверяет, что каждая custom policy падает на `.checkov/fixtures/bad` |
 | `Python lint / type / unit` | PR и `main` | `contents: read` | uv 0.12.11, Python 3.13, без service containers, до 20 мин: первый шаг после checkout падает, если в git есть файлы каталога `docs/plans` (`git ls-files docs/plans` не пуст: планы — локальные рабочие файлы и не коммитятся, #265), затем `uv sync --locked --all-groups`, `ruff check`, `ruff format --check` (Markdown исключён в `pyproject.toml`), `mypy`. Шаг «Unit tests (zero skips)» — `pytest -m "not integration" -n auto --strict-markers` (pytest-xdist) с гейтом покрытия 100% на `review_output` и `answers`; падает, если хоть один тест skipped (xfail не считается). Затем список `pytest --collect-only -q --strict-markers -m integration` выгружается для `Python lint / type / test` (artifact `collected-integration-tests`). Последний шаг «Gold corpus and recorded replay» запускает `validate_dataset.py --final` и `eval_replay.py` по закоммиченному baseline; без response manifest job падает |
 | `Python integration (k/4)` | PR и `main` | `contents: read` | matrix из четырёх шардов, `fail-fast: false`, до 20 мин. У каждого шарда свои service-контейнеры PostgreSQL 17 и RabbitMQ 4 (`TEST_DATABASE_URL`, `RABBITMQ_URL`): integration-тесты делят advisory-lock с фиксированными ключами, каналы NOTIFY и имена очередей, поэтому параллелятся раннерами, не xdist. `pytest -m integration --strict-markers --splits 4 --group k` (pytest-split) делит набор по закоммиченному `.test_durations`, без него — поровну по числу тестов, и перезаписывает файл длительностями выполненных в шарде тестов (`--store-durations --clean-durations`); junit шарда и эти длительности — artifact `integration-k`. Файл читается по пути pytest-split по умолчанию, внутри checkout: rootdir и конфиг `pyproject.toml` pytest выбирает до того, как плагины добавят `--durations-path`, поэтому существующий файл вне checkout сдвигает rootdir, и шард идёт без конфига; `--strict-markers` в этом случае валит сбор (маркер `integration` не зарегистрирован) |
@@ -70,6 +73,7 @@ flowchart TD
 | `Push Docker image` | только `main` | `contents: read`, `packages: write`, `actions: read` | push `:sha`, resolve digest (тот же artifact, что прошёл Trivy) |
 | `Deploy staging` | только `main` | `contents: read`, `packages: read` | выбор цели (курсовой VPS или Terraform-хост, §8), bundle и networkless GitLab preflight в immutable target image до SCP/SSH, подготовка хоста (Docker, на VPS — edge-прокси), Compose по digest, health check, авто-rollback после переключения релиза (на первом выкате без previous — bootstrap); до переключения релиз сохраняется (§5, «Действия при отказе») |
 | `Deploy monitoring` | только `main`, после успешного `Deploy staging` | `contents: read` | загружает `deploy/monitoring` в `/opt/dmc-268-monitoring` и запускает его `deploy.sh` ([MONITORING.md](MONITORING.md) §6), в том числе Tempo — приёмник трейсов приложения (§11); новых jobs и secrets трейсинг не добавляет. Отдельный job и своя группа concurrency `staging-monitoring`: его сбой не откатывает приложение, а в `staging-deploy` он держал бы lock VPS на время своего выката и задерживал `Promote staging tag` и всех ждущих за ним |
+| `Deploy review bot` | только `main`, после успешного `Deploy staging` (при изменении `review_bot/` или ручном запуске) | `contents: read` | собирает бандл секретов из Environment `staging` ([SECRETS.md](SECRETS.md#бот-ревью-review_bot-cicd-9)) и деплоит `review_bot/` в `/opt/dmc-268-review-bot` через `review_bot/deploy.sh` в своей concurrency-группе `review-bot-deploy` (§9.1); при нехватке секретов пропускается с notice |
 | `Promote staging tag` | после успешного health check | `contents: read`, `packages: write` | под lock `staging-deploy` читает `.deploy-state` на VM; если там всё ещё этот digest — `:staging-previous` ← `:staging`, `:staging` ← проверенный digest, иначе warning и пропуск |
 
 **Обновление `.test_durations`.** По этому файлу в корне репозитория pytest-split балансирует integration-шарды; в нём только integration-тесты. Создать или обновить: скачать artifact `test-durations` зелёного прогона `main` (Actions → прогон CI/CD → Artifacts), распаковать в корень репозитория (внутри один файл `.test_durations`) и закоммитить отдельным PR. Другое место для файла не задавать: `--durations-path` вне checkout сдвигает rootdir pytest (см. `Python integration (k/4)` выше). Устаревший файл корректности не нарушает: тест без записи получает среднюю длительность, страдает только баланс шардов.
@@ -983,6 +987,70 @@ Caddy (compose project `dmc-268-edge`, `/opt/dmc-268-edge`) принимает 8
 `staging-webhook` (то же решение). Хост остаётся зарезервированным под отдельный сервис приёма вебхуков и до его появления отвечает заглушкой 503. GitHub App шлёт вебхуки на `https://staging-api.<APP_DOMAIN>/webhooks/github`, их принимает API. Маршрут с этого хоста на API не заведён намеренно: вторая публичная точка входа для того же эндпоинта не нужна, а 503 в журнале доставок GitHub сразу показывает ошибочно настроенный URL.
 
 HSTS: `max-age=31536000` без `includeSubDomains` и `preload`. ACME email не задан.
+
+## 9. Бот ревью (#601)
+
+Сервис описан в [INFRASTRUCTURE.md](INFRASTRUCTURE.md#9-бот-ревью-601). Код в `review_bot/`, свой uv-проект: корневые гейты его не проверяют (`mypy .` исключает `review_bot/`), для него есть job **Review bot lint / type / test** (`review-bot-checks`, на каждом PR и push). Локально:
+
+```bash
+cd review_bot
+uv sync --locked
+uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pytest
+```
+
+### 9.1. Деплой
+
+Job **Deploy review bot** (`deploy-review-bot`) в `.github/workflows/ci-cd.yml` устроен как деплой мониторинга: идёт после успешного `deploy-staging` на тот же хост и тем же входом (`appleboy/scp-action` и `appleboy/ssh-action`), в Environment `staging`, в своей concurrency-группе `review-bot-deploy` (lock `staging-deploy` он не берёт). Шаги:
+
+1. **Decide whether to deploy**: на push в `main` деплой идёт, только если в push изменился `review_bot/`; ручной запуск (`workflow_dispatch` на `main`) деплоит всегда. Если в Environment нет хотя бы одного секрета из §9.3, job завершается зелёным с notice `deploy skipped, Environment staging lacks: ...` и имена недостающих секретов.
+2. **Bundle review bot secrets**: секреты собираются в один base64-бандл формата `deploy/scripts/env-file.sh` (строки `NAME=<base64 значения>`), значение маскируется.
+3. **Upload review bot files**: `Dockerfile`, `compose.yml`, `deploy.sh`, `pyproject.toml`, `uv.lock`, `src/` в `/opt/dmc-268-review-bot`.
+4. **Deploy review bot**: `review_bot/deploy.sh` на хосте проверяет бандл (только имена из allowlist, все пять на месте), пишет `review-bot.env` (mode 600) и запускает `docker compose -p dmc-268-review-bot -f compose.yml up -d --build --wait`. Job красный, если контейнер не стал healthy за 4 минуты, например при ошибке конфигурации: в логе контейнера имя переменной, без значения.
+
+Первый деплой после того, как секреты заведены: **Actions → CI/CD → Run workflow** на `main`. Остановить бота: `docker compose -p dmc-268-review-bot -f /opt/dmc-268-review-bot/compose.yml stop`; данные остаются в volume.
+
+### 9.2. Состав команды и пороги
+
+Состав команды в репозитории не хранится (он публичный): это secret `REVIEW_BOT_TEAM` в Environment `staging`, JSON-список `{"github": "<логин>", "telegram": "<ник без @>"}`. Пример с выдуманными именами: `review_bot/team.example.json`.
+
+Добавить или убрать человека:
+
+1. Взять текущий JSON у того, кто ведёт secret (GitHub не показывает значение secret), добавить или убрать запись.
+2. **Settings → Environments → staging → Secrets → `REVIEW_BOT_TEAM` → Update**.
+3. Запустить **CI/CD → Run workflow** на `main`: бот перезапустится с новым составом.
+
+Новый участник должен быть collaborator в обоих репозиториях, иначе GitHub не даст запросить у него ревью (бот пропустит его и возьмёт следующего, в логе `GitHub refused reviewer`).
+
+Пороги заданы в `environment:` сервиса `bot` в `review_bot/compose.yml`; меняются PR-ом в этот файл, после merge job деплоит бота сам:
+
+| Переменная | По умолчанию | Смысл |
+|---|---|---|
+| `REVIEW_BOT_BATCH_MIN_PRS` | `2` | столько PR в копилке нужно для отправки по тишине |
+| `REVIEW_BOT_QUIET_MINUTES` | `30` | минут без новых PR в копилке |
+| `REVIEW_BOT_MAX_WAIT_MINUTES` | `120` | самый старый PR в копилке ждёт не дольше |
+| `REVIEW_BOT_DIGEST_TIME` | `18:00` | время вечернего дайджеста |
+| `REVIEW_BOT_DIGEST_TIMEZONE` | `Europe/Berlin` | часовой пояс дайджеста |
+| `REVIEW_BOT_AGE_HOURS` | `10` | возраст в дайджесте и `/mine` показывается, если PR ждёт дольше |
+| `REVIEW_BOT_URGENT_LABEL` | `urgent` | метка срочного PR |
+| `REVIEW_BOT_POLL_SECONDS` | `60` | интервал опроса GitHub |
+| `REVIEW_BOT_REPOS` | оба репо команды | пары `owner/name=alias`, alias виден в сообщении (`api#562`) |
+
+### 9.3. Secrets и как их получить
+
+Все пять секретов задаются в Environment `staging` (Settings → Environments → staging); имена, назначение и куда они попадают сведены в [SECRETS.md](SECRETS.md#бот-ревью-review_bot-cicd-9). Доступ к хосту и fingerprint берутся те же, что у `deploy-staging` (§6).
+
+GitHub App (отдельный от основного App сервиса):
+
+1. Организация `larchanka-training` → **Settings → Developer settings → GitHub Apps → New GitHub App**. Имя, например `dmc-268-review-bot`; Homepage URL: ссылка на этот репозиторий; **Webhook: Active** снять (бот опрашивает API сам).
+2. **Repository permissions**: Pull requests: **Read and write**, Metadata: **Read-only**. Остальное: No access. Where can this GitHub App be installed: Only on this account.
+3. **Create GitHub App**, записать App ID → `REVIEW_BOT_APP_ID`. **Generate a private key**, содержимое скачанного `.pem` → `REVIEW_BOT_APP_PRIVATE_KEY`, сам файл удалить.
+4. **Install App** → Only select repositories: `dmc-268-api-t6` и `dmc-268-ui-t6`.
+
+Telegram-бот:
+
+1. В Telegram у @BotFather: `/newbot`, имя и username бота; токен → `REVIEW_BOT_TELEGRAM_BOT_TOKEN`. `/setcommands`: `mine - твои PR сейчас`. `/setprivacy` → **Disable**: с включённым privacy mode Telegram гарантирует боту в группе только команды с его именем (`/mine@<username бота>`), а простой `/mine` может не дойти.
+2. Добавить бота в чат команды.
+3. id чата: написать в чат любое сообщение, затем открыть `https://api.telegram.org/bot<токен>/getUpdates` и взять `message.chat.id` → `REVIEW_BOT_TELEGRAM_CHAT_ID`. Делать это до первого деплоя: работающий бот сам читает обновления, и в `getUpdates` их уже не будет.
 
 ## Bitbucket Cloud staging (#333)
 

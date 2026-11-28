@@ -779,6 +779,18 @@ Prod-выкат (`deploy-prod.yml`, job `deploy-prod`) идёт в Environment `
 
 Пароли ролей PostgreSQL передаются в `psql` через stdin, не через argv; вывод этого вызова подавлен, потому что `psql` повторил бы упавший оператор вместе с паролем.
 
+### Бот ревью (`review_bot`, [CICD](CICD.md#9-бот-ревью-601))
+
+Отдельный compose-стек `dmc-268-review-bot` в `/opt/dmc-268-review-bot`; выкатывает его job `Deploy review bot` (`review_bot/deploy.sh`, [CICD §9](CICD.md#9-бот-ревью-601)). Если хотя бы один из пяти секретов не задан, job пропускается с notice.
+
+| Имя | Тип и уровень | Куда уходит | Назначение |
+|---|---|---|---|
+| `REVIEW_BOT_APP_ID` | secret (допустима variable), Environment `staging` | `review-bot.env` (0600), контейнер `bot` | App ID отдельного GitHub App бота ревью |
+| `REVIEW_BOT_APP_PRIVATE_KEY` | secret, Environment `staging` | `review-bot.env` (0600), контейнер `bot` | Приватный ключ (PEM целиком) GitHub App бота ревью для выпуска installation tokens |
+| `REVIEW_BOT_TELEGRAM_BOT_TOKEN` | secret, Environment `staging` | `review-bot.env` (0600), контейнер `bot` | Токен Telegram-бота от `@BotFather` |
+| `REVIEW_BOT_TELEGRAM_CHAT_ID` | secret, Environment `staging` | `review-bot.env` (0600), контейнер `bot` | ID командного чата в Telegram (отрицательное число `-100…`) |
+| `REVIEW_BOT_TEAM` | secret, Environment `staging` | `review-bot.env` (0600), контейнер `bot` | JSON-список участников команды `[{"github": "...", "telegram": "..."}]` (пример с выдуманными именами — `review_bot/team.example.json`) |
+
 ### Только локально у оператора
 
 CI **не** делает `terraform apply`. Эти значения в GitHub Actions не заводят.
