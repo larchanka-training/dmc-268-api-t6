@@ -425,12 +425,16 @@ def test_gitlab_empty_added_blob_without_regular_file_proof_stays_missing_patch(
 
 
 def test_gitlab_empty_added_collapsed_file_is_omitted_without_blob_read() -> None:
-    # Collapsed omits line counts (CVS §2.3): file is left out, not 0-line missing_patch.
+    # Collapsed omits line counts (CVS §2.3): marked unknown_line_counts without blob read.
     async def scenario() -> None:
         result, blobs = await _fetch_gitlab_empty_added(collapsed=True)
         assert result.changed_files == ()
-        assert result.files == ()
-        assert result.omissions == ()
+        assert [(item.filename, item.unknown_line_counts) for item in result.files] == [
+            ("pkg/__init__.py", True)
+        ]
+        assert [(item.file.filename, item.reason.value) for item in result.omissions] == [
+            ("pkg/__init__.py", "missing_patch")
+        ]
         assert result.pull_request.meta.files_changed == 1
         assert blobs == []
 

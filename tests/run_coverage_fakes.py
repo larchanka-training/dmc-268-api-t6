@@ -11,6 +11,7 @@ from app.modules.reviews.application.review_ignore import (
     IgnoreMatcher,
     apply_ignore,
     parse_review_ignore,
+    resolve_unknown_line_counts,
 )
 from app.modules.reviews.application.run_coverage import (
     RunCoverage,
@@ -62,6 +63,7 @@ def coverage_inputs(
         diff_old_sha="c" * 40,
     )
     ignore = apply_ignore(IgnoreMatcher(parse_review_ignore(rules)), diff)
+    diff = resolve_unknown_line_counts(diff, ignore)
     return project_run_coverage(files, diff, ignore=ignore), diff
 
 

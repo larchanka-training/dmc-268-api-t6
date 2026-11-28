@@ -165,6 +165,9 @@ class CodeChangeDiff(Base):
     summary_only: Mapped[bool] = mapped_column(
         BOOLEAN, nullable=False, server_default=text("false")
     )
+    unknown_line_counts: Mapped[bool] = mapped_column(
+        BOOLEAN, nullable=False, server_default=text("false")
+    )
     created_at: Mapped[datetime] = timestamp_column()
 
 

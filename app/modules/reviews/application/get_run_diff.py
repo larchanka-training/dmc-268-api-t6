@@ -32,6 +32,7 @@ class DiffSnapshot:
     omission_reason: str | None = None
     review_patch: str | None = None
     summary_only: bool = False
+    unknown_line_counts: bool = False
 
 
 def has_storable_provider_names(snapshot: DiffSnapshot) -> bool:
@@ -208,7 +209,7 @@ def _changed_line_count(files: list[DiffSnapshot]) -> int:
     return sum(
         file.additions + file.deletions
         for file in files
-        if file.omission_reason not in _UNCOUNTED_OMISSIONS
+        if file.omission_reason not in _UNCOUNTED_OMISSIONS and not file.unknown_line_counts
     )
 
 

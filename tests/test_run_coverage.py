@@ -198,3 +198,64 @@ def test_durable_classification_digest_changes_without_altering_raw_diff_identit
     assert proven.snapshot_digest != unproven.snapshot_digest
     assert proven.status.value == "complete"
     assert unproven.status.value == "partial"
+
+
+@pytest.mark.parametrize(
+    ("rules", "expected_status", "expected_complete"),
+    [
+        ("```review-ignore\nvendor/**\n```\n", "complete", True),
+        ("```review-ignore\nother/**\n```\n", "partial", False),
+    ],
+)
+def test_collapsed_unknown_line_counts_resolves_only_under_review_ignore(
+    rules: str,
+    expected_status: str,
+    expected_complete: bool,
+) -> None:
+    collapsed = DiffSnapshot(
+        "vendor/lib.go",
+        None,
+        None,
+        "modified",
+        omission_reason="missing_patch",
+        unknown_line_counts=True,
+    )
+    snapshots = [code_snapshot(), collapsed]
+    saved, diff = coverage_inputs(snapshots, expected=2, rules=rules)
+    assert diff.file_list_complete is expected_complete
+    assert saved.status.value == expected_status
+
+    stored = (
+        snapshots
+        if expected_complete
+        else [replace(code_snapshot(), summary_only=True, review_patch=None), collapsed]
+    )
+    if not expected_complete:
+        saved, diff = coverage_inputs(stored, expected=2, rules=rules)
+    restored = restore_context_coverage(
+        {"head_sha": "a" * 40},
+        {
+            "status": "context" if expected_complete else "summary_only",
+            "reason": None if expected_complete else "diff_inventory_incomplete",
+            "coverage": saved.to_json(),
+            "diff": {"digest": diff.digest, "diff_old_sha": "c" * 40},
+        },
+        snapshots=stored,
+        diff_map=diff,
+    )
+    assert restored is not None
+    assert restored.status.value == expected_status
+    assert restored.file_list_complete is expected_complete
+    if expected_complete:
+        assert restored.reviewed_files == 1
+        assert restored.exclusion_counts == {"ignored": 1}
+        assert [(item.path, item.reason) for item in saved.exclusions] == [
+            ("vendor/lib.go", "ignored")
+        ]
+    else:
+        assert restored.reviewed_files == 0
+        assert restored.reason_counts == {
+            "diff_inventory_incomplete": 1,
+            "missing_patch": 1,
+            "summary_only": 1,
+        }

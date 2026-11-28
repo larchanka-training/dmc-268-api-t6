@@ -265,6 +265,7 @@ class ReviewRunProcessor:
                             deletions=file.deletions,
                             changes=file.changes,
                             omission_reason=omission_by_path.get(file.filename),
+                            unknown_line_counts=file.unknown_line_counts,
                         )
                         for file in fetched.files
                     ]

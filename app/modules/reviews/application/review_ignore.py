@@ -21,7 +21,14 @@ from uuid import UUID
 import markdown_it
 from markdown_it import MarkdownIt
 
-from app.modules.reviews.application.diff_map import ChangeType, DiffMap, is_supported_path
+from app.modules.reviews.application.diff_map import (
+    _FILE_COUNT_MISMATCH,
+    _UNKNOWN_LINE_COUNTS,
+    ChangeType,
+    DiffMap,
+    is_supported_path,
+    with_inventory_completeness,
+)
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH, PolicySnapshot
 
@@ -448,3 +455,34 @@ def apply_ignore(
                 denied.update(withheld)
                 break
     return IgnoreResult(tuple(decisions), frozenset(denied))
+
+
+def resolve_unknown_line_counts(
+    diff_map: DiffMap,
+    ignore: IgnoreResult,
+    *,
+    builtin_excluded: Callable[[str], bool] = lambda path: False,
+) -> DiffMap:
+    """Resolve completeness for collapsed records whose valid paths are excluded by policy."""
+    if not any(file.unknown_line_counts for file in diff_map.files):
+        return diff_map
+    unresolved = False
+    for file in diff_map.files:
+        if not file.unknown_line_counts:
+            continue
+        if file.omission_reason is not None:
+            unresolved = True
+            break
+        names = [path for path in (file.old_path, file.new_path) if path is not None]
+        excluded_by_policy = ignore.decision_for(file.file_id) is not None or any(
+            builtin_excluded(path) for path in names
+        )
+        if not excluded_by_policy:
+            unresolved = True
+            break
+    reasons: list[str] = []
+    if _FILE_COUNT_MISMATCH in diff_map.incomplete_reasons:
+        reasons.append(_FILE_COUNT_MISMATCH)
+    if unresolved:
+        reasons.append(_UNKNOWN_LINE_COUNTS)
+    return with_inventory_completeness(diff_map, incomplete_reasons=tuple(reasons))

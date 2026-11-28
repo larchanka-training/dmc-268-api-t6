@@ -27,8 +27,14 @@ _LEGACY_TECHNICAL_REASON_CODES = frozenset({"too_large", "unsupported_change"})
 
 def snapshot_coverage_digest(snapshots: list[DiffSnapshot]) -> str:
     """Tie effective-policy classification to the exact durable model/VCS inputs."""
+    entries = []
+    for item in snapshots:
+        entry = asdict(item)
+        if not item.unknown_line_counts:
+            entry.pop("unknown_line_counts", None)
+        entries.append(entry)
     payload = json.dumps(
-        [asdict(item) for item in snapshots],
+        entries,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
@@ -50,10 +56,13 @@ def snapshot_vcs_file(snapshot: DiffSnapshot) -> VcsFile:
         snapshot.deletions,
         snapshot.changes,
         patch,
+        unknown_line_counts=snapshot.unknown_line_counts,
     )
 
 
 def empty_addition_candidate(snapshot: DiffSnapshot) -> bool:
+    if snapshot.unknown_line_counts:
+        return False
     # DiffMap conversion strips no-hunk metadata, but such raw metadata is not
     # proof of an absent patch. Only the exact stored empty wrapper may be removed.
     empty_wrapper = (

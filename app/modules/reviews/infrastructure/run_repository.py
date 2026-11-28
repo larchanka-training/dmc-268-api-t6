@@ -492,6 +492,7 @@ class SqlAlchemyRunRepository:
                     changes=snapshot.changes,
                     omission_reason=snapshot.omission_reason,
                     summary_only=snapshot.summary_only,
+                    unknown_line_counts=snapshot.unknown_line_counts,
                 )
                 for snapshot in snapshots
             ]
@@ -724,6 +725,7 @@ class SqlAlchemyRunRepository:
             omission_reason=row.omission_reason,
             review_patch=row.review_patch,
             summary_only=row.summary_only,
+            unknown_line_counts=bool(getattr(row, "unknown_line_counts", False)),
         )
 
     @staticmethod

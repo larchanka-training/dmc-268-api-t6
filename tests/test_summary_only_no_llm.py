@@ -915,3 +915,157 @@ def test_a_masked_text_file_stays_excluded_for_each_summary_only_reason() -> Non
         assert masked_row.review_patch is None
         _assert_no_model_call(outcome.trace)
         _assert_published_without_a_model(outcome.published)
+
+
+@pytest.mark.parametrize(
+    ("rules", "collapsed_record", "expect_review"),
+    [
+        (
+            b"```review-ignore\nvendor/**\n```\n",
+            {
+                "old_path": "vendor/lib.go",
+                "new_path": "vendor/lib.go",
+                "new_file": False,
+                "deleted_file": False,
+                "renamed_file": False,
+                "diff": "",
+                "collapsed": True,
+            },
+            True,
+        ),
+        (
+            b"```review-ignore\nother/**\n```\n",
+            {
+                "old_path": "vendor/lib.go",
+                "new_path": "vendor/lib.go",
+                "new_file": False,
+                "deleted_file": False,
+                "renamed_file": False,
+                "diff": "",
+                "collapsed": True,
+            },
+            False,
+        ),
+        (
+            b"```review-ignore\nvendor/**\n```\n",
+            {
+                "old_path": "vendor/a\x85b.go",
+                "new_path": "vendor/lib.go",
+                "new_file": False,
+                "deleted_file": False,
+                "renamed_file": True,
+                "diff": "",
+                "collapsed": True,
+            },
+            False,
+        ),
+    ],
+    ids=["ignored", "unignored", "unsafe-rename-never-ignored"],
+)
+def test_gitlab_collapsed_file_with_review_ignore_decides_completeness_after_masks(
+    rules: bytes,
+    collapsed_record: dict[str, Any],
+    expect_review: bool,
+) -> None:
+    import httpx
+
+    from app.modules.integrations.gitlab.infrastructure.run_http import GitLabRunHttp
+    from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsProvider
+    from app.modules.reviews.infrastructure.gitlab_vcs import HttpGitLabVcsProvider
+    from tests.gitlab_run_fakes import INPUT, POLICY, Credentials, Router
+
+    class _Selector:
+        def __init__(self, provider: VcsProvider) -> None:
+            self._provider = provider
+
+        def select(self, locator: PullRequestLocator) -> VcsProvider | None:
+            return self._provider
+
+    class _GitLabRuns(Runs):
+        async def get_run_vcs_input(self, run_id: UUID) -> RunVcsInput:
+            return RunVcsInput(
+                _CODE_CHANGE,
+                INPUT.repository_id,
+                INPUT.head_sha,
+                INPUT.base_sha,
+                INPUT.locator,
+            )
+
+    router = Router()
+    router.canonical["changes_count"] = "2"
+    router.files = [
+        {
+            **router.files[0],
+            "old_path": "src/app.py",
+            "new_path": "src/app.py",
+            "renamed_file": False,
+        },
+        collapsed_record,
+    ]
+    trace = Trace()
+    runs = _GitLabRuns(version="v5")
+    store = _store("v5")
+    publisher = Publisher()
+
+    async def scenario() -> None:
+        async with GitLabRunHttp(
+            credentials=Credentials(),
+            origin_policy=POLICY,
+            transport=httpx.MockTransport(router.response),
+        ) as http:
+            vcs = HttpGitLabVcsProvider(http=http)
+            stage = ReviewContextStage(
+                checkpoint=_checkpoint,
+                runs=runs,
+                vcs=vcs,
+                merge_base=vcs,
+                prepare_policy=PreparePolicySnapshot(
+                    uow_factory=lambda: Uow(store),
+                    source_factory=lambda pins: Policy(rules=rules),
+                ),
+                context_builder=lambda run: BuildReviewContext(
+                    source=Repository(), parser=Parser(), counter=EstimatedTokenCounter()
+                ),
+                trace=trace,
+                payloads=DiffFlag(runs),
+            )
+            processor = ReviewRunProcessor(
+                runs,
+                None,
+                conventions=GenerateRepoConventions(
+                    PolicyFilteredConventionsSource(ConventionsSource(), stage.excluded),
+                    ConventionsModel(trace),
+                    lambda: ConventionsUow(ConventionsStore(trace)),
+                ),
+                vcs_provider_selector=_Selector(vcs),
+                trace=trace,
+                uow_factory=processing_uow(runs),
+                context_stage=stage,
+            )
+            pipeline = ExecuteReviewRun(
+                processor,
+                Prompts(runs),
+                Model(trace, 2),
+                publisher,
+                context_filter=stage,
+                reflection_pass=ReflectionPass(Verifier(trace)),
+            )
+            assert await pipeline.execute(_RUN) is True
+
+    asyncio.run(scenario())
+    build = _context(trace)
+    if expect_review:
+        assert build["diff"]["file_list_complete"] is True
+        assert build["coverage"]["status"] == "complete"
+        assert build["coverage"]["reviewed_files"] == 1
+        assert build["coverage"]["exclusion_counts"] == {"ignored": 1}
+        assert build["coverage"]["exclusions"] == [
+            {"path": None, "reason": "ignored", "change_type": "modified"}
+        ]
+        assert any(call.get("operation") == "review" for call in _calls(trace))
+    else:
+        assert build["diff"]["file_list_complete"] is False
+        assert build["status"] == "summary_only"
+        assert build["reason"] == "diff_inventory_incomplete"
+        _assert_no_model_call(trace)
+        _assert_published_without_a_model(publisher.published)

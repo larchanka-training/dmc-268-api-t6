@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from hashlib import sha256
 from uuid import UUID
@@ -26,6 +26,7 @@ MAX_PATH_SEGMENTS = 128
 MAX_DIAGNOSTIC_CHARS = 1024
 
 _FILE_COUNT_MISMATCH = "file_count_mismatch"
+_UNKNOWN_LINE_COUNTS = "unknown_line_counts"
 
 
 class VcsProviderName(StrEnum):
@@ -128,6 +129,7 @@ class DiffFile:
     patch_digest: str | None
     omission_reason: DiffOmissionReason | None
     hunks: tuple[DiffHunk, ...]
+    unknown_line_counts: bool = False
 
     @property
     def anchorable(self) -> bool:
@@ -217,6 +219,11 @@ def build_diff_map(
     diff_old_sha: str | None,
 ) -> DiffMap:
     """Build the map from one complete provider read; no network and no database."""
+    reasons: list[str] = []
+    if len(files) != pull_request.meta.files_changed:
+        reasons.append(_FILE_COUNT_MISMATCH)
+    if any(file.unknown_line_counts for file in files):
+        reasons.append(_UNKNOWN_LINE_COUNTS)
     return build_diff_map_from_facts(
         files=files,
         provider=provider,
@@ -225,7 +232,72 @@ def build_diff_map(
         policy_base_sha=pull_request.base_sha,
         head_sha=pull_request.head_sha,
         diff_old_sha=diff_old_sha,
-        file_list_complete=len(files) == pull_request.meta.files_changed,
+        file_list_complete=not reasons,
+        incomplete_reasons=tuple(reasons),
+    )
+
+
+def _digest_incomplete_reasons(
+    file_list_complete: bool, diff_files: tuple[DiffFile, ...]
+) -> list[str]:
+    if file_list_complete:
+        return []
+    if any(file.unknown_line_counts for file in diff_files):
+        return [_UNKNOWN_LINE_COUNTS]
+    return [_FILE_COUNT_MISMATCH]
+
+
+def _diff_map_digest(
+    *,
+    provider: VcsProviderName,
+    repository_id: UUID,
+    code_change_number: int,
+    policy_base_sha: str,
+    head_sha: str,
+    diff_old_sha: str | None,
+    file_list_complete: bool,
+    diff_files: tuple[DiffFile, ...],
+) -> str:
+    payload = {
+        "schema_version": DIFF_MAP_SCHEMA_VERSION,
+        "parser_version": DIFF_MAP_PARSER_VERSION,
+        "provider": provider.value,
+        "repository_id": str(repository_id),
+        "code_change_number": code_change_number,
+        "policy_base_sha": policy_base_sha,
+        "head_sha": head_sha,
+        "diff_old_sha": diff_old_sha,
+        "file_list_complete": file_list_complete,
+        "incomplete_reasons": _digest_incomplete_reasons(file_list_complete, diff_files),
+        "files": [_file_digest_entry(file) for file in diff_files],
+    }
+    return _digest(payload)
+
+
+def with_inventory_completeness(
+    diff_map: DiffMap, *, incomplete_reasons: tuple[str, ...]
+) -> DiffMap:
+    """Recompute inventory completeness and digest after mask resolution."""
+    complete = not incomplete_reasons
+    if (
+        complete == diff_map.file_list_complete
+        and incomplete_reasons == diff_map.incomplete_reasons
+    ):
+        return diff_map
+    return replace(
+        diff_map,
+        file_list_complete=complete,
+        incomplete_reasons=incomplete_reasons,
+        digest=_diff_map_digest(
+            provider=diff_map.provider,
+            repository_id=diff_map.repository_id,
+            code_change_number=diff_map.code_change_number,
+            policy_base_sha=diff_map.policy_base_sha,
+            head_sha=diff_map.head_sha,
+            diff_old_sha=diff_map.diff_old_sha,
+            file_list_complete=complete,
+            diff_files=diff_map.files,
+        ),
     )
 
 
@@ -239,6 +311,7 @@ def build_diff_map_from_facts(
     head_sha: str,
     diff_old_sha: str | None,
     file_list_complete: bool,
+    incomplete_reasons: tuple[str, ...] | None = None,
 ) -> DiffMap:
     """Build from actual durable identities and inventory facts, without provider metadata."""
     identity: list[str | int] = [
@@ -248,20 +321,11 @@ def build_diff_map_from_facts(
         head_sha,
     ]
     diff_files = tuple(_build_file(identity, file) for file in files)
-    incomplete_reasons = () if file_list_complete else (_FILE_COUNT_MISMATCH,)
-    payload = {
-        "schema_version": DIFF_MAP_SCHEMA_VERSION,
-        "parser_version": DIFF_MAP_PARSER_VERSION,
-        "provider": provider.value,
-        "repository_id": str(repository_id),
-        "code_change_number": code_change_number,
-        "policy_base_sha": policy_base_sha,
-        "head_sha": head_sha,
-        "diff_old_sha": diff_old_sha,
-        "file_list_complete": file_list_complete,
-        "incomplete_reasons": list(incomplete_reasons),
-        "files": [_file_digest_entry(file) for file in diff_files],
-    }
+    resolved_reasons = (
+        tuple(_digest_incomplete_reasons(file_list_complete, diff_files))
+        if incomplete_reasons is None
+        else incomplete_reasons
+    )
     return DiffMap(
         schema_version=DIFF_MAP_SCHEMA_VERSION,
         parser_version=DIFF_MAP_PARSER_VERSION,
@@ -272,9 +336,18 @@ def build_diff_map_from_facts(
         head_sha=head_sha,
         diff_old_sha=diff_old_sha,
         file_list_complete=file_list_complete,
-        incomplete_reasons=incomplete_reasons,
+        incomplete_reasons=resolved_reasons,
         files=diff_files,
-        digest=_digest(payload),
+        digest=_diff_map_digest(
+            provider=provider,
+            repository_id=repository_id,
+            code_change_number=code_change_number,
+            policy_base_sha=policy_base_sha,
+            head_sha=head_sha,
+            diff_old_sha=diff_old_sha,
+            file_list_complete=file_list_complete,
+            diff_files=diff_files,
+        ),
     )
 
 
@@ -284,7 +357,7 @@ def _digest(value: object) -> str:
 
 
 def _file_digest_entry(file: DiffFile) -> dict[str, object]:
-    return {
+    entry: dict[str, object] = {
         "file_id": file.file_id,
         "old_path": file.old_path,
         "new_path": file.new_path,
@@ -298,6 +371,9 @@ def _file_digest_entry(file: DiffFile) -> dict[str, object]:
         "patch_digest": file.patch_digest,
         "omission_reason": None if file.omission_reason is None else file.omission_reason.value,
     }
+    if file.unknown_line_counts:
+        entry["unknown_line_counts"] = True
+    return entry
 
 
 def _change_type(file: VcsFile) -> ChangeType:
@@ -352,6 +428,7 @@ def _build_file(identity: list[str | int], file: VcsFile) -> DiffFile:
         # The content of a file with an unusable identity is never exposed through the map.
         omission_reason=omission,
         hunks=() if omission is not None else hunks,
+        unknown_line_counts=file.unknown_line_counts,
     )
 
 
@@ -371,7 +448,11 @@ def _omission(
 
 def _patch_state(file_id: str, file: VcsFile) -> tuple[PatchState, tuple[DiffHunk, ...]]:
     if file.patch is None or file.patch == "":
-        state = PatchState.METADATA_ONLY if file.changes == 0 else PatchState.MISSING
+        state = (
+            PatchState.METADATA_ONLY
+            if file.changes == 0 and not file.unknown_line_counts
+            else PatchState.MISSING
+        )
         return state, ()
     if "\x00" in file.patch:
         return PatchState.BINARY, ()
