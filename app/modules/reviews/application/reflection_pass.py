@@ -11,7 +11,7 @@ import json
 import logging
 import uuid
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Set
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from functools import cached_property
@@ -199,6 +199,60 @@ class VerifierWindow(Protocol):
     """
 
     def max_prompt_tokens(self) -> int: ...
+
+
+def _candidate_xml(
+    cand: CandidateFindingItem, *, shown_block_ids: Set[str] | None
+) -> str:
+    """One candidate as the verifier sees it.
+
+    ``shown_block_ids`` drops evidence the fit did not keep (CVS §5.2): a ref to a block
+    that is not in the prompt is not something the model can copy. ``None`` keeps every
+    ref, which is what the fit itself counts.
+    """
+    finding = cand.finding
+    suggestion = (
+        f"<suggestion>{xml_text(finding.suggestion)}</suggestion>\n"
+        if finding.suggestion is not None
+        else ""
+    )
+    rule = (
+        f'<rule_attribution name="{xml_attribute(finding.rule_name)}" />\n'
+        if finding.rule_name is not None
+        else ""
+    )
+    refs = finding.evidence_refs
+    if shown_block_ids is not None:
+        refs = [ref for ref in refs if ref.block_id in shown_block_ids]
+    evidence = ""
+    if refs:
+        refs_xml = "\n".join(
+            f'  <ref block_id="{xml_attribute(ref.block_id)}" '
+            f'start_line="{ref.start_line}" end_line="{ref.end_line}" />'
+            for ref in refs
+        )
+        evidence = f"<evidence_refs>\n{refs_xml}\n</evidence_refs>\n"
+    start = f'start_line="{finding.start_line}" ' if finding.start_line is not None else ""
+    return (
+        f'<candidate candidate_id="{xml_attribute(cand.candidate_id)}" '
+        f'path="{xml_attribute(finding.path)}" '
+        f"{start}"
+        f'line="{finding.line}" '
+        f'category="{xml_attribute(finding.category)}" '
+        f'severity="{xml_attribute(finding.severity)}">\n'
+        f"<title>{xml_text(finding.title)}</title>\n"
+        f"<body>{xml_text(finding.body)}</body>\n"
+        f"{suggestion}"
+        f"{rule}"
+        f"{evidence}"
+        f"</candidate>"
+    )
+
+
+def _candidates_xml(parts: list[str]) -> str:
+    return (
+        f'<candidate_findings count="{len(parts)}">\n' + "\n".join(parts) + "\n</candidate_findings>"
+    )
 
 
 def _verifier_code_context(
@@ -573,67 +627,28 @@ class VerifierPromptBuilder:
             conventions_rendered = builder.render_conventions(context.conventions)
             mandatory_blocks.append(conventions_rendered)
 
-        # 3. Candidate findings
-        cand_xml_list: list[str] = []
+        # 3. Candidate findings. A trial's token count names only the evidence refs whose
+        # blocks that trial still shows, which is the user message that trial would send.
+        cand_xml_list = [_candidate_xml(cand, shown_block_ids=None) for cand in candidates]
         candidate_blocks: list[ManifestBlock] = []
-        for cand in candidates:
-            f = cand.finding
-            sugg_tag = (
-                f"<suggestion>{xml_text(f.suggestion)}</suggestion>\n"
-                if f.suggestion is not None
-                else ""
-            )
-            rule_tag = (
-                f'<rule_attribution name="{xml_attribute(f.rule_name)}" />\n'
-                if f.rule_name is not None
-                else ""
-            )
-            evidence_tag = ""
-            if f.evidence_refs:
-                refs_xml = "\n".join(
-                    f'  <ref block_id="{xml_attribute(ref.block_id)}" '
-                    f'start_line="{ref.start_line}" end_line="{ref.end_line}" />'
-                    for ref in f.evidence_refs
-                )
-                evidence_tag = f"<evidence_refs>\n{refs_xml}\n</evidence_refs>\n"
-
-            start_attr = f'start_line="{f.start_line}" ' if f.start_line is not None else ""
-            category_attr = f'category="{xml_attribute(f.category)}" '
-            cand_xml = (
-                f'<candidate candidate_id="{xml_attribute(cand.candidate_id)}" '
-                f'path="{xml_attribute(f.path)}" '
-                f"{start_attr}"
-                f'line="{f.line}" '
-                f"{category_attr}"
-                f'severity="{xml_attribute(f.severity)}">\n'
-                f"<title>{xml_text(f.title)}</title>\n"
-                f"<body>{xml_text(f.body)}</body>\n"
-                f"{sugg_tag}"
-                f"{rule_tag}"
-                f"{evidence_tag}"
-                f"</candidate>"
-            )
-            cand_xml_list.append(cand_xml)
-            start_l = f.start_line or f.line
+        for cand, cand_xml in zip(candidates, cand_xml_list, strict=True):
+            finding = cand.finding
+            start_l = finding.start_line or finding.line
             candidate_blocks.append(
                 ManifestBlock(
                     block_id=cand.candidate_id,
                     source_role=SourceRole.CANDIDATE,
                     source_kind="candidate_findings",
-                    path=f.path,
+                    path=finding.path,
                     start_line=start_l,
-                    end_line=f.line,
+                    end_line=finding.line,
                     shown_line_count=1,
-                    shown_ranges=((start_l, f.line),),
+                    shown_ranges=((start_l, finding.line),),
                     tokens=None if manifest_counter is None else manifest_counter.count(cand_xml),
                 )
             )
 
-        candidates_xml = (
-            f'<candidate_findings count="{len(candidates)}">\n'
-            + "\n".join(cand_xml_list)
-            + "\n</candidate_findings>"
-        )
+        candidates_xml = _candidates_xml(cand_xml_list)
         mandatory_blocks.append(candidates_xml)
 
         # Context fitting per CVS §7.1 (:782): reserve room for IDs, candidates, and policy docs
@@ -645,9 +660,11 @@ class VerifierPromptBuilder:
             files: tuple[ChangedFile, ...],
             excerpts: tuple[ContextBlock, ...],
             retrieved: tuple[RetrievedBlock, ...],
+            findings_xml: str | None = None,
         ) -> str:
             code = _verifier_code_context(files, excerpts, retrieved)
-            return "\n".join([*mandatory_blocks[:-1], code, candidates_xml])
+            findings = candidates_xml if findings_xml is None else findings_xml
+            return "\n".join([*mandatory_blocks[:-1], code, findings])
 
         fitted_files = context.changed_files
         shown_excerpts = _cited_excerpts(context.context_blocks, candidates)
@@ -677,7 +694,15 @@ class VerifierPromptBuilder:
                 excerpts: tuple[ContextBlock, ...],
                 retrieved: tuple[RetrievedBlock, ...],
             ) -> int:
-                return system_tokens + counter.count(user_message(files, excerpts, retrieved))
+                shown_ids = {file_block_id(file.path) for file in files}
+                shown_ids.update(block.block_id for block in excerpts)
+                shown_ids.update(block.block_id for block in retrieved)
+                parts = [
+                    _candidate_xml(cand, shown_block_ids=shown_ids) for cand in candidates
+                ]
+                return system_tokens + counter.count(
+                    user_message(files, excerpts, retrieved, _candidates_xml(parts))
+                )
 
             if prompt_tokens((), (), ()) > max_send_budget:
                 raise RunFailure(
@@ -696,9 +721,22 @@ class VerifierPromptBuilder:
                 retrieved=shown_retrieved,
             )
 
+        shown_block_ids = {file_block_id(file.path) for file in fitted_files}
+        shown_block_ids.update(block.block_id for block in shown_excerpts)
+        shown_block_ids.update(block.block_id for block in shown_retrieved)
+        sent_parts = [
+            _candidate_xml(cand, shown_block_ids=shown_block_ids) for cand in candidates
+        ]
+        if manifest_counter is not None:
+            candidate_blocks = [
+                replace(block, tokens=manifest_counter.count(part))
+                for block, part in zip(candidate_blocks, sent_parts, strict=True)
+            ]
         prompt = VerifierPrompt(
             system=self._system_prompt,
-            user=user_message(fitted_files, shown_excerpts, shown_retrieved),
+            user=user_message(
+                fitted_files, shown_excerpts, shown_retrieved, _candidates_xml(sent_parts)
+            ),
         )
 
         # The manifest names exactly the shown code: never an uncited or dropped excerpt or

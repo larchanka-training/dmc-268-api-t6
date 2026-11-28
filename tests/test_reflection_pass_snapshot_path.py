@@ -608,6 +608,47 @@ def test_a_cited_rag_group_over_the_verifier_window_is_left_out() -> None:
     assert fitted[1].get_block(FIRST_PLACE.block_id) is None
 
 
+def test_a_dropped_rag_block_is_not_named_as_candidate_evidence() -> None:
+    # CVS §5.2: a block the fit left out is not in the prompt, so a copied ref cannot
+    # be the one the candidate XML still advertised (#596).
+    own_line = replace(
+        WITH_SLOT,
+        changed_files=(reflection_pass_module._with_lines(MAIN, (0,)),),
+        retrieved=(),
+    )
+    alone = _build((ON_PLACE,), own_line)
+
+    prompt, _manifest = _build((ON_PLACE,), WITH_SLOT, max_prompt_tokens=_prompt_tokens(alone[0]))
+
+    assert FIRST_PLACE.block_id not in prompt.user
+    assert f'block_id="{MAIN_BLOCK}"' in prompt.user
+
+
+class _ShownLineVerifier(_Supporter):
+    def max_prompt_tokens(self) -> int:
+        own_line = replace(
+            WITH_SLOT,
+            changed_files=(reflection_pass_module._with_lines(MAIN, (0,)),),
+            retrieved=(),
+        )
+        return _prompt_tokens(_build((ON_PLACE,), own_line)[0])
+
+
+def test_a_supported_decision_on_the_shown_diff_line_is_accepted_when_rag_was_dropped() -> None:
+    # The stored shape from #596: supported, evidence_refs, requirement_refs. The RAG
+    # block does not fit; the decision cites the diff line the fit kept.
+    verifier = _ShownLineVerifier(MAIN_BLOCK, 10, 10)
+
+    record = asyncio.run(
+        ReflectionPass(verifier).verify_recorded(candidates=(ON_PLACE,), context=WITH_SLOT)
+    )
+
+    assert [(decision.candidate_id, decision.status) for decision in record.decisions] == [
+        ("c-place", "supported")
+    ]
+    assert verifier.users and FIRST_PLACE.block_id not in verifier.users[0]
+
+
 ON_DEFINITION = _candidate(
     "c-definition",
     EvidenceRef(block_id=RETRIEVED_DEFINITION.block_id, start_line=1, end_line=1),
