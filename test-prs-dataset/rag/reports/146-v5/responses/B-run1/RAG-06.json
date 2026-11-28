@@ -1,0 +1,1 @@
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The new `Speed` type and `SPEED_FACTOR` constant are introduced cleanly, and `shippingCents` now accepts a `speed` parameter to adjust rates accordingly.", "effort": "none"}}

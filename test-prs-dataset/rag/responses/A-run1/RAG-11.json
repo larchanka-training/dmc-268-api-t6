@@ -1,1 +1,1 @@
-{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The new functions `log_request` and `run_erasure` integrate cleanly with the existing audit and purge utilities, and the docstrings clearly describe their purpose and return values.", "effort": "none"}}
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The new functions `log_request` and `run_erasure` integrate the existing `record` and `purge_account` helpers with clear docstrings and consistent audit logging.", "effort": "none"}}

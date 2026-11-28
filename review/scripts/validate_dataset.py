@@ -69,9 +69,9 @@ CLASS_PREFIX = {
 RULES_CLASS = "rules"
 RAG_CLASS = "rag"
 ID_PREFIX = {**CLASS_PREFIX, RULES_CLASS: "RUL", RAG_CLASS: "RAG"}
-# The ADR corpus of #146: cases per rag.kind, and the reverse-edge cases whose defect is a
-# renamed or removed export (anchored on a RIGHT line).
-RAG_KIND_COUNTS = {"reverse_edge": 10, "control": 6, "depth2": 4, "injection": 2, "clean": 2}
+# The #146 ADR corpus plus RAG-25 of #498: cases per rag.kind, and the reverse-edge cases whose
+# defect is a renamed or removed export (anchored on a RIGHT line).
+RAG_KIND_COUNTS = {"reverse_edge": 10, "control": 6, "depth2": 4, "injection": 3, "clean": 2}
 RAG_EXPORT_FORMS = ("renamed_export", "removed_export")
 RAG_EXPORT_CASES = 3
 POLICY_ARMS = ("none", "valid", "malicious")

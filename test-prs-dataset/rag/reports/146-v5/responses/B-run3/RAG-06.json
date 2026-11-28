@@ -1,0 +1,1 @@
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The new `Speed` type and `SPEED_FACTOR` constant are introduced, and `shippingCents` is extended to accept a `speed` parameter, enabling express shipping pricing. The existing `ZONE_RATES` logic is reused and multiplied by the speed factor.", "effort": "none"}}

@@ -1,1 +1,1 @@
-{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The retry delay calculation now uses milliseconds (BASE_MS) instead of an arbitrary unit, improving clarity and consistency with common time units.", "effort": "none"}}
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The retry delay calculation now uses milliseconds and keeps the exponential backoff formula intact.", "effort": "none"}}

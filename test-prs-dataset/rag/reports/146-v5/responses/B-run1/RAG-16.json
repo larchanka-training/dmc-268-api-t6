@@ -1,0 +1,1 @@
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The new pagination helper `pageAtOffset` is cleanly separated and uses the existing `paginate` utility. The offset validation is explicit and the page calculation is correct.", "effort": "none"}}

@@ -1,0 +1,1 @@
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The function `extend_due_date` now accepts a configurable number of days instead of a hardcoded 7, and the title formatting utility `slip_title` is documented.", "effort": "none"}}

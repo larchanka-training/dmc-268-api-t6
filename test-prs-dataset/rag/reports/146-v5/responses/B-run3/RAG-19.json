@@ -1,0 +1,1 @@
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The ordering of entries now matches the statement's listing order by reversing the sort. The change is minimal and consistent with the docstring.", "effort": "none"}}

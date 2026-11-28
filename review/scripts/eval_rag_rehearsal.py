@@ -13,7 +13,7 @@ so the gate verdict of a rehearsal means nothing (no finding, so no Recall); wha
 that the chain runs and what the real run will cost in input tokens.
 
 The projection printed at the end is the one to read: per arm, the input tokens of the
-72 review calls (24 cases x 3 runs) as a total and a median, and the median B/A ratio the gate
+75 review calls (25 cases x 3 runs) as a total and a median, and the median B/A ratio the gate
 holds to <= 1.30 (ADR 0001 section 12). The fake transport reports, as the provider's prompt
 token count, the gateway's own pre-send estimate (``HeuristicTokenCounter`` at the model's
 ``chars_per_token``) of the two messages it was sent. The prompt, the retrieved block and the
@@ -41,9 +41,9 @@ cannot mistake a skipped gate for a green rehearsal.
 ``--out DIR`` keeps the six capture directories (``DIR/rag_off-1`` ...) for inspection; without
 it they live in a temporary directory (``TMPDIR`` is honoured) that is removed on exit. The
 exit code is 0 when the chain ran, 3 when the gate was skipped under ``--require-gate``, 1
-when a recording was refused (an invalid corpus, a prompt that is not the pinned v5) and 2 when
+when a recording was refused (an invalid corpus, a prompt that is not the pinned v7) and 2 when
 the gate (its loader, or its checks of the runs) refused the captures. The run takes about 1 s
-per case and run (~3 min for 24 cases).
+per case and run (~3 min for 25 cases).
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ from review.scripts.eval_rag_gate import (  # noqa: E402
 from review.scripts.eval_replay import RAG_ARM_LABELS  # noqa: E402
 from review.scripts.validate_dataset import DEFAULT_ROOT  # noqa: E402
 
-SYSTEM_V5 = REPO_ROOT / "review" / "prompts" / "review.system.v5.md"
+SYSTEM_V7 = REPO_ROOT / "review" / "prompts" / "review.system.v7.md"
 DEFAULT_MODEL = "mistral-small-4"
 # An arbitrary fixed moment: the three runs of an arm must differ in bytes (the A/B loader
 # refuses a copied report), so run N is recorded N hours after it.
@@ -203,7 +203,7 @@ async def _record_runs(root: Path, settings: LlmSettings, out: Path) -> list[tup
             await record_live(
                 root,
                 settings,
-                system_prompt=SYSTEM_V5,
+                system_prompt=SYSTEM_V7,
                 backend_rules=BACKEND_RULES,
                 frontend_rules=FRONTEND_RULES,
                 transport=RehearsalTransport(),

@@ -1,1 +1,1 @@
-{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The refactor groups free slots by doctor, improving clarity and enabling downstream features like per-doctor availability views.", "effort": "none"}}
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The new function groups free slots by doctor and documents its return type and purpose clearly.", "effort": "none"}}

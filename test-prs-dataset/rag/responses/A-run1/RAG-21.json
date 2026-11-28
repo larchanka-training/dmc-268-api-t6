@@ -1,1 +1,1 @@
-{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The `until_service` function now returns both kilometers and days remaining, and the `plate_label` docstring clarifies the formatting requirement.", "effort": "none"}}
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The `until_service` function now returns both kilometers and days remaining, and the docstring in `plate_label` clarifies the formatting requirement.", "effort": "none"}}

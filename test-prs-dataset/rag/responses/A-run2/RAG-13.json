@@ -1,1 +1,1 @@
-{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The new helper `last_active_label` uses the existing `recent` function and formats the last event’s timestamp in a user-friendly way.", "effort": "none"}}
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The new helper `last_active_label` uses the existing `recent` function and formats the result clearly. The module’s docstring and the `kind_label` helper remain unchanged.", "effort": "none"}}

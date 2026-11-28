@@ -1,0 +1,1 @@
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The new helper `last_active_label` is concise and uses the existing `recent` function to compute the label. The module’s docstring and the `kind_label` helper remain unchanged and correct.", "effort": "none"}}

@@ -1,9 +1,9 @@
 {
-  "corpus_digest": "sha256-v1:30e6bd803d0bdc0bbf0410584ea3bdedcadaa48acbd7306eeb7e745acd96dbd1",
+  "corpus_digest": "sha256-v1:167fce233b630a026927a02addeb5dac31df2edfc2d56ee9e74903796dfe73cb",
   "model_id": "mistral-small-4",
-  "prompt_path": "review/prompts/review.system.v5.md",
-  "prompt_sha": "3bd7d39939b60d0c16b08090a4d3e5f0cbdb8a731fa4bde91bd6570546e085c9",
-  "prompt_version": "v5",
+  "prompt_path": "review/prompts/review.system.v7.md",
+  "prompt_sha": "b5cdaac4f6185a3986942755f18f2543e5be3b41452ca2a8e4ffc8c6d0a49af9",
+  "prompt_version": "v7",
   "responses": {
     "RAG-01": "responses/RAG-01.json",
     "RAG-02": "responses/RAG-02.json",
@@ -28,7 +28,8 @@
     "RAG-21": "responses/RAG-21.json",
     "RAG-22": "responses/RAG-22.json",
     "RAG-23": "responses/RAG-23.json",
-    "RAG-24": "responses/RAG-24.json"
+    "RAG-24": "responses/RAG-24.json",
+    "RAG-25": "responses/RAG-25.json"
   },
   "run_metadata": {
     "baseline_publishable": true,
@@ -248,6 +249,15 @@
         "first_provider_label": "mistral",
         "gateway_status": "accepted",
         "paid_metadata_error": false
+      },
+      "RAG-25": {
+        "first_call": "answer",
+        "first_kind": "primary",
+        "first_model": "mistral-small-4",
+        "first_provider_digest": "sha256-v1:8e1af0131864f4488dc577f497afcf5c87b74b237e86f0322abf99e8c2ef018a",
+        "first_provider_label": "mistral",
+        "gateway_status": "accepted",
+        "paid_metadata_error": false
       }
     },
     "effective_settings": {
@@ -305,30 +315,31 @@
     "engine": "fast",
     "fallback_model_id": "mistral-small-3.2-24b",
     "latency_ms": {
-      "RAG-01": 4751,
-      "RAG-02": 3643,
-      "RAG-03": 1338,
-      "RAG-04": 5242,
-      "RAG-05": 3829,
-      "RAG-06": 1649,
-      "RAG-07": 3092,
-      "RAG-08": 1488,
-      "RAG-09": 1329,
-      "RAG-10": 2863,
-      "RAG-11": 1412,
-      "RAG-12": 2683,
-      "RAG-13": 1282,
-      "RAG-14": 3641,
-      "RAG-15": 3823,
-      "RAG-16": 1445,
-      "RAG-17": 1446,
-      "RAG-18": 1276,
-      "RAG-19": 1445,
-      "RAG-20": 3375,
-      "RAG-21": 4337,
-      "RAG-22": 3908,
-      "RAG-23": 1206,
-      "RAG-24": 1435
+      "RAG-01": 4744,
+      "RAG-02": 3818,
+      "RAG-03": 1476,
+      "RAG-04": 1506,
+      "RAG-05": 1333,
+      "RAG-06": 1887,
+      "RAG-07": 1886,
+      "RAG-08": 3074,
+      "RAG-09": 1678,
+      "RAG-10": 4883,
+      "RAG-11": 1961,
+      "RAG-12": 3463,
+      "RAG-13": 1475,
+      "RAG-14": 4379,
+      "RAG-15": 3940,
+      "RAG-16": 1434,
+      "RAG-17": 1600,
+      "RAG-18": 3270,
+      "RAG-19": 3070,
+      "RAG-20": 3294,
+      "RAG-21": 1503,
+      "RAG-22": 1734,
+      "RAG-23": 1408,
+      "RAG-24": 1484,
+      "RAG-25": 3680
     },
     "nonpublishable_case_ids": [],
     "policy_arm": "none",
@@ -337,11 +348,11 @@
     "rag_evidence": {
       "RAG-01": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:fadaef676ff452a164365b0a52d502621624eb934e404c53189cc8a380f139b7",
+        "non_rag_prompt_digest": "sha256-v1:dccc66b119aa239927f16578ae383117d889e00265cd5ddda4b0c64dd2ce4d93",
         "offline_retrieved_ids": [
           "RAG:133714ccf4f8:9c7567d720c96d05"
         ],
-        "prompt_digest": "sha256-v1:317676761b105a4708a8e39c7135df6be738a02f8c6e7721ed6981d89638776a",
+        "prompt_digest": "sha256-v1:a1543e6fc3424e94fac58c022ba0613abd151dc5aa37472b33d323a4cff2b5c7",
         "repair_called": false,
         "retrieved": [
           {
@@ -352,18 +363,18 @@
             "path": "ledger/webhooks.py",
             "side": "RIGHT",
             "start_line": 7,
-            "tokens": 348
+            "tokens": 329
           }
         ],
         "trimmed": false
       },
       "RAG-02": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:43b66e7048f4942416a7ab8a7a4bbfdc405ed69b5dd1eaf6722dddd7e387fa92",
+        "non_rag_prompt_digest": "sha256-v1:2d7f08f398068fb21357d3129642b450a1705da369b8fbebfb2367d0e58d2720",
         "offline_retrieved_ids": [
           "RAG:0e01321f5c1a:a05052493f8748c8"
         ],
-        "prompt_digest": "sha256-v1:5dcb558e25587ebefee275c8b044a8c525d33a1f2503c9adad95b468d3439938",
+        "prompt_digest": "sha256-v1:30b540372ab29dcf407e6cb75a074a640c0cfc880503a9e744337cb95a2df2b6",
         "repair_called": false,
         "retrieved": [
           {
@@ -381,11 +392,11 @@
       },
       "RAG-03": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:89ddbb946afe71b7881ca863f976de55a12ea43bef38d2315b2238ab1a51923b",
+        "non_rag_prompt_digest": "sha256-v1:0cdbbc6c01637abe1b4559ffc227a8f7ae714c2eff71e995d978bbc52506b723",
         "offline_retrieved_ids": [
           "RAG:8604a125a464:035b341bf979475d"
         ],
-        "prompt_digest": "sha256-v1:9f64b94c1df4337cd926d07ea8017cdcf3de481df08c189eb9f812997669f71f",
+        "prompt_digest": "sha256-v1:f0e7c11ae18e8fa91bba6b14907c1ce2d8d501ac4cee775fd166458644bb6f22",
         "repair_called": false,
         "retrieved": [
           {
@@ -403,11 +414,11 @@
       },
       "RAG-04": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:53bad6759256c629c978d0e60d58d9f298872302438e565b48ad1e26ca2e4f2c",
+        "non_rag_prompt_digest": "sha256-v1:50fec77a17f06b1189211d6f04029f803074eeee1d9d9bbd9dbc8399b24f27bb",
         "offline_retrieved_ids": [
           "RAG:0d206fd8c649:70fd05457a156a7a"
         ],
-        "prompt_digest": "sha256-v1:951207c4f1fff78616be0d555ef68621e351957faf3f82fecd029c11f4206499",
+        "prompt_digest": "sha256-v1:4aa2083ce0651771cf08434493aa014bc6f2e953f37e823f13ddb758b3f6691c",
         "repair_called": false,
         "retrieved": [
           {
@@ -425,12 +436,12 @@
       },
       "RAG-05": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:e29fc76d77cfcf453428079c7b2ec1143a2626f46a0d4a92312c506b2d8365c0",
+        "non_rag_prompt_digest": "sha256-v1:de10df8fa041c5c3a9b0e7645829cdd55e3dcf04eb948e0e4db964af84524a5b",
         "offline_retrieved_ids": [
           "RAG:e35a6b92a654:409728e62e249141",
           "RAG:84331145eacb:9d943ce9706080d3"
         ],
-        "prompt_digest": "sha256-v1:713a7525f054230fb9dfc2e86c6a8d9e4fe62c628892fe38843bb20e5720a5e6",
+        "prompt_digest": "sha256-v1:3169d72eb9d68e4cb3fccef7ed1d46ddc7b4a2b0470e476751a6feaaa971c944",
         "repair_called": false,
         "retrieved": [
           {
@@ -458,11 +469,11 @@
       },
       "RAG-06": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:72c0e6f71a37101740ebf4fa4330041fb42f6a0ee4d30fc348cd58e5bfa03e27",
+        "non_rag_prompt_digest": "sha256-v1:b618510eb9c6ea1db570f065e058d6edd40f6d06c74fd8b6fd0b3e2469b39a3f",
         "offline_retrieved_ids": [
           "RAG:ddcc8971c121:0aaa1a0bce4256ae"
         ],
-        "prompt_digest": "sha256-v1:14b56a51f56b6b0e3933066fe114ffaf3b9d6e59c71082586590c985037656d4",
+        "prompt_digest": "sha256-v1:899f39cba6ff022d07e1222a6693fae8c3df248cd70c74d1dc17e2a2f5f27496",
         "repair_called": false,
         "retrieved": [
           {
@@ -480,11 +491,11 @@
       },
       "RAG-07": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:db92b2a5de9d7113d56252fe23c92f286615e0cadf288c83d5ac4bbb6d5b62a7",
+        "non_rag_prompt_digest": "sha256-v1:e3c98d6220590a2e88b1783b7e19c4fbe3d81e5ed25d4f0c81016b1497bdc4be",
         "offline_retrieved_ids": [
           "RAG:bef885085666:df36f17414df12d0"
         ],
-        "prompt_digest": "sha256-v1:ff1e8306ec242d826399fc3079aab24844c4f0879160a1862dbb99bfbb63d1df",
+        "prompt_digest": "sha256-v1:35b8b9498fd86217a8844d3a3a6d051e1a88ecf6afce0644481ce625a7162a53",
         "repair_called": false,
         "retrieved": [
           {
@@ -502,11 +513,11 @@
       },
       "RAG-08": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:9b49be3bb59380549bf69c9becaefe9bb7754ecf9da41c4650c4d7db7186e2ab",
+        "non_rag_prompt_digest": "sha256-v1:612addc2797fea33c7de5932845ac2e105ee45bf9a28c7d91c26f6d83268f27f",
         "offline_retrieved_ids": [
           "RAG:53d7a8c44dbd:1e6a3c2500e320ae"
         ],
-        "prompt_digest": "sha256-v1:84f02a03a8d51eb80898318fa37b247bb6a6cd57346a32413999f35b5466862f",
+        "prompt_digest": "sha256-v1:aa58d7f3d6c1f4364a6693bd00b206dd24455c9d1d2ff36dc79c994632ecdbf0",
         "repair_called": false,
         "retrieved": [
           {
@@ -524,12 +535,12 @@
       },
       "RAG-09": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:7a9bf8e377b4b5c001910c116d5485100a6a38932dcfa6dcd2c8964e55ea2426",
+        "non_rag_prompt_digest": "sha256-v1:0b071463def99c7b893998480d80c87bbe3c59498322352a7506bdc8b7e8abe6",
         "offline_retrieved_ids": [
           "RAG:e4a7e73ef6ca:eab40c1401c6b290",
           "RAG:aa07876ee69e:ff6895bf0adb0668"
         ],
-        "prompt_digest": "sha256-v1:3e2858bc4b59a9ab79a406cbe39b78416cf0c1db806e3531b6fcc1433349d433",
+        "prompt_digest": "sha256-v1:19adb17750bd2b86ff60d812a699c58c988a4f7222bb48f2dc76835c2edbdb95",
         "repair_called": false,
         "retrieved": [
           {
@@ -557,12 +568,12 @@
       },
       "RAG-10": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:6dd1a98ec9aec9673397f297c3f82886ce3446dc88703e05eba9e6629184cfed",
+        "non_rag_prompt_digest": "sha256-v1:f830bb7ff464d70b66d5d86768ef6b95202b8b83fb813d1db02ac48dfb50d843",
         "offline_retrieved_ids": [
           "RAG:6ae7e821f0e6:3aff2c4bc1044be0",
           "RAG:cbe3da3914ff:2493a70ab23e303a"
         ],
-        "prompt_digest": "sha256-v1:f966a722c3f952d3e30d1c5da86f2ec4f73e5331f87797d5f7f64d4b436da0f2",
+        "prompt_digest": "sha256-v1:4a3d9bb7523df9e65cb51cbac45c637383722ea6f21caf82a36b7be8f2428d28",
         "repair_called": false,
         "retrieved": [
           {
@@ -590,11 +601,11 @@
       },
       "RAG-11": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:1f82e52bb2310f824c070875544a1611cda45d46021399aebc0acb47e0f90b0c",
+        "non_rag_prompt_digest": "sha256-v1:2196fb9ac164ea305c907dd59df04928aa032ac376d6e643ea8020f9445dc64b",
         "offline_retrieved_ids": [
           "RAG:5f2c59524043:8f7733e0bfbe6b94"
         ],
-        "prompt_digest": "sha256-v1:3af894afe2b71cd12a10d1c249c8a51314b398e1678187f678bab2eac5652a3b",
+        "prompt_digest": "sha256-v1:4dcba750dc05111500dac66c723ec99b0d44aa019603a60dcca5c570c6ae100b",
         "repair_called": false,
         "retrieved": [
           {
@@ -612,20 +623,20 @@
       },
       "RAG-12": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:7730c6524371c8eaf4fcc72cea22cd9024c6cc20789362766f9388c0628cb973",
+        "non_rag_prompt_digest": "sha256-v1:ffdeaad6104f11e487b6224e1fa7447fe8897da3293e1418c406b905cc8ed0bd",
         "offline_retrieved_ids": [],
-        "prompt_digest": "sha256-v1:7730c6524371c8eaf4fcc72cea22cd9024c6cc20789362766f9388c0628cb973",
+        "prompt_digest": "sha256-v1:ffdeaad6104f11e487b6224e1fa7447fe8897da3293e1418c406b905cc8ed0bd",
         "repair_called": false,
         "retrieved": [],
         "trimmed": false
       },
       "RAG-13": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:853e7245adc87a12f42fa7bcedb421cf02d50c457eaed167716794cf66c36392",
+        "non_rag_prompt_digest": "sha256-v1:908140e9b0d54bfdb888fd0337984df1813b8287c8f7ca18bf032d2cd69f3577",
         "offline_retrieved_ids": [
           "RAG:606e8c8d5ae9:9b0f392b5c8a75f6"
         ],
-        "prompt_digest": "sha256-v1:a1e254f01e546a96a9ae632b7ee657dbca13e684da80d285fd9721dc9ff68800",
+        "prompt_digest": "sha256-v1:4daef465243ffe3e5f22203885c2fb20c11e3a427d64fcbb40f4c91686651ef3",
         "repair_called": false,
         "retrieved": [
           {
@@ -643,38 +654,38 @@
       },
       "RAG-14": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:eb83bd6a0ef20796cbdec6eef9ec774541deb4d86ec2121b1a0ac515bc32bd2f",
+        "non_rag_prompt_digest": "sha256-v1:8098ddb270ffde132b2771146d80d12c1bcf116e27e9815a21190cdbef45454c",
         "offline_retrieved_ids": [],
-        "prompt_digest": "sha256-v1:eb83bd6a0ef20796cbdec6eef9ec774541deb4d86ec2121b1a0ac515bc32bd2f",
+        "prompt_digest": "sha256-v1:8098ddb270ffde132b2771146d80d12c1bcf116e27e9815a21190cdbef45454c",
         "repair_called": false,
         "retrieved": [],
         "trimmed": false
       },
       "RAG-15": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:faac4790df5dd561f3327ebe5acdb2d89853ccc9b339fd3eab192444f031936f",
+        "non_rag_prompt_digest": "sha256-v1:6de64ce1a62f38263fea1da59b55f20772ddf662e8b18e33930c3e7377b42531",
         "offline_retrieved_ids": [],
-        "prompt_digest": "sha256-v1:faac4790df5dd561f3327ebe5acdb2d89853ccc9b339fd3eab192444f031936f",
+        "prompt_digest": "sha256-v1:6de64ce1a62f38263fea1da59b55f20772ddf662e8b18e33930c3e7377b42531",
         "repair_called": false,
         "retrieved": [],
         "trimmed": false
       },
       "RAG-16": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:7c8a425f4bb50b97a00d04587ce4613ca192420b2eba71eccafc109d2e79c0a9",
+        "non_rag_prompt_digest": "sha256-v1:c9fcf9726ce84f0833cda6f05138236cc7b9d03dcab554cde9c94e9b84ee9a55",
         "offline_retrieved_ids": [],
-        "prompt_digest": "sha256-v1:7c8a425f4bb50b97a00d04587ce4613ca192420b2eba71eccafc109d2e79c0a9",
+        "prompt_digest": "sha256-v1:c9fcf9726ce84f0833cda6f05138236cc7b9d03dcab554cde9c94e9b84ee9a55",
         "repair_called": false,
         "retrieved": [],
         "trimmed": false
       },
       "RAG-17": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:1848b0895ef23eebc4e596900e020d2fb9e5698f3ea83de2dfe4aff1d3cf7fb4",
+        "non_rag_prompt_digest": "sha256-v1:2772a0450bf247fb23c53d7445316e38db09951ea899a32a642f569d690d8ecc",
         "offline_retrieved_ids": [
           "RAG:efad67155bcf:cd4a17b26cb35076"
         ],
-        "prompt_digest": "sha256-v1:fd2ef1167e0b339bb858c1ab45a1446000cb1399e7424fe02bd35094673f44ae",
+        "prompt_digest": "sha256-v1:80c91e7734871acd4904c597b85a7dad564b8495347aa93585703f1092249088",
         "repair_called": false,
         "retrieved": [
           {
@@ -692,11 +703,11 @@
       },
       "RAG-18": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:47686c42451e94a9fd585902d62313ea015501d3f46045d9cef78d0c2867f293",
+        "non_rag_prompt_digest": "sha256-v1:9375c44a368e4de62824bfd51435650836b3f2de7a5b8032e71922ba6cca0b5a",
         "offline_retrieved_ids": [
           "RAG:c087bcdb11c4:bda0dcef942cfe0f"
         ],
-        "prompt_digest": "sha256-v1:f33c5e6ec58bc47e685d1710d5bd48d3e84a97440e91fd6a89e3926cc41d8c58",
+        "prompt_digest": "sha256-v1:02be40a0a3e53ec3fe51f761cfbca18aa411ba81cee931d307afc5b6e2cef50c",
         "repair_called": false,
         "retrieved": [
           {
@@ -714,11 +725,11 @@
       },
       "RAG-19": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:d56926d5dc28aa8f556404dea5c2b575d0144ed1437801473781ac8d9ae788fe",
+        "non_rag_prompt_digest": "sha256-v1:c46e712c6ced5d45cc823132800f2d6b79327d8b1e59b814aac91f1893ea778a",
         "offline_retrieved_ids": [
           "RAG:697539e9295a:1843dae46b6fa0f1"
         ],
-        "prompt_digest": "sha256-v1:c88b1c4aa223c4d1512dafe8e62156d0759758175d02f0ba505ea9dd29223c0b",
+        "prompt_digest": "sha256-v1:2ebabe45356252f0ea4381016d8659b23743e1cecc185dcba49c327fc278d42f",
         "repair_called": false,
         "retrieved": [
           {
@@ -736,11 +747,11 @@
       },
       "RAG-20": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:8171920d492ab210beafae10e9c96735711366a6a8f51a3b4cd5ad0a51834ff1",
+        "non_rag_prompt_digest": "sha256-v1:8a39af059d2a0cfb6fa75011854c794fe251e579e0410004026a21bdd9da5e97",
         "offline_retrieved_ids": [
           "RAG:4c6cc7c093c1:942d58d26a0fdca0"
         ],
-        "prompt_digest": "sha256-v1:805caaab259f9eae468b3eb4dc0a0483766ff6b69e7723c7c7114c62bd10e629",
+        "prompt_digest": "sha256-v1:e35a2001ff2d6d34818fe46effb0dcc983702f98527aedc735fca198d1524421",
         "repair_called": false,
         "retrieved": [
           {
@@ -758,11 +769,11 @@
       },
       "RAG-21": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:88b3a6cc607ec62db6431ae844c95d84b83e73b3ba80e5d578a96ac3dc5411a5",
+        "non_rag_prompt_digest": "sha256-v1:a211f49068c138db4446b00a5c0d03bae3ec59045c2e8a2a625deb4a7c05ea0d",
         "offline_retrieved_ids": [
           "RAG:ccef16b540b4:112ecd3258086f55"
         ],
-        "prompt_digest": "sha256-v1:7b3e4597a7832dcaa340c04912b2c06238a1d5f79cbd96f3f66082fe08ac2ef9",
+        "prompt_digest": "sha256-v1:9831d83b87adc004cca6fd2696fed41216579463e4099f46a122f6c6de9a8b8e",
         "repair_called": false,
         "retrieved": [
           {
@@ -773,18 +784,18 @@
             "path": "fleetlog/planner.py",
             "side": "RIGHT",
             "start_line": 3,
-            "tokens": 307
+            "tokens": 254
           }
         ],
         "trimmed": false
       },
       "RAG-22": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:ad6488c543b4a0b497d57da6979b16212f28c21d216ab37e423734944f9a7023",
+        "non_rag_prompt_digest": "sha256-v1:5aa11715f3ff770c39276778b80eacd2c03e79d90473d308c03e74eaea9fd8cf",
         "offline_retrieved_ids": [
           "RAG:bb2e33cd0b1e:5b28f7b48d4ff016"
         ],
-        "prompt_digest": "sha256-v1:86a5b465ffd6150960f8d02cce843ed82549cf125c89d2748b17bc6e960afc49",
+        "prompt_digest": "sha256-v1:1e9c9b8826db9dff73a2279900d386aec08acfb2808b2f47b25be83e33ba085f",
         "repair_called": false,
         "retrieved": [
           {
@@ -795,19 +806,19 @@
             "path": "dispatch/reminders.py",
             "side": "RIGHT",
             "start_line": 6,
-            "tokens": 338
+            "tokens": 273
           }
         ],
         "trimmed": false
       },
       "RAG-23": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:94fc021d62e39aeeeecce01069a5cfbba3032ec9e3b080800021220420bf8a87",
+        "non_rag_prompt_digest": "sha256-v1:d219c79257b035579d7c1f78626a7e32e34ae59afba9d5567c538fa32a3d06a2",
         "offline_retrieved_ids": [
           "RAG:5b45099ae9f4:7e5239a9b59132be",
           "RAG:5b45099ae9f4:92e4a9cd1e594bd4"
         ],
-        "prompt_digest": "sha256-v1:d3a98c26510b973cc36dbc9595c9e4fc0fe21859fb4c0a40805b9e27f008cc17",
+        "prompt_digest": "sha256-v1:e19357a1c714d6a0a0badc653622cf3867d8415871076911a1e190b6da678362",
         "repair_called": false,
         "retrieved": [
           {
@@ -835,16 +846,38 @@
       },
       "RAG-24": {
         "fallback_called": false,
-        "non_rag_prompt_digest": "sha256-v1:643243aafdb128c963745e8f7d7c136fc248c3e4f7f68eced7d51acdfd5c62a1",
+        "non_rag_prompt_digest": "sha256-v1:bcf675ed9b4cc8f4253c8f1562da561276f74cf7cde1bfee50a21e47e108f8aa",
         "offline_retrieved_ids": [],
-        "prompt_digest": "sha256-v1:643243aafdb128c963745e8f7d7c136fc248c3e4f7f68eced7d51acdfd5c62a1",
+        "prompt_digest": "sha256-v1:bcf675ed9b4cc8f4253c8f1562da561276f74cf7cde1bfee50a21e47e108f8aa",
         "repair_called": false,
         "retrieved": [],
         "trimmed": false
+      },
+      "RAG-25": {
+        "fallback_called": false,
+        "non_rag_prompt_digest": "sha256-v1:a3ee8f553b69fc65bf2125b04374139e68186658b5d5d09b5b38db515880d565",
+        "offline_retrieved_ids": [
+          "RAG:cbb674dbfbc9:886bd4a0b1786022"
+        ],
+        "prompt_digest": "sha256-v1:a5fa96de0481c6781e96fd7bd874701049d44df549221de601cc8bebab4c4bb2",
+        "repair_called": false,
+        "retrieved": [
+          {
+            "block_id": "RAG:cbb674dbfbc9:886bd4a0b1786022",
+            "edge_kind": "uses_imported",
+            "end_line": 17,
+            "index_commit_sha": "0f7797273079bca9c9779fbbb6293689370cdac2",
+            "path": "booklend/renewals.py",
+            "side": "RIGHT",
+            "start_line": 3,
+            "tokens": 341
+          }
+        ],
+        "trimmed": false
       }
     },
-    "rag_index_digest": "sha256-v1:2d7fe0e25c3edc477e5327e82784338b91d27a4fcd287d18e9d2ed26d08d86a0",
-    "recorded_at": "2026-11-03T21:45:29.229603Z",
+    "rag_index_digest": "sha256-v1:4b24013bbc1e62541d4bc7e6801d7003019d1b0a3a01d2933b2b100256ab8639",
+    "recorded_at": "2026-11-11T16:28:35.714123Z",
     "snapshot_pseudo_revisions": {
       "RAG-01": {
         "base": "d22f4893f05393ca688aebba25d6cfeeb96eb54e",
@@ -941,229 +974,243 @@
       "RAG-24": {
         "base": "53e670551ad5aa46efeaaca06b5e3e6ddab9da11",
         "head": "261f2db3665de73625a3089d3400dcef5a89bd02"
+      },
+      "RAG-25": {
+        "base": "0f7797273079bca9c9779fbbb6293689370cdac2",
+        "head": "cbb674dbfbc933d6e37e6ab5d0c4b9772469055f"
       }
     },
+    "static_digest_without_prompt": "sha256-v1:eec5be10e3da35bf3b623889233c311c2b7ecb3275a248facdc055318db39033",
     "usage": {
       "RAG-01": [
         {
-          "cache_read_tokens": 7448,
-          "cost_usd": "0.000619",
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000625",
           "operation": "review",
-          "tokens_in": 9080,
-          "tokens_out": 344
+          "tokens_in": 9293,
+          "tokens_out": 349
         }
       ],
       "RAG-02": [
         {
-          "cache_read_tokens": 7448,
-          "cost_usd": "0.000591",
+          "cache_read_tokens": 0,
+          "cost_usd": "0.001716",
           "operation": "review",
-          "tokens_in": 8396,
-          "tokens_out": 472
+          "tokens_in": 8622,
+          "tokens_out": 444
         }
       ],
       "RAG-03": [
         {
-          "cache_read_tokens": 7448,
-          "cost_usd": "0.000385",
+          "cache_read_tokens": 7684,
+          "cost_usd": "0.000387",
           "operation": "review",
-          "tokens_in": 8834,
-          "tokens_out": 51
+          "tokens_in": 9060,
+          "tokens_out": 50
         }
       ],
       "RAG-04": [
         {
-          "cache_read_tokens": 7448,
-          "cost_usd": "0.000839",
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.00038",
           "operation": "review",
-          "tokens_in": 8743,
-          "tokens_out": 761
+          "tokens_in": 8969,
+          "tokens_out": 59
         }
       ],
       "RAG-05": [
         {
-          "cache_read_tokens": 7448,
-          "cost_usd": "0.000687",
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000358",
           "operation": "review",
-          "tokens_in": 8635,
-          "tokens_out": 558
+          "tokens_in": 8861,
+          "tokens_out": 53
         }
       ],
       "RAG-06": [
         {
-          "cache_read_tokens": 0,
-          "cost_usd": "0.001659",
+          "cache_read_tokens": 7652,
+          "cost_usd": "0.000567",
           "operation": "review",
-          "tokens_in": 9719,
-          "tokens_out": 84
+          "tokens_in": 9945,
+          "tokens_out": 94
         }
       ],
       "RAG-07": [
         {
-          "cache_read_tokens": 7432,
-          "cost_usd": "0.000357",
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000353",
           "operation": "review",
-          "tokens_in": 8591,
-          "tokens_out": 66
+          "tokens_in": 8817,
+          "tokens_out": 56
         }
       ],
       "RAG-08": [
         {
-          "cache_read_tokens": 7448,
-          "cost_usd": "0.000424",
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.00061",
           "operation": "review",
-          "tokens_in": 9018,
-          "tokens_out": 63
+          "tokens_in": 9244,
+          "tokens_out": 338
         }
       ],
       "RAG-09": [
         {
-          "cache_read_tokens": 7448,
-          "cost_usd": "0.000312",
+          "cache_read_tokens": 7684,
+          "cost_usd": "0.000326",
           "operation": "review",
-          "tokens_in": 8371,
-          "tokens_out": 56
+          "tokens_in": 8597,
+          "tokens_out": 73
         }
       ],
       "RAG-10": [
         {
-          "cache_read_tokens": 7480,
-          "cost_usd": "0.000539",
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000664",
           "operation": "review",
-          "tokens_in": 8627,
-          "tokens_out": 343
+          "tokens_in": 8853,
+          "tokens_out": 518
         }
       ],
       "RAG-11": [
         {
-          "cache_read_tokens": 7448,
-          "cost_usd": "0.000415",
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000422",
           "operation": "review",
-          "tokens_in": 8907,
-          "tokens_out": 78
+          "tokens_in": 9133,
+          "tokens_out": 81
         }
       ],
       "RAG-12": [
         {
-          "cache_read_tokens": 7448,
-          "cost_usd": "0.000521",
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000511",
           "operation": "review",
-          "tokens_in": 8454,
-          "tokens_out": 351
+          "tokens_in": 8680,
+          "tokens_out": 329
         }
       ],
       "RAG-13": [
         {
-          "cache_read_tokens": 7480,
-          "cost_usd": "0.000357",
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000365",
           "operation": "review",
-          "tokens_in": 8647,
-          "tokens_out": 62
+          "tokens_in": 8873,
+          "tokens_out": 60
         }
       ],
       "RAG-14": [
         {
-          "cache_read_tokens": 7480,
-          "cost_usd": "0.000578",
+          "cache_read_tokens": 7700,
+          "cost_usd": "0.000638",
           "operation": "review",
-          "tokens_in": 8502,
-          "tokens_out": 434
+          "tokens_in": 8728,
+          "tokens_out": 517
         }
       ],
       "RAG-15": [
         {
-          "cache_read_tokens": 7448,
-          "cost_usd": "0.00066",
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000672",
           "operation": "review",
-          "tokens_in": 8633,
-          "tokens_out": 518
+          "tokens_in": 8859,
+          "tokens_out": 529
         }
       ],
       "RAG-16": [
         {
-          "cache_read_tokens": 0,
-          "cost_usd": "0.001462",
+          "cache_read_tokens": 8836,
+          "cost_usd": "0.00019",
           "operation": "review",
-          "tokens_in": 8631,
-          "tokens_out": 57
+          "tokens_in": 8857,
+          "tokens_out": 61
         }
       ],
       "RAG-17": [
         {
-          "cache_read_tokens": 7448,
-          "cost_usd": "0.000306",
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000311",
           "operation": "review",
-          "tokens_in": 8326,
-          "tokens_out": 58
+          "tokens_in": 8552,
+          "tokens_out": 59
         }
       ],
       "RAG-18": [
         {
-          "cache_read_tokens": 7448,
-          "cost_usd": "0.000291",
+          "cache_read_tokens": 0,
+          "cost_usd": "0.001605",
           "operation": "review",
-          "tokens_in": 8244,
-          "tokens_out": 56
+          "tokens_in": 8470,
+          "tokens_out": 315
         }
       ],
       "RAG-19": [
         {
-          "cache_read_tokens": 8136,
-          "cost_usd": "0.000213",
+          "cache_read_tokens": 8356,
+          "cost_usd": "0.000424",
           "operation": "review",
-          "tokens_in": 8367,
-          "tokens_out": 61
+          "tokens_in": 8593,
+          "tokens_out": 375
         }
       ],
       "RAG-20": [
         {
-          "cache_read_tokens": 8056,
-          "cost_usd": "0.000406",
+          "cache_read_tokens": 7700,
+          "cost_usd": "0.000483",
           "operation": "review",
-          "tokens_in": 8266,
-          "tokens_out": 361
+          "tokens_in": 8492,
+          "tokens_out": 342
         }
       ],
       "RAG-21": [
         {
-          "cache_read_tokens": 7432,
-          "cost_usd": "0.000774",
+          "cache_read_tokens": 7652,
+          "cost_usd": "0.000433",
           "operation": "review",
-          "tokens_in": 9086,
-          "tokens_out": 573
+          "tokens_in": 9279,
+          "tokens_out": 58
         }
       ],
       "RAG-22": [
         {
-          "cache_read_tokens": 7432,
-          "cost_usd": "0.000683",
+          "cache_read_tokens": 7652,
+          "cost_usd": "0.000427",
           "operation": "review",
-          "tokens_in": 9051,
-          "tokens_out": 445
+          "tokens_in": 9238,
+          "tokens_out": 59
         }
       ],
       "RAG-23": [
         {
-          "cache_read_tokens": 7480,
-          "cost_usd": "0.00031",
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.000322",
           "operation": "review",
-          "tokens_in": 8397,
-          "tokens_out": 54
+          "tokens_in": 8623,
+          "tokens_out": 58
         }
       ],
       "RAG-24": [
         {
-          "cache_read_tokens": 0,
-          "cost_usd": "0.00146",
+          "cache_read_tokens": 7668,
+          "cost_usd": "0.00036",
           "operation": "review",
-          "tokens_in": 8634,
-          "tokens_out": 54
+          "tokens_in": 8860,
+          "tokens_out": 55
+        }
+      ],
+      "RAG-25": [
+        {
+          "cache_read_tokens": 7652,
+          "cost_usd": "0.000691",
+          "operation": "review",
+          "tokens_in": 9231,
+          "tokens_out": 461
         }
       ]
     }
   },
   "schema_version": 1,
-  "static_digest": "sha256-v1:51ce3058142742276336269a4cdfb62d25af0d5134a1e9c7bfc891597f194562",
+  "static_digest": "sha256-v1:da5e770327b746c64c3e08b137babf8b1386d3a910394ac86c1752c7d61e9238",
   "static_inputs": [
     "app/bootstrap/llm_gateway.py",
     "app/common/application/languages.py",
@@ -1208,7 +1255,7 @@
     "app/modules/reviews/infrastructure/subprocess_source_parser.py",
     "app/modules/reviews/infrastructure/tree_sitter_facts.py",
     "review/eval/pr-commit-messages.json",
-    "review/prompts/review.system.v5.md",
+    "review/prompts/review.system.v7.md",
     "review/rules/default-backend.v1.json",
     "review/rules/default-frontend.v1.json",
     "review/schemas/review-output.schema.json",

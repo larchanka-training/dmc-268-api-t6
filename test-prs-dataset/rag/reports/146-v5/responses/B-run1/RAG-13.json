@@ -1,0 +1,1 @@
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The new helper `last_active_label` provides a clear, localized way to describe a user’s last activity. The module’s existing `kind_label` is reused by downstream code, keeping the design consistent.", "effort": "none"}}

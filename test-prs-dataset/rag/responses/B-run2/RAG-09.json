@@ -1,1 +1,1 @@
-{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The function `slugify` is now exported only where it is used, reducing the module's public surface.", "effort": "none"}}
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The function is now internal (`function` instead of `export function`), which reduces the public API surface and aligns with its current usage in `postPath` and `feedEntryId`.", "effort": "none"}}

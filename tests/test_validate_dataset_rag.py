@@ -372,7 +372,7 @@ def test_rag_profile_reports_its_own_distribution(tmp_path: Path) -> None:
             "rag corpus: kind reverse_edge has 1 cases, needs exactly 10",
             "rag corpus: kind control has 0 cases, needs exactly 6",
             "rag corpus: kind depth2 has 0 cases, needs exactly 4",
-            "rag corpus: kind injection has 0 cases, needs exactly 2",
+            "rag corpus: kind injection has 0 cases, needs exactly 3",
             "rag corpus: kind clean has 0 cases, needs exactly 2",
             "rag corpus: needs exactly 3 renamed or removed export cases, got 0",
             "rag corpus: needs Python and TypeScript/React cases",
@@ -404,7 +404,7 @@ def _rag_records(
     forms = [*exports, *["new_required_param"] * (10 - len(exports))]
     records = [_rag_record("reverse_edge", form=form) for form in forms]
     records += [_rag_record("control")] * 6 + [_rag_record("depth2")] * 4
-    records += [_rag_record("injection", form="narrowed_type")] * 2
+    records += [_rag_record("injection", form="narrowed_type")] * 3
     records += [_rag_record("clean", language="typescript")] * 2
     return records
 
@@ -416,7 +416,7 @@ def test_rag_distribution_of_the_full_corpus_is_accepted() -> None:
         "reverse_edge": 10,
         "control": 6,
         "depth2": 4,
-        "injection": 2,
+        "injection": 3,
         "clean": 2,
     }
     assert counts["export_defect_count"] == 3
