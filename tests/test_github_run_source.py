@@ -20,6 +20,7 @@ from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsMetadataProvider
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from tests.github_run_source_fakes import BASE, HEAD, LOCATOR, Blobs, Runs
+from tests.github_vcs_payload_fakes import _pull_payload
 
 
 def _source(tree: dict[str, Any], blobs: Blobs, *, revision: str = HEAD) -> GitHubRunSource:
@@ -194,48 +195,46 @@ def test_conventions_tree_and_files_come_from_the_base_revision_when_asked() -> 
 
 def test_get_pull_request_meta_makes_zero_compare_requests() -> None:
     calls: list[str] = []
+    compare_calls: list[str] = []
 
     def github(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
-        if "/commits" in request.url.path:
-            return httpx.Response(200, json=[{"commit": {"message": "commit msg"}}])
         if "/compare" in request.url.path:
-            raise AssertionError("unexpected /compare request!")
+            compare_calls.append(request.url.path)
+            return httpx.Response(200, json={"merge_base_commit": {"sha": "c" * 40}})
+        if request.url.path.endswith("/commits"):
+            return httpx.Response(200, json=[{"commit": {"message": "commit msg"}}])
+        if request.url.path.endswith("/pulls/7"):
+            return httpx.Response(200, json=_pull_payload(changed_files=1, head_sha=HEAD))
         return httpx.Response(200, json={})
 
-    from app.modules.reviews.application.prompt_builder import PullRequestMeta
-    from app.modules.reviews.application.vcs_diff import VcsPullRequest
+    from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
+    from app.modules.reviews.infrastructure.vcs_failures import ClassifiedVcsProvider
 
-    class FakeVcs:
-        async def get_pull_request(
-            self, locator: object, *, checkpoint: object = None
-        ) -> VcsPullRequest:
-            return VcsPullRequest(
-                locator=LOCATOR,
-                head_sha=HEAD,
-                base_sha=BASE,
-                meta=PullRequestMeta(
-                    "Title", None, "octo", "feature", "main", (), 1, 1, 0, False, False
-                ),
-            )
+    tokens = StaticGitHubInstallationAccessTokenProvider("token")
 
-        async def get_commit_messages(
-            self, locator: object, *, checkpoint: object = None
-        ) -> object:
-            from app.modules.reviews.application.vcs_diff import CommitMessagePrefix
-
-            return CommitMessagePrefix(("commit msg",), False)
-
-    source = GitHubRunSource(
-        client=httpx.AsyncClient(
+    async def scenario() -> httpx.AsyncClient:
+        async with httpx.AsyncClient(
             base_url="https://api.github.test", transport=httpx.MockTransport(github)
-        ),
-        token_provider=StaticGitHubInstallationAccessTokenProvider("token"),
-        vcs=cast(VcsMetadataProvider, FakeVcs()),
-        runs=Runs(),
-        run_id=uuid4(),
-    )
-    meta = asyncio.run(source.get_pull_request_meta(uuid4()))
-    assert meta is not None
-    assert not any("/compare" in call for call in calls)
-    assert meta.diff_old_sha is None
+        ) as client:
+            vcs = ClassifiedVcsProvider(HttpGitHubVcsProvider(client=client, token_provider=tokens))
+            source = GitHubRunSource(
+                client=client,
+                token_provider=tokens,
+                vcs=vcs,
+                runs=Runs(),
+                run_id=uuid4(),
+            )
+            meta = await source.get_pull_request_meta(uuid4())
+            assert meta is not None
+            assert LOCATOR.repository_full_name == "octo/repo"
+            assert meta.title == "Fix parser"
+            assert meta.commit_messages == ("commit msg",)
+            assert meta.diff_old_sha is None
+            return client
+
+    client = asyncio.run(scenario())
+    assert client.is_closed
+    assert "/repos/octo/repo/pulls/7" in calls
+    assert "/repos/octo/repo/pulls/7/commits" in calls
+    assert compare_calls == []

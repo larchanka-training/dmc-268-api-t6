@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from pytest import MonkeyPatch
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -22,11 +26,33 @@ from app.modules.reviews.application.conventions import (
     RepositorySnapshot,
 )
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
-from app.modules.reviews.application.process_run import RunDiffProvider
+from app.modules.reviews.application.policy_snapshot import PolicySnapshot
+from app.modules.reviews.application.process_run import RunDiffProvider, RunVcsInput
 from app.modules.reviews.application.prompt_builder import PullRequestMeta, ReviewContext
+from app.modules.reviews.application.rag_index import RagReadiness
+from app.modules.reviews.application.review_context import ContextStatus
+from app.modules.reviews.application.review_ignore import parse_review_ignore
 from app.modules.reviews.application.review_output import PublishedFinding
 from app.modules.reviews.application.run_failures import RetryDelays
-from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
+from app.modules.reviews.application.vcs_diff import (
+    FetchVcsReviewInput,
+    PullRequestLocator,
+    VcsFile,
+    VcsPullRequest,
+)
+from tests.github_run_source_fakes import BASE, HEAD, LOCATOR
+from tests.github_vcs_payload_fakes import _pull_payload
+from tests.policy_snapshot_fakes import make_policy_snapshot
+
+_TEST_APP_PRIVATE_KEY_PEM = (
+    rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    .private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    .decode("ascii")
+)
 
 
 def test_process_review_run_composes_repository_and_processor_from_a_shared_factory(
@@ -384,34 +410,193 @@ def test_run_worker_consumes_index_repo_beside_the_review_queues(
     }
 
 
-def test_github_adapters_makes_exactly_one_compare_request_per_run() -> None:
+def test_github_adapters_makes_exactly_one_compare_request_per_run(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    run_id = UUID("00000000-0000-0000-0000-000000000100")
+    repo_id = UUID("00000000-0000-0000-0000-000000000200")
+    blob_sha = "a" * 40
+    app_source = b"def greet() -> int:\n    return 1\n"
+    app_patch = "@@ -1,2 +1,2 @@\n def greet() -> int:\n-    return 0\n+    return 1\n"
+    snapshot = replace(
+        make_policy_snapshot(),
+        run_id=run_id,
+        repository_id=repo_id,
+        policy_base_sha=BASE,
+        ignore_digest=parse_review_ignore(None).digest,
+    )
+
+    class Runs:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def get_run_vcs_input(self, received_run_id: UUID) -> RunVcsInput:
+            assert received_run_id == run_id
+            return RunVcsInput(uuid4(), repo_id, HEAD, BASE, LOCATOR)
+
+        async def get_run_snapshots(self, received_run_id: UUID) -> list[DiffSnapshot]:
+            assert received_run_id == run_id
+            return [
+                DiffSnapshot(
+                    filename="src/app.py",
+                    patch=app_patch,
+                    blob_sha=blob_sha,
+                    status="modified",
+                    additions=1,
+                    deletions=1,
+                    changes=2,
+                )
+            ]
+
+    class PolicyStore:
+        async def get_snapshot(self, received_run_id: UUID) -> PolicySnapshot:
+            assert received_run_id == run_id
+            return snapshot
+
+    class SnapshotUow:
+        policy = PolicyStore()
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> SnapshotUow:
+            return self
+
+        async def __aexit__(
+            self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object
+        ) -> None:
+            pass
+
+    class ReviewIndexAccess:
+        async def open_for_review(self, received_repo_id: UUID) -> RagReadiness:
+            assert received_repo_id == repo_id
+            return RagReadiness(enabled=False)
+
+    class ReviewIndexUow:
+        review_index = ReviewIndexAccess()
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> ReviewIndexUow:
+            return self
+
+        async def __aexit__(
+            self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object
+        ) -> None:
+            pass
+
+        async def commit(self) -> None:
+            pass
+
+    monkeypatch.setattr(worker, "SqlAlchemyRunRepository", Runs)
+    monkeypatch.setattr(worker, "SqlAlchemyPolicySnapshotUnitOfWork", SnapshotUow)
+    monkeypatch.setattr(worker, "SqlAlchemyReviewIndexUnitOfWork", ReviewIndexUow)
 
     compare_requests: list[str] = []
+    tree_requests: list[str] = []
 
     def github_handler(request: httpx.Request) -> httpx.Response:
-        if "/compare" in request.url.path:
-            compare_requests.append(request.url.path)
+        path = request.url.path
+        if "/access_tokens" in path:
+            return httpx.Response(
+                201,
+                json={
+                    "token": "ghs_test",
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                },
+            )
+        if "/compare" in path:
+            compare_requests.append(path)
             return httpx.Response(200, json={"merge_base_commit": {"sha": "c" * 40}})
-        if "/commits" in request.url.path:
+        if path.endswith("/commits"):
             return httpx.Response(200, json=[{"commit": {"message": "msg"}}])
-        if "/pulls/" in request.url.path:
-            return httpx.Response(200, json={"head": {"sha": "h" * 40}, "base": {"sha": "b" * 40}})
+        if path.endswith("/files"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "filename": "src/app.py",
+                        "status": "modified",
+                        "sha": blob_sha,
+                        "additions": 1,
+                        "deletions": 1,
+                        "changes": 2,
+                        "patch": app_patch,
+                    }
+                ],
+            )
+        if path.endswith("/pulls/7"):
+            return httpx.Response(200, json=_pull_payload(changed_files=1, head_sha=HEAD))
+        if "/git/trees/" in path:
+            tree_requests.append(path)
+            return httpx.Response(
+                200,
+                json={
+                    "truncated": False,
+                    "tree": [{"path": "src/app.py", "type": "blob", "sha": blob_sha}],
+                },
+            )
+        if path.endswith(f"/git/blobs/{blob_sha}"):
+            return httpx.Response(
+                200,
+                json={
+                    "sha": blob_sha,
+                    "size": len(app_source),
+                    "encoding": "base64",
+                    "content": base64.b64encode(app_source).decode("ascii"),
+                },
+            )
         return httpx.Response(200, json={})
 
-    transport = httpx.MockTransport(github_handler)
-    client = httpx.AsyncClient(base_url="https://api.github.test", transport=transport)
-    env = {**_BASE_ENV, "GITHUB_APP_ID": "42", "GITHUB_APP_PRIVATE_KEY": "key"}
+    async def checkpoint() -> None:
+        pass
+
+    env = {
+        **_BASE_ENV,
+        "GITHUB_APP_ID": "42",
+        "GITHUB_APP_PRIVATE_KEY": _TEST_APP_PRIVATE_KEY_PEM,
+        "GITHUB_API_URL": "https://api.github.test",
+    }
     settings = worker.WorkerSettings.from_environment(env)
     factory = cast(async_sessionmaker[AsyncSession], object())
-    adapters = worker.github_adapters(
-        settings=settings,
-        client=client,
-        session_factory=factory,
-        redis=None,
-    )
-    assert adapters is not None
-    run_source = adapters.run_source(UUID("00000000-0000-0000-0000-000000000100"))
-    assert getattr(run_source, "_merge_base", None) is None
+
+    async def exercise() -> httpx.AsyncClient:
+        transport = httpx.MockTransport(github_handler)
+        async with httpx.AsyncClient(
+            base_url="https://api.github.test", transport=transport
+        ) as client:
+            adapters = worker.github_adapters(
+                settings=settings,
+                client=client,
+                session_factory=factory,
+                redis=None,
+            )
+            assert adapters is not None
+            assert adapters.context_stage is not None
+            fetched = await FetchVcsReviewInput(adapters.vcs, checkpoint=checkpoint).execute(
+                LOCATOR, HEAD, BASE
+            )
+            assert len(fetched.files) == 1
+            stage = adapters.context_stage(None, checkpoint)
+            await stage.begin(run_id)
+            payload = await stage.run(run_id)
+            assert stage.diff_old_sha == "c" * 40
+            assert payload is not None
+            assert payload.status is not ContextStatus.ALL_CHANGES_IGNORED
+            assert any(block.source.path == "src/app.py" for block in payload.blocks)
+            run_source = adapters.run_source(run_id)
+            await run_source.fetch_tree(repo_id)
+            meta = await run_source.get_pull_request_meta(run_id)
+            assert meta is not None
+            assert meta.diff_old_sha is None
+            return client
+
+    client = asyncio.run(exercise())
+    assert client.is_closed
+    assert compare_requests == [f"/repos/octo/repo/compare/{BASE}...{HEAD}"]
+    assert f"/repos/octo/repo/git/trees/{HEAD}" in tree_requests
+    assert f"/repos/octo/repo/git/trees/{BASE}" in tree_requests
 
 
 def test_compose_worker_passes_portal_run_url_to_store_review_output(
