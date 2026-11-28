@@ -27,8 +27,14 @@ _LEGACY_TECHNICAL_REASON_CODES = frozenset({"too_large", "unsupported_change"})
 
 def snapshot_coverage_digest(snapshots: list[DiffSnapshot]) -> str:
     """Tie effective-policy classification to the exact durable model/VCS inputs."""
+    entries = []
+    for item in snapshots:
+        entry = asdict(item)
+        if not item.unknown_line_counts:
+            entry.pop("unknown_line_counts", None)
+        entries.append(entry)
     payload = json.dumps(
-        [asdict(item) for item in snapshots],
+        entries,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,

@@ -725,7 +725,7 @@ class SqlAlchemyRunRepository:
             omission_reason=row.omission_reason,
             review_patch=row.review_patch,
             summary_only=row.summary_only,
-            unknown_line_counts=row.unknown_line_counts,
+            unknown_line_counts=bool(getattr(row, "unknown_line_counts", False)),
         )
 
     @staticmethod
