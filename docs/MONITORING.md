@@ -493,6 +493,8 @@ Grafana → Explore → источник **Tempo** → TraceQL:
 docker compose -p dmc-268-api-staging logs worker --no-log-prefix | jq -c 'select(.run_id == "<run_id>")'
 ```
 
+Без SSH на курсовой VPS то же делает ручной workflow `staging-run-logs.yml` ([CICD.md](CICD.md#1-конвейер)): по `run_id` он показывает в job summary число и первые строки с этим `run_id` из логов `api`, `worker` и `webhook-worker` staging.
+
 ### Ограничения
 
 - span шага пишется при вставке строки `run_actions`, до commit транзакции. Если транзакция откатится, в Tempo останется шаг, которого нет в `run_actions`.
