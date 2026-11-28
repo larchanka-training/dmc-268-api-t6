@@ -56,7 +56,9 @@ from app.modules.reviews.application.diff_map import (
     DiffHunk,
     DiffMap,
     DiffSide,
+    PatchState,
     RowKind,
+    has_reviewable_hunks,
     is_supported_path,
 )
 from app.modules.reviews.application.get_run_diff import MAX_DIFF_LINES
@@ -542,9 +544,11 @@ class BuildReviewContext:
                 if item
             ):
                 ignored += 1
-            elif not file.anchorable:
+            elif not has_reviewable_hunks(file):
                 omissions.append(ContextOmission(f"patch_{file.patch_state.value}", path))
             else:
+                if file.patch_state is PatchState.TRUNCATED:
+                    omissions.append(ContextOmission(f"patch_{file.patch_state.value}", path))
                 allowed.append((file, path))
         if ignored:
             omissions.append(ContextOmission("ignored", count=ignored))

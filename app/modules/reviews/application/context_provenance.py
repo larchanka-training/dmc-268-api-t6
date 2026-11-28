@@ -67,9 +67,13 @@ def hunk_source_refs(diff_map: DiffMap, file: DiffFile, hunk: DiffHunk) -> tuple
     and the old revision of the diff is known: removed text is never attributed to the
     head, and an unknown old revision is not presented as a confirmed source.
     """
-    from app.modules.reviews.application.diff_map import DiffSide, RowKind
+    from app.modules.reviews.application.diff_map import DiffSide, PatchState, RowKind
 
-    if not file.anchorable:
+    if not file.anchorable and not (
+        file.omission_reason is None
+        and file.patch_state is PatchState.TRUNCATED
+        and any(row for row in hunk.rows)
+    ):
         raise ValueError("only a file with a complete diff has hunk provenance")
     refs: list[SourceRef] = []
     old_path, new_path = file.old_path, file.new_path

@@ -244,7 +244,11 @@ def review_files_from_snapshots(
         ):
             omitted.append(snapshot.filename)
         else:
-            changed.append(
-                parse_file_patch(snapshot.filename, snapshot.status, snapshot.review_patch)
+            changed_file = parse_file_patch(
+                snapshot.filename, snapshot.status, snapshot.review_patch
             )
+            if changed_file.lines:
+                changed.append(changed_file)
+            else:
+                omitted.append(snapshot.filename)
     return tuple(changed), tuple(omitted)

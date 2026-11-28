@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -30,6 +30,7 @@ from app.modules.reviews.application.bitbucket_status import BitbucketStatusSnap
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.diff_map import VcsProviderName, build_diff_map
 from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
+from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.handle_review_run import ClaimedAttempt
 from app.modules.reviews.application.policy_errors import PolicyError
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
@@ -578,6 +579,8 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
             )
             source = BitbucketRunSource(trees=trees, vcs=vcs, run_id=RUN_ID)
 
+            runs = CloudRuns()
+
             class WorkerTrace(Trace):
                 def __init__(self) -> None:
                     super().__init__()
@@ -592,7 +595,19 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                 ) -> dict[str, Any]:
                     raise AssertionError("these paths must not build review context")
 
-            runs, store, trace = CloudRuns(), _store(), WorkerTrace()
+                async def save_without_text_payload(
+                    self,
+                    run_id: UUID,
+                    summarize: Callable[[list[DiffSnapshot]], dict[str, Any]],
+                ) -> dict[str, Any]:
+                    assert run_id == RUN_ID
+                    assert runs.snapshots is not None
+                    runs.snapshots = [replace(row, review_patch=None) for row in runs.snapshots]
+                    summary = summarize(runs.snapshots)
+                    self.payload_rows.append(summary)
+                    return summary
+
+            store, trace = _store(), WorkerTrace()
             assert store.pins is not None
             store.pins = replace(
                 store.pins,

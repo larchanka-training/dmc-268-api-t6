@@ -930,6 +930,27 @@ class SqlAlchemyRunTraceStore:
         """
         await self._require_running_origin(run_id)
         await self._mark_summary_only_rows(run_id)
+        return await self._reload_and_save_payload(run_id, summarize)
+
+    async def save_without_text_payload(
+        self,
+        run_id: UUID,
+        summarize: Callable[[list[DiffSnapshot]], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Clear review patches on no-text runs without setting summary_only, then store."""
+        await self._require_running_origin(run_id)
+        await self._session.execute(
+            update(CodeChangeDiff)
+            .where(CodeChangeDiff.run_id == run_id, CodeChangeDiff.review_patch.is_not(None))
+            .values(review_patch=None)
+        )
+        return await self._reload_and_save_payload(run_id, summarize)
+
+    async def _reload_and_save_payload(
+        self,
+        run_id: UUID,
+        summarize: Callable[[list[DiffSnapshot]], dict[str, Any]],
+    ) -> dict[str, Any]:
         await self._session.flush()
         rows = (
             await self._session.scalars(
