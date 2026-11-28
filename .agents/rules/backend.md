@@ -4,8 +4,9 @@
 
 - Always use uv for dependencies and running tools (never pip/poetry).
 - Never `--no-verify`.
-- Run the gates before claiming done: `uv run ruff check .`, `uv run ruff format --check .`,
-  `uv run mypy .`, `uv run pytest`.
+- Run the gates before claiming done without errors or new warnings: `uv run ruff check .`,
+  `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest` (criteria for
+  zero warnings and `ruff` rule rationale: see §4).
 - No new dependency without a line in the PR body (`uv add`, commit `uv.lock`).
 - Never edit files owned by another open PR without a comment there.
 - User docs (the UI repo `docs-site/content/docs/`) follow `docs/CONTRIBUTING.md` §8: a PR that
@@ -106,7 +107,54 @@ from a missing scope.
 - No business logic in routers — routers decode the transport contract and call a
   use case.
 - Enums are `StrEnum`.
-- Ruff: `select = ["E", "F", "I", "UP", "B", "SIM"]`, line length 100.
+- Ruff: `select = ["E", "F", "I", "UP", "B", "SIM", "W", "FA", "G", "PIE", "T10", "TID", "PLE", "YTT", "ANN", "D"]`,
+  line length 100, `[tool.ruff.lint.pydocstyle] convention = "google"`,
+  `ignore` in `pyproject.toml` (no directory `per-file-ignores`, no package-wide `# noqa`).
+  - Baseline census at merge-base `8f7d3046` (`ruff 0.16.6`, entire repository `.` including
+    `.agents/`):
+    - Clean expanded families (0 hits at `8f7d3046`): `W`, `FA`, `G`, `T10`, `TID`, `PLE`, `YTT`.
+      `PIE` had 5 `PIE810` hits at `8f7d3046`; all 5 are fixed in this PR, so all selected families
+      (outside the explicit `ignore` list in `pyproject.toml`) have **0 hits** after PR #594.
+    - `D` (13,943 total hits at `8f7d3046`):
+      - Presence rules `D100`–`D107` (12,564 hits: 7,865 `D103`, 2,645 `D102`, 1,240 `D101`,
+        557 `D107`, 190 `D105`, 41 `D100`, 26 `D104`) omitted to avoid boilerplate on helpers/tests.
+      - `D401` (649 hits; repository docstring style favors descriptive noun phrases/summaries
+        over imperative mood) disabled by `convention = "google"` alongside `D203`/`D213`.
+      - Formatting backlog (730 hits, including 332 inside `.agents/` SYNC copies from UI):
+        `D205` (365 hits: 203 outside, 162 in `.agents/`), `D209` (327 hits: 168 outside, 159 in
+        `.agents/`), `D301` (16 hits: 15 outside, 1 in `.agents/`), `D403` (13 hits: 3 outside,
+        10 in `.agents/`), `D202` (8 hits: 4 in `app/`, 4 in `tests/`),
+        `D210` (1 hit in `.agents/`).
+      - All other Google-convention rules (`D200`, `D201`, `D206`–`D208`, `D211`, `D212`,
+        `D214`, `D300`, `D402`, `D405`, `D410`–`D412`, `D414`–`D419`) had 0 hits and are strictly
+        enforced.
+    - `ANN` (738 total hits at `8f7d3046`): `ANN401` (731 `Any` usages: 29 `app/`, 561 `tests/`,
+      17 `scripts/`, 2 `review/`, 122 `.agents/`) ignored because explicit `Any` is pervasive across
+      dynamic payloads, test fakes, fixtures, and mocks; mypy strict mode does not enforce
+      `disallow_any_explicit`, so explicit `Any` is not checked by gates; the remaining 7 hits in
+      `tests/` were typed directly in this PR.
+    - Deferred families (not yet in `select`):
+      - `ERA001` (1 hit at `8f7d3046`, inside `.agents/` SYNC copy; the 2 hits in `tests/`
+        were already resolved on `main` in #458 Part 1).
+      - `RUF` (401 homoglyph hits at `8f7d3046`: 366 `RUF001`, 18 `RUF002`, 17 `RUF003`; deferred
+        because Cyrillic letters in Russian test fixtures/requirements alongside en-dashes trigger
+        false positives).
+- Zero warnings (gate pass criteria; policy expectation of clean code):
+  - `uv run ruff check .`: exit code `0`, `All checks passed!`, 0 configuration warnings.
+  - `uv run ruff format --check .`: exit code `0`, all files formatted, 0 warnings.
+  - `uv run mypy .` (on Linux; `uv run mypy --platform linux .` on macOS/Windows): exit code `0`,
+    `Success: no issues found in <N> source files` (`strict = true` on `app/` and `tests/`),
+    0 warnings/errors.
+  - Local test run `uv run pytest`: exit code `0`, 0 failed; `-m integration` tests are skipped
+    when `TEST_DATABASE_URL` / `TEST_RABBITMQ_URL` are unset; platform skips are acceptable;
+    policy expectation of 0 new warnings emitted by repository code.
+  - CI test step `Unit tests (zero skips)` in `ci-cd.yml` (`uv run pytest -m "not integration"`
+    `-n auto -rs --strict-markers ...`): exit code `0`, 0 skipped; policy expectation of
+    0 warnings from repository code (`app/`, `tests/`, `scripts/`, `review/`).
+    The external warning baseline consists of 2 external warnings emitted on testclient import
+    (`StarletteDeprecationWarning` in `fastapi.testclient` and `DeprecationWarning` for
+    `anyio.abc.BlockingPortal` in `starlette.testclient`); CI enforces fail-on-warning strictly
+    for `CoverageWarning`.
 
 ## 5. Testing
 
@@ -144,8 +192,10 @@ from a missing scope.
   `tests.worker_queue_postgres`, `tests.webhook_notifications_postgres`,
   `tests.rules_md_e2e`, `tests.deploy_host_fakes`,
   `tests.deploy_prod_workflow_fakes`, `tests.monitoring_deploy_host`,
-  `tests.code_index_postgres`, `tests.portal_postgres` and
-  `tests.code_index_indexer_support`).
+  `tests.code_index_postgres`, `tests.portal_postgres`,
+  `tests.code_index_indexer_support`, `tests.gitlab_projection_support`,
+  `tests.telemetry_fakes`, `tests.github_webhook_fakes` and
+  `tests.bitbucket_connection_postgres_support`).
 - Assert literal values taken from the spec — never derive an expected value from
   the implementation under test.
 - One test per behavior. Before adding a test, grep the feature's file prefix for the

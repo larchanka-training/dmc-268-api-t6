@@ -45,7 +45,49 @@ line-length = 100
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+    "W",
+    "FA",
+    "G",
+    "PIE",
+    "T10",
+    "TID",
+    "PLE",
+    "YTT",
+    "ANN",
+    "D",
+]
+ignore = [
+    # See `.agents/rules/backend.md` §4 for the baseline census at merge-base `8f7d3046`.
+    # Explicit `Any` is pervasive across dynamic payloads/fakes/fixtures; mypy strict omits `disallow_any_explicit`.
+    "ANN401",
+    # Docstring presence rules omitted so tests and small helpers require no ceremony.
+    "D100",
+    "D101",
+    "D102",
+    "D103",
+    "D104",
+    "D105",
+    "D106",
+    "D107",
+    # Legacy docstring formatting backlog (including SYNC-mirrored `.agents/` files owned by ui repo).
+    "D202",
+    "D205",
+    "D209",
+    "D210",
+    "D301",
+    "D403",
+]
+
+[tool.ruff.lint.pydocstyle]
+# Disables conflicting blank-line/first-line rules (D203, D213) and D401 (imperative-mood style).
+convention = "google"
 
 [tool.ruff.format]
 exclude = ["*.md"]

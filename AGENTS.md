@@ -15,8 +15,9 @@ FastAPI, SQLAlchemy 2 (async), Alembic, Pydantic 2, httpx, pytest, uv, Python 3.
 
 - Always use uv for dependencies and running tools (never pip/poetry).
 - Never `--no-verify`.
-- Run the gates before claiming done: `uv run ruff check .`, `uv run ruff format --check .`,
-  `uv run mypy .`, `uv run pytest`.
+- Run the gates before claiming done without errors or new warnings: `uv run ruff check .`,
+  `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest` (criteria for
+  zero warnings and `ruff` rule rationale: `.agents/rules/backend.md` §4).
 - No new dependency without a line in the PR body (`uv add`, commit `uv.lock`).
 - Never edit files owned by another open PR without a comment there.
 - No DB transaction spans an LLM or GitHub call; network calls happen outside the
@@ -127,5 +128,6 @@ modules hold only `infrastructure/` code and `app/entrypoints/` does not exist y
   <!-- SYNC: the same exception in AGENTS.md, .agents/rules/backend.md §3 item 3 (authoritative), docs/BACKEND_ARCHITECTURE.md (UnitOfWork) and ADR 0002 §3.3; change all four together -->
 - Do not put business logic in a router — decode the transport contract and
   call a use case.
-- Do not skip the gates (`uv run ruff check .`, `uv run ruff format --check .`,
-  `uv run mypy .`, `uv run pytest`) before claiming a task done.
+- Do not skip the gates or claim done with gate errors or new warnings (`uv run ruff check .`,
+  `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest`, criteria in
+  `.agents/rules/backend.md` §4).
