@@ -87,3 +87,11 @@ brute force attacks. Users are locked out after 5 failed attempts.
 
 Refs #42
 ```
+
+## 4. Check before push
+
+- Verify commit messages before push: subject line ≤72 characters, no closing keyword
+  (`Closes`, `Fixes`, `Resolves`) with `#N` or `owner/repo#N`; run
+  `uv run --no-project python .github/scripts/check_pr_hygiene.py --rev-range origin/main..HEAD`
+  (in `ui` repo without `uv`:
+  `python3 .github/scripts/check_pr_hygiene.py --rev-range origin/main..HEAD`).

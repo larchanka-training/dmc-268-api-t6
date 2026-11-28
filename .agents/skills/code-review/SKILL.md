@@ -55,7 +55,7 @@ For a pull request the spec is the issues its `Refs` lines name, with the criter
 
 ### 3. Identify the standards sources
 
-The stack rules file in `.agents/rules/` and `AGENTS.md`, plus anything else the repo documents, such as `CONTRIBUTING.md`. For a pull request, read them as of the base SHA it records: `git show <base-sha>:<path>`. Never `origin/<base-ref>`: it moves, and an older pull request would be held to rules written after it.
+The stack rules file in `.agents/rules/` and `AGENTS.md`, plus anything else the repo documents, such as `CONTRIBUTING.md`, `.agents/rules/git-workflow.md` (PR hygiene and open PR overlap), and provenance rules in `.agents/agents/code-reviewer.md`. For a pull request, read them as of the base SHA it records: `git show <base-sha>:<path>`. Never `origin/<base-ref>`: it moves, and an older pull request would be held to rules written after it.
 
 On top of whatever the repo documents, the Standards axis always carries the **smell baseline** below — a fixed set of Fowler code smells (_Refactoring_, ch.3) that applies even when a repo documents nothing. Two rules bind it:
 

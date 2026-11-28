@@ -19,10 +19,13 @@ harnesses see `.agents/README.md` § Sub-agents across harnesses.
 
 ## Checklist
 
-- The stack rules file in `.agents/rules/`.
+- The stack rules and git workflow in `.agents/rules/`.
 - Analysis order: security → correctness → performance → readability. Skip anything tooling
   already enforces (formatter, linter, type checker).
-- Assert literal values come from the spec, not from the implementation under review.
+- Test integrity & provenance: assert literal values come from the spec (not derived from prod
+  code); tests exercise genuine prod paths instead of degenerate mocks; fixtures and stubs
+  defined by the spec are allowed; fabricated reports, datasets or model responses presented
+  as real are not; copied code or datasets have verified permissive licenses.
 - One finding per root cause; ≤10 findings, most severe first.
 
 ## Output
