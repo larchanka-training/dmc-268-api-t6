@@ -7,7 +7,10 @@ from dataclasses import dataclass, field
 from typing import Protocol
 from uuid import UUID
 
-from app.modules.reviews.application.run_failures import MAX_ATTEMPTS
+from app.modules.reviews.application.run_failures import (
+    CONTEXT_DEGRADATION_BASE_TEXTS,
+    MAX_ATTEMPTS,
+)
 from app.modules.reviews.application.verdict import ReviewEvent, Verdict, severity_count_phrase
 
 # Plan D-5. The size line is only ``diff_too_large``; the other two reasons never use it.
@@ -31,7 +34,6 @@ _ERROR_TEXTS = {
     "deadline_exceeded": "Прогон не уложился в лимит времени.",
     "diff_fetch_failed": "Не удалось получить дифф из GitHub.",
     "bitbucket_fetch_failed": "Не удалось получить данные ревью из Bitbucket.",
-    "bitbucket_request_budget_exceeded": "Лимит запросов к Bitbucket для ревью исчерпан.",
     "bitbucket_invalid_response": "Bitbucket вернул некорректные данные для ревью.",
     "commit_messages_fetch_failed": "Не удалось получить сообщения коммитов PR из GitHub.",
     "bitbucket_commit_messages_fetch_failed": (
@@ -40,8 +42,8 @@ _ERROR_TEXTS = {
     "github_forbidden": "У GitHub App нет доступа к репозиторию или PR.",
     "bitbucket_source_unavailable": "Нет доступа к исходному fork-репозиторию Bitbucket.",
     "bitbucket_review_limit_exceeded": "PR Bitbucket превышает лимит файлов для ревью.",
-    "bitbucket_response_budget_exceeded": "Исчерпан бюджет ответов Bitbucket для одного прогона.",
     "bitbucket_engine_unsupported": "Выбранный движок ревью не поддерживается Bitbucket.",
+    **CONTEXT_DEGRADATION_BASE_TEXTS,
     "github_publish_failed": "GitHub не принял ревью.",
     "pr_base_changed": (
         "Целевая ветка PR изменилась после запуска ревью. Перезапустите ревью из UI."

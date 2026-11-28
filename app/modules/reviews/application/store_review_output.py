@@ -378,6 +378,7 @@ class StoreReviewOutput:
                 else ()
             ),
             summary_reason=context.summary_reason,
+            context_degradation_note=context.context_degradation_note,
             change_summary=verified.change_summary if verified is not None else (),
         )
         coverage = processed.coverage

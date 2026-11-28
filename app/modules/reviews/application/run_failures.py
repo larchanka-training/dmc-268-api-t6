@@ -6,7 +6,7 @@ Only codes in ``RETRYABLE_ERROR_CODES`` can enter T9 before ``MAX_ATTEMPTS``;
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -246,3 +246,42 @@ class RetryDelays:
         if rate_limited or attempt >= 2:
             return "2m", self.medium
         return "30s", self.short
+
+
+CONTEXT_DEGRADATION_BASE_TEXTS: dict[str, str] = {
+    "bitbucket_request_budget_exceeded": "Лимит запросов к Bitbucket для ревью исчерпан.",
+    "bitbucket_response_budget_exceeded": "Исчерпан бюджет ответов Bitbucket для одного прогона.",
+}
+
+_CONTEXT_DEGRADATION_TAIL = "Часть дополнительного контекста репозитория в ревью не попала."
+
+
+def degraded_budget_error_code(exc: BaseException) -> str | None:
+    """Return catalog error_code if ``exc`` is a Bitbucket budget failure for optional context."""
+    if isinstance(exc, RunFailure) and exc.error_code in CONTEXT_DEGRADATION_BASE_TEXTS:
+        return exc.error_code
+    return None
+
+
+def context_degradation_note_from_response(response_value: object) -> str | None:
+    """Extract a user-visible degradation note from a stored ``context.build`` response."""
+    if not isinstance(response_value, Mapping):
+        return None
+    bases: list[str] = []
+    degraded_codes = response_value.get("degraded_error_codes")
+    if isinstance(degraded_codes, Sequence) and not isinstance(degraded_codes, (str, bytes)):
+        for code in degraded_codes:
+            if isinstance(code, str):
+                base = CONTEXT_DEGRADATION_BASE_TEXTS.get(code)
+                if base is not None and base not in bases:
+                    bases.append(base)
+    error = response_value.get("error")
+    if isinstance(error, Mapping):
+        code = error.get("code")
+        if isinstance(code, str):
+            base = CONTEXT_DEGRADATION_BASE_TEXTS.get(code)
+            if base is not None and base not in bases:
+                bases.append(base)
+    if not bases:
+        return None
+    return f"{' '.join(bases)} {_CONTEXT_DEGRADATION_TAIL}"

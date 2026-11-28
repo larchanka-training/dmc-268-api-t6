@@ -752,11 +752,18 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                             diff_map=diff_map,
                             run_id=RUN_ID,
                         )
+                    from app.modules.reviews.application.run_failures import (
+                        context_degradation_note_from_response,
+                    )
+
                     return FindingPostProcessingInput(
                         diff_map,
                         frozenset({"src/app.py"}),
                         frozenset({"AGENTS.md", ".review/rules.md"}),
                         coverage=coverage,
+                        context_degradation_note=context_degradation_note_from_response(
+                            trace.payload_rows[-1] if trace.payload_rows else None
+                        ),
                     )
 
                 async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
@@ -979,6 +986,11 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                     assert {item["reason"] for item in context_steps[0]["omissions"]} == {
                         expected_omission
                     }
+                    if context_budget_exceeded:
+                        assert (
+                            "bitbucket_request_budget_exceeded"
+                            in context_steps[0]["degraded_error_codes"]
+                        )
                 elif context_byte_case == "rag":
                     assert stage.payload is not None
                     assert ContextLevel.L3 in stage.payload.levels_present
@@ -1013,6 +1025,15 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
             await process.publish_review.execute(pointer)
             assert memory.state == "succeeded"
             assert memory.review_body in cast(dict[str, str], comments[0]["content"])["raw"]
+            if context_budget_exceeded:
+                assert (
+                    "**Ограничение контекста:**"
+                    in cast(dict[str, str], comments[0]["content"])["raw"]
+                )
+                assert (
+                    "Лимит запросов к Bitbucket"
+                    in cast(dict[str, str], comments[0]["content"])["raw"]
+                )
 
     asyncio.run(scenario())
     assert any(request.url.path == f"{PREFIX}/diff/{HEAD}..{BASE}" for request in seen)

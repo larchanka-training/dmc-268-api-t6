@@ -161,6 +161,8 @@ class ProcessedReviewOutput:
     change_summary_shown: int = field(default=0, kw_only=True)
     # Canonical names of files with an omission reason, never listed in the body (CVS §8.2).
     unnamed_paths: frozenset[str] = field(default=frozenset(), kw_only=True)
+    # User-visible note when optional context degraded due to a VCS budget limit.
+    context_degradation_note: str | None = field(default=None, kw_only=True)
 
     @property
     def buckets(self) -> tuple[tuple[ProcessedFinding, ...], ...]:
@@ -200,6 +202,7 @@ class FindingsPostProcessor:
         summary_only: bool = False,
         incomplete_paths: tuple[str, ...] = (),
         summary_reason: str | None = None,
+        context_degradation_note: str | None = None,
         change_summary: tuple[str, ...] = (),
     ) -> ProcessedReviewOutput:
         """Classify every finding once in the documented stage order.
@@ -324,6 +327,7 @@ class FindingsPostProcessor:
             coverage=coverage,
             executive_block=executive_block,
             unnamed_paths=unnamed_paths,
+            context_degradation_note=context_degradation_note,
         )
         return ProcessedReviewOutput(
             inline=tuple(inline),
@@ -336,6 +340,7 @@ class FindingsPostProcessor:
             executive_block=executive_block,
             change_summary_shown=change_summary_shown,
             unnamed_paths=unnamed_paths,
+            context_degradation_note=context_degradation_note,
         )
 
     def _drop_lint_patterns(
@@ -720,6 +725,7 @@ def _overview_block(
     below_threshold: int,
     *,
     coverage: RunCoverage,
+    context_degradation_note: str | None = None,
 ) -> str:
     counts = severity_counts(item.finding.severity for item in kept)
     count_text = severity_count_phrase(counts)
@@ -730,6 +736,11 @@ def _overview_block(
             f"**Coverage:** {coverage.status.value} — {coverage.summary_problem()}",
             coverage.body_explanation(),
         )
+    )
+    degradation_lines = (
+        (f"**Ограничение контекста:** {context_degradation_note}",)
+        if context_degradation_note
+        else ()
     )
     checked_lines = (
         (f"**Проверено файлов с текстовыми изменениями:** {coverage.reviewed_files}",)
@@ -746,6 +757,7 @@ def _overview_block(
             f"**Risk summary:** {count_text}",
             *below,
             *coverage_lines,
+            *degradation_lines,
             *checked_lines,
         )
     )
@@ -798,6 +810,7 @@ def finalize_stored_review_body(
             coverage=processed.coverage,
             executive_block=processed.executive_block,
             unnamed_paths=processed.unnamed_paths,
+            context_degradation_note=processed.context_degradation_note,
         )
 
     body = processed.review_body
@@ -838,6 +851,7 @@ def _pack_review_body(
     coverage: RunCoverage,
     executive_block: str,
     unnamed_paths: frozenset[str],
+    context_degradation_note: str | None = None,
 ) -> tuple[str, int]:
     prose = render_review_body(output.summary)
     heading, separator, rest = prose.partition("\n\n")
@@ -854,7 +868,12 @@ def _pack_review_body(
     def assemble(listed_paths: int, finding_count: int) -> str:
         checked = _format_checked_files(sorted_paths, listed_paths, withheld=names_withheld)
         overview = _overview_block(
-            kept, checked, severity_threshold, below_threshold, coverage=coverage
+            kept,
+            checked,
+            severity_threshold,
+            below_threshold,
+            coverage=coverage,
+            context_degradation_note=context_degradation_note,
         )
         lead = f"{executive_block}\n\n" if executive_block else ""
         prefix = f"{lead}{heading}{separator}{overview}\n\n{rest}"

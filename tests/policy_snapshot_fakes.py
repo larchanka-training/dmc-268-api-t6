@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from hashlib import sha256
-from typing import Literal
+from types import TracebackType
+from typing import Literal, Self
 from uuid import UUID
 
-from app.modules.reviews.application.policy_documents import missing_document
+from app.modules.reviews.application.policy_documents import LoadedPolicyDocument, missing_document
 from app.modules.reviews.application.policy_snapshot import (
     DEFAULT_MAX_POLICY_TOKENS,
     PINNED_PROMPT_CHECKSUMS,
@@ -17,6 +19,7 @@ from app.modules.reviews.application.policy_snapshot import (
     PolicySnapshot,
     PromptBindings,
 )
+from app.modules.reviews.application.prepare_policy_snapshot import RunPolicyPins
 
 _EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 _DEFAULT_REVIEW_SYSTEM_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -146,3 +149,75 @@ def make_policy_snapshot() -> PolicySnapshot:
         execution_profile=make_complete_execution_profile("fast"),
         policy_digest="d" * 64,
     )
+
+
+_DEFAULT_PIN_RUN = UUID("00000000-0000-0000-0000-000000000002")
+_DEFAULT_PIN_BASE = "b" * 40
+
+
+def _pins(**changes: object) -> RunPolicyPins:
+    values: dict[str, object] = {
+        "run_id": _DEFAULT_PIN_RUN,
+        "repository_id": UUID("00000000-0000-0000-0000-000000000001"),
+        "policy_base_sha": _DEFAULT_PIN_BASE,
+        "service_defaults_rule_version_id": UUID("00000000-0000-0000-0000-000000000004"),
+        "defaults_checksum": "2" * 64,
+        "prompt_bindings": PromptBindings("3" * 64, "", "", review_system_id=UUID(int=31)),
+        "execution_profile": ExecutionProfile.fast("model-a", ""),
+    }
+    return RunPolicyPins(**{**values, **changes})  # type: ignore[arg-type]
+
+
+@dataclass
+class Store:
+    pins: RunPolicyPins | None = field(default_factory=_pins)
+    documents: dict[str, LoadedPolicyDocument] = field(default_factory=dict)
+    snapshot: PolicySnapshot | None = None
+    commits: int = 0
+
+    async def get_pins(self, run_id: UUID) -> RunPolicyPins | None:
+        return self.pins
+
+    async def get_snapshot(self, run_id: UUID) -> PolicySnapshot | None:
+        return self.snapshot
+
+    async def get_staged_documents(self, run_id: UUID) -> tuple[LoadedPolicyDocument, ...]:
+        return tuple(self.documents.values())
+
+    async def stage_documents(
+        self, run_id: UUID, documents: tuple[LoadedPolicyDocument, ...]
+    ) -> tuple[LoadedPolicyDocument, ...]:
+        for item in documents:
+            self.documents.setdefault(item.document.path, item)
+        return tuple(self.documents.values())
+
+    async def create_snapshot(self, snapshot: PolicySnapshot) -> PolicySnapshot:
+        if self.snapshot is None:
+            self.snapshot = snapshot
+        return self.snapshot
+
+
+@dataclass
+class Uow:
+    store: Store
+
+    @property
+    def policy(self) -> Store:
+        return self.store
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        return None
+
+    async def commit(self) -> None:
+        self.store.commits += 1
+
+    async def rollback(self) -> None:
+        return None

@@ -860,3 +860,115 @@ def test_prompt_input_without_repository_settings_preserves_the_all_fallback() -
     result = asyncio.run(repository.get_review_prompt_input(UUID(int=3), conventions))
     assert result is not None
     assert result.severity_threshold == "all"
+
+
+@pytest.mark.parametrize(
+    ("context_response", "expected_phrase"),
+    [
+        (
+            {"status": "review", "degraded_error_codes": ["bitbucket_request_budget_exceeded"]},
+            "Лимит запросов к Bitbucket",
+        ),
+        (
+            {
+                "error": {
+                    "type": "BitbucketRunHttpError",
+                    "code": "bitbucket_response_budget_exceeded",
+                }
+            },
+            "Исчерпан бюджет ответов Bitbucket",
+        ),
+    ],
+)
+def test_get_post_processing_input_surfaces_bitbucket_budget_note_in_review_body(
+    context_response: dict[str, object],
+    expected_phrase: str,
+) -> None:
+    from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
+    from app.modules.reviews.application.review_output import ReviewOutput, ReviewSummary
+    from app.modules.reviews.infrastructure.run_repository import SqlAlchemyReviewOutputRepository
+
+    run_id = UUID(int=1)
+    post_input_row = (
+        [{"name": "Rule"}],
+        None,
+        None,
+        5,
+        SeverityThreshold.WARNING,
+        "c" * 40,
+        "org/repo",
+        "bitbucket",
+    )
+    run_meta_row = ("c" * 40, "b" * 40, UUID(int=20), 7, "bitbucket")
+    diff_row = SimpleNamespace(
+        filename="app/main.py",
+        patch="@@ -1,1 +1,2 @@\n line1\n+added",
+        blob_sha="d" * 40,
+        status="modified",
+        previous_filename=None,
+        additions=1,
+        deletions=0,
+        changes=1,
+        omission_reason=None,
+        review_patch="@@ -1,1 +1,2 @@\n line1\n+added",
+        summary_only=False,
+    )
+
+    class _ScalarsResult:
+        def __init__(self, items: list[Any]) -> None:
+            self._items = items
+
+        def all(self) -> list[Any]:
+            return self._items
+
+    class _MultiResult:
+        def __init__(
+            self, *, rows: list[tuple[Any, ...]] | None = None, scalars: list[Any] | None = None
+        ) -> None:
+            self._rows = rows or []
+            self._scalars = scalars or []
+
+        def one_or_none(self) -> tuple[Any, ...] | None:
+            return self._rows[0] if self._rows else None
+
+        def scalars(self) -> _ScalarsResult:
+            return _ScalarsResult(self._scalars)
+
+    class _RepoSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, statement: Any) -> _MultiResult:
+            self.calls += 1
+            if self.calls == 1:
+                return _MultiResult(rows=[post_input_row])
+            if self.calls == 2:
+                return _MultiResult(scalars=[diff_row])
+            if self.calls == 3:
+                return _MultiResult(rows=[({"head_sha": "b" * 40}, context_response, None)])
+            if self.calls == 4:
+                return _MultiResult(rows=[run_meta_row])
+            return _MultiResult()
+
+    repo = SqlAlchemyReviewOutputRepository(session=cast(AsyncSession, _RepoSession()))
+    post_input = asyncio.run(repo.get_post_processing_input(run_id))
+    assert post_input is not None
+    assert post_input.context_degradation_note is not None
+    assert expected_phrase in post_input.context_degradation_note
+
+    processed = FindingsPostProcessor.from_default_patterns().process(
+        ReviewOutput(
+            findings=[],
+            summary=ReviewSummary(
+                problem="Проблем не обнаружено.",
+                done_well="Изменения локальны.",
+                effort="small",
+            ),
+        ),
+        diff_map=post_input.diff_map,
+        checked_paths=post_input.checked_paths,
+        rule_names=post_input.rule_names,
+        context_degradation_note=post_input.context_degradation_note,
+    )
+    assert "**Ограничение контекста:**" in processed.review_body
+    assert expected_phrase in processed.review_body

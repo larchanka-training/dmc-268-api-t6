@@ -202,6 +202,11 @@ def context_summary(
     return {
         "status": payload.status.value,
         "reason": payload.reason,
+        **(
+            {"degraded_error_codes": list(payload.degraded_error_codes)}
+            if payload.degraded_error_codes
+            else {}
+        ),
         "diff": diff,
         "reviewable_lines": payload.reviewable_lines,
         "ignored_files": payload.ignored_files,
@@ -720,8 +725,14 @@ class ReviewContextStage:
                     raise
                 _LOGGER.warning("Review context build failed run_id=%s", run_id, exc_info=True)
                 payload = None
+                error_payload: dict[str, str] = {
+                    "type": type(exc).__name__,
+                    "message": str(exc)[:1000],
+                }
+                if isinstance(exc, RunFailure):
+                    error_payload["code"] = exc.error_code
                 step.response = {
-                    "error": {"type": type(exc).__name__, "message": str(exc)[:1000]},
+                    "error": error_payload,
                     "coverage": coverage.to_json(),
                     "diff": _with_live_base(
                         {"digest": diff_map.digest, "diff_old_sha": diff_map.diff_old_sha},

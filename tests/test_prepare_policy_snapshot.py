@@ -6,15 +6,12 @@ import asyncio
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from types import TracebackType
-from typing import Self
 from uuid import UUID
 
 import pytest
 
 from app.modules.reviews.application.policy_documents import (
     MAX_DOCUMENT_BYTES,
-    LoadedPolicyDocument,
     PolicyEntryKind,
     PolicyTreeEntry,
     missing_document,
@@ -31,83 +28,17 @@ from app.modules.reviews.application.policy_snapshot import (
 )
 from app.modules.reviews.application.prepare_policy_snapshot import (
     PreparePolicySnapshot,
-    RunPolicyPins,
     build_policy_snapshot,
 )
 from app.modules.reviews.application.review_ignore import parse_review_ignore
 from app.modules.reviews.application.verdict import SeverityThresholdValue
+from tests.policy_snapshot_fakes import Store as Store
+from tests.policy_snapshot_fakes import Uow as Uow
+from tests.policy_snapshot_fakes import _pins as _pins
 
 _RUN = UUID("00000000-0000-0000-0000-000000000002")
 _BASE = "b" * 40
 _RULES_TEXT = b"# Style\n\n```review-ignore\ngenerated/**\n```\n"
-
-
-def _pins(**changes: object) -> RunPolicyPins:
-    values: dict[str, object] = {
-        "run_id": _RUN,
-        "repository_id": UUID("00000000-0000-0000-0000-000000000001"),
-        "policy_base_sha": _BASE,
-        "service_defaults_rule_version_id": UUID("00000000-0000-0000-0000-000000000004"),
-        "defaults_checksum": "2" * 64,
-        "prompt_bindings": PromptBindings("3" * 64, "", "", review_system_id=UUID(int=31)),
-        "execution_profile": ExecutionProfile.fast("model-a", ""),
-    }
-    return RunPolicyPins(**{**values, **changes})  # type: ignore[arg-type]
-
-
-@dataclass
-class Store:
-    pins: RunPolicyPins | None = field(default_factory=_pins)
-    documents: dict[str, LoadedPolicyDocument] = field(default_factory=dict)
-    snapshot: PolicySnapshot | None = None
-    commits: int = 0
-
-    async def get_pins(self, run_id: UUID) -> RunPolicyPins | None:
-        return self.pins
-
-    async def get_snapshot(self, run_id: UUID) -> PolicySnapshot | None:
-        return self.snapshot
-
-    async def get_staged_documents(self, run_id: UUID) -> tuple[LoadedPolicyDocument, ...]:
-        return tuple(self.documents.values())
-
-    async def stage_documents(
-        self, run_id: UUID, documents: tuple[LoadedPolicyDocument, ...]
-    ) -> tuple[LoadedPolicyDocument, ...]:
-        for item in documents:
-            self.documents.setdefault(item.document.path, item)
-        return tuple(self.documents.values())
-
-    async def create_snapshot(self, snapshot: PolicySnapshot) -> PolicySnapshot:
-        if self.snapshot is None:
-            self.snapshot = snapshot
-        return self.snapshot
-
-
-@dataclass
-class Uow:
-    store: Store
-
-    @property
-    def policy(self) -> Store:
-        return self.store
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        return None
-
-    async def commit(self) -> None:
-        self.store.commits += 1
-
-    async def rollback(self) -> None:
-        return None
 
 
 AGENTS_BLOB_OID = "2" * 40

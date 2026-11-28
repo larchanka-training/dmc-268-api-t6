@@ -1233,3 +1233,228 @@ def test_publish_review_output_persists_dropped_findings() -> None:
             )
         )
     assert str(RUN_ID) in str(exc_info.value)
+
+
+def test_context_degradation_note_from_response_returns_none_for_unrelated_codes() -> None:
+    from app.modules.reviews.application.run_failures import context_degradation_note_from_response
+
+    assert context_degradation_note_from_response(None) is None
+    assert context_degradation_note_from_response({"error": {"code": "diff_fetch_failed"}}) is None
+    assert context_degradation_note_from_response({"degraded_error_codes": ["other"]}) is None
+
+
+@pytest.mark.parametrize(
+    ("response_payload", "expected_phrase"),
+    [
+        (
+            {
+                "error": {
+                    "type": "RunFailure",
+                    "message": "limit",
+                    "code": "bitbucket_request_budget_exceeded",
+                }
+            },
+            "Лимит запросов к Bitbucket",
+        ),
+        (
+            {"degraded_error_codes": ["bitbucket_response_budget_exceeded"]},
+            "Исчерпан бюджет ответов Bitbucket",
+        ),
+    ],
+)
+def test_publish_review_output_surfaces_bitbucket_budget_note(
+    response_payload: dict[str, object],
+    expected_phrase: str,
+) -> None:
+    from app.modules.reviews.application.run_failures import context_degradation_note_from_response
+
+    note = context_degradation_note_from_response(response_payload)
+    assert note is not None
+    ctx = FindingPostProcessingInput(
+        diff_map=_added_file_diff_map("app/example.py", 14),
+        checked_paths=frozenset({"app/example.py"}),
+        rule_names=frozenset(),
+        allowed_v2_rules=frozenset(),
+        context_degradation_note=note,
+    )
+
+    class CapturingRepo(RecordingRepository):
+        async def store_review_output(
+            self,
+            run_id: UUID,
+            model_output: dict[str, object] | None,
+            parsed: ReviewOutput,
+            processed: ProcessedReviewOutput,
+        ) -> ReviewPublication:
+            return ReviewPublication("a" * 40, (), processed.review_body, "stable-key")
+
+    provider = RecordingProvider()
+    repo = CapturingRepo(ctx, _publication())
+    assert (
+        asyncio.run(
+            PublishReviewOutput(
+                RecordingFactory(repo), provider, parser=NullSuggestionParser()
+            ).execute(RUN_ID, valid_output())
+        )
+        is True
+    )
+    published_body = provider.calls[0][1]
+    assert "**Ограничение контекста:**" in published_body
+    assert expected_phrase in published_body
+
+
+@pytest.mark.parametrize(
+    ("error_code", "expected_phrase"),
+    [
+        ("bitbucket_request_budget_exceeded", "Лимит запросов к Bitbucket"),
+        ("bitbucket_response_budget_exceeded", "Исчерпан бюджет ответов Bitbucket"),
+    ],
+)
+def test_store_review_output_surfaces_bitbucket_budget_note(
+    error_code: str,
+    expected_phrase: str,
+) -> None:
+    from app.modules.reviews.application.run_failures import context_degradation_note_from_response
+    from app.modules.reviews.application.store_review_output import (
+        PublishingGuard,
+        StoreReviewOutput,
+    )
+
+    note = context_degradation_note_from_response({"degraded_error_codes": [error_code]})
+    assert note is not None
+    ctx = FindingPostProcessingInput(
+        diff_map=_added_file_diff_map("app/example.py", 14),
+        checked_paths=frozenset({"app/example.py"}),
+        rule_names=frozenset(),
+        allowed_v2_rules=frozenset(),
+        context_degradation_note=note,
+    )
+
+    class FakeReviewRepo(InMemoryFinalization):
+        async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
+            return ctx
+
+        async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
+            return PublishingGuard(
+                state="running",
+                worker_id="test-worker",
+                cancel_requested=False,
+                head_sha="head_sha_123",
+                head_current=True,
+                repository_review_event="APPROVE",
+                attempt=1,
+            )
+
+    fake_repo = FakeReviewRepo()
+
+    class FakeUoW:
+        def __init__(self) -> None:
+            self.reviews = fake_repo
+            self.blob_cache = None
+
+        async def __aenter__(self) -> FakeUoW:
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            pass
+
+        async def commit(self) -> None:
+            pass
+
+        async def rollback(self) -> None:
+            pass
+
+    class FakeQueue:
+        async def publish_review(self, pointer: Any) -> None:
+            pass
+
+    store = StoreReviewOutput(
+        cast(Any, lambda: FakeUoW()),
+        FakeQueue(),
+        worker_id="test-worker",
+        expected_attempt=1,
+        run_url=lambda _: None,
+        parser=NullSuggestionParser(),
+    )
+    assert asyncio.run(store.execute(RUN_ID, valid_output())) is True
+    assert fake_repo.finalized_processed is not None
+    stored_body = fake_repo.finalized_processed.review_body
+    assert "**Ограничение контекста:**" in stored_body
+    assert expected_phrase in stored_body
+
+
+def test_context_degradation_note_from_response_joins_multiple_codes_with_single_tail() -> None:
+    from app.modules.reviews.application.run_failures import context_degradation_note_from_response
+
+    note = context_degradation_note_from_response(
+        {
+            "degraded_error_codes": ["bitbucket_request_budget_exceeded"],
+            "error": {"code": "bitbucket_response_budget_exceeded"},
+        }
+    )
+    assert note == (
+        "Лимит запросов к Bitbucket для ревью исчерпан. "
+        "Исчерпан бюджет ответов Bitbucket для одного прогона. "
+        "Часть дополнительного контекста репозитория в ревью не попала."
+    )
+
+
+def test_finalize_stored_review_body_repack_preserves_context_degradation_note() -> None:
+    from app.modules.reviews.application.findings_post_processor import (
+        FindingsPostProcessor,
+        finalize_stored_review_body,
+    )
+    from app.modules.reviews.application.run_failures import context_degradation_note_from_response
+
+    note = context_degradation_note_from_response(
+        {"error": {"code": "bitbucket_response_budget_exceeded"}}
+    )
+    assert note is not None
+    notes = [
+        {
+            "path": "app/example.py",
+            "line": 12,
+            "start_line": None,
+            "severity": "low",
+            "category": "correctness",
+            "title": f"Overflow {number}",
+            "body": "x" * 955,
+            "suggestion": None,
+            "confidence": 0.4,
+            "rule_name": None,
+        }
+        for number in range(1, 5)
+    ]
+    parsed = parse_review_output(
+        {
+            "findings": [*cast(list[dict[str, object]], valid_output()["findings"]), *notes],
+            "summary": valid_output()["summary"],
+        }
+    )
+    processed = FindingsPostProcessor.from_default_patterns().process(
+        parsed,
+        diff_map=_added_file_diff_map("app/example.py", 14),
+        checked_paths=frozenset({"app/example.py"}),
+        rule_names=frozenset(),
+        allowed_v2_rules=frozenset(),
+        context_degradation_note=note,
+    )
+    assert processed.omitted_body_only_count > 0
+    repacked = finalize_stored_review_body(
+        parsed,
+        processed,
+        checked_paths=frozenset({"app/example.py"}),
+        severity_threshold="all",
+        below_threshold=0,
+        run_url="https://ui.test/runs/00000000-0000-0000-0000-000000000408",
+    )
+    assert len(repacked.review_body) <= 4000
+    assert repacked.omitted_body_only_count > processed.omitted_body_only_count
+    assert "**Ограничение контекста:**" in repacked.review_body
+    assert "Исчерпан бюджет ответов Bitbucket" in repacked.review_body
+    assert "Часть дополнительного контекста репозитория в ревью не попала." in repacked.review_body
