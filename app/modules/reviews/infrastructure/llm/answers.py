@@ -183,9 +183,10 @@ class ReviewAnswerContract:
 def review_answer_contract(review_system_version: str | None) -> ReviewAnswerContract:
     """Pick the review answer contract by the bound review prompt version.
 
-    No snapshot (``None``) or ``v1``-``v3``: ReviewOutput v1, the live contract. ``v4``,
-    ``v5`` and ``v7``: ReviewOutput v2 with ``evidence_refs``. Any other version has no known answer
-    shape, so the run fails before a provider call.
+    No snapshot (``None``) or ``v1``-``v3``: ReviewOutput v1, the live contract. A version in
+    ``SNAPSHOT_REVIEW_PROMPT_VERSIONS`` (``v4``, ``v5``, ``v7``, ``v8``): ReviewOutput v2 with
+    ``evidence_refs``. Any other version has no known answer shape, so the run fails before a
+    provider call.
     """
     if review_system_version is None or review_system_version in _V1_REVIEW_PROMPT_VERSIONS:
         return ReviewAnswerContract("ReviewOutput", review_output_schema(), validate_review_answer)

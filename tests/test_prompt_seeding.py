@@ -39,6 +39,7 @@ def test_load_prompt_assets_preserves_full_file_and_checksum() -> None:
         ("review.system", 4),
         ("review.system", 5),
         ("review.system", 7),
+        ("review.system", 8),
         ("review.verifier", 1),
         ("review.verifier", 2),
     ]
@@ -153,7 +154,7 @@ def test_first_seed_makes_the_newest_version_of_each_prompt_active(
                     .order_by(PromptVersion.key)
                 )
                 active_versions = [(key, version) for key, version in rows.tuples().all()]
-                assert inserted == 11
+                assert inserted == 12
                 return active_versions
         finally:
             await engine.dispose()
@@ -161,7 +162,7 @@ def test_first_seed_makes_the_newest_version_of_each_prompt_active(
     assert asyncio.run(seed_and_read_active_versions()) == [
         ("review.conventions", 2),
         ("review.summary", 1),
-        ("review.system", 7),
+        ("review.system", 8),
         ("review.verifier", 2),
     ]
 
@@ -337,7 +338,7 @@ def test_seed_rejects_changed_v2_without_overwriting_its_persisted_content(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, assets) == 11
+                assert await seed_prompt_versions(session, assets) == 12
             with pytest.raises(ValueError, match=r"immutable prompt changed: review\.system\.v2"):
                 async with factory.begin() as session:
                     await seed_prompt_versions(session, (tampered,))
@@ -361,7 +362,7 @@ def test_seed_rejects_changed_v2_without_overwriting_its_persisted_content(
                         )
                     )
                 ).one()
-                assert active.version == 7
+                assert active.version == 8
         finally:
             await engine.dispose()
 
@@ -472,9 +473,9 @@ def test_full_seed_upgrades_v5_to_v7_once_and_preserves_v5(
             async with factory.begin() as session:
                 assert await seed_prompt_versions(session, _up_to(assets, 5)) == 10
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, assets) == 1
+                assert await seed_prompt_versions(session, _up_to(assets, 7)) == 1
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, assets) == 0
+                assert await seed_prompt_versions(session, _up_to(assets, 7)) == 0
             async with factory() as session:
                 rows = (
                     await session.scalars(
@@ -496,13 +497,12 @@ def test_full_seed_upgrades_v5_to_v7_once_and_preserves_v5(
 
 
 @pytest.mark.integration
-def test_an_older_seed_after_v7_inserts_nothing_and_keeps_v7_active(
+def test_an_older_seed_after_v8_inserts_nothing_and_keeps_v8_active(
     migrated_db: MigratedDatabase,
 ) -> None:
-    """A #144 image (files up to v5), an F2 image (up to v4) or an F1 image (up to v3)
-    seeding after #498 Part 2 never demotes v7. So the rollback floor is the #498 Part 2
-    image: an older image keeps v7 active and, not knowing v7, would send v7-pinned runs to
-    the legacy path."""
+    """An image that stops at v7, v5, v4 or v3, seeding after this deploy, never demotes v8.
+    The rollback floor is the image that contains v8: an older image keeps v8 active and,
+    not knowing it, would send v8-pinned runs down the legacy path."""
     database_url, schema = migrated_db.url, migrated_db.schema
     assets = load_prompt_assets(REPO_ROOT / "review/prompts")
 
@@ -513,7 +513,9 @@ def test_an_older_seed_after_v7_inserts_nothing_and_keeps_v7_active(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, assets) == 11
+                assert await seed_prompt_versions(session, assets) == 12
+            async with factory.begin() as session:
+                assert await seed_prompt_versions(session, _up_to(assets, 7)) == 0
             async with factory.begin() as session:
                 assert await seed_prompt_versions(session, _up_to(assets, 5)) == 0
             async with factory.begin() as session:
@@ -529,8 +531,8 @@ def test_an_older_seed_after_v7_inserts_nothing_and_keeps_v7_active(
                     )
                 ).one()
                 assert (active.version, active.checksum) == (
-                    7,
-                    PINNED_PROMPT_CHECKSUMS["review.system:v7"],
+                    8,
+                    PINNED_PROMPT_CHECKSUMS["review.system:v8"],
                 )
         finally:
             await engine.dispose()
