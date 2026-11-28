@@ -735,7 +735,7 @@ Prod-выкат (`deploy-prod.yml`, job `deploy-prod`) идёт в Environment `
 | Setup URL | `https://ui.<APP_DOMAIN>/repositories`, redirect on update включён |
 | Webhook | active, `https://api.<APP_DOMAIN>/webhooks/github`, свой secret (`openssl rand -hex 32`), SSL verification включена |
 | Permissions | actions: read, checks: write, contents: read, issues: write, metadata: read, pull_requests: write, statuses: read |
-| Events | `check_suite`, `pull_request`, `push`, `status`, `workflow_run` |
+| Events | `check_suite`, `pull_request`, `push`, `repository`, `status`, `workflow_run` |
 | Авторизация | request user authorization (OAuth) during installation и device flow выключены |
 | Видимость | public, как staging App: private App организации ставится только на её репозитории |
 
