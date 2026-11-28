@@ -328,6 +328,7 @@ Staging выкатывается автоматически при каждом 
 | Документ | Содержание |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Цепочка от вебхука до опубликованного ревью: что работает в коде сейчас, одной страницей |
+| [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) | Сценарий демо v1.0 на staging: 7–10 минут от PR с багами до аналитики, запасной путь |
 | [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) | Курсовой VPS и DNS, архитектура Hetzner, Terraform (`api-staging` + `ui-staging`), удаление стенда |
 | [docs/CICD.md](docs/CICD.md) | Пайплайн, deployment, rollback, цели выката и edge-прокси |
 | [docs/SECRETS.md](docs/SECRETS.md) | Перечень secrets, доставка на staging, git и логи |
