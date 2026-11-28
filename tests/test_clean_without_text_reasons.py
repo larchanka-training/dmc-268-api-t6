@@ -28,7 +28,7 @@ from app.modules.reviews.application.vcs_diff import (
 from tests.clean_without_text_fakes import finalize
 from tests.installation_onboarding_fakes import provider_checkpoint
 from tests.run_coverage_fakes import code_snapshot, coverage, empty_snapshot
-from tests.test_clean_without_text import EmptyAdditionProvider
+from tests.test_clean_without_text import EmptyAdditionProvider, _fetch_gitlab_empty_added
 
 
 @pytest.mark.parametrize(
@@ -330,3 +330,87 @@ def test_no_coverage_summary_uses_the_exact_unchecked_text_label() -> None:
         "done_well": "Проанализировано файлов с текстовыми изменениями: 0; исключено файлов: 0.",
         "effort": "none",
     }
+
+
+def _assert_reason_summary_body_and_check_run(
+    snapshot: DiffSnapshot,
+    literal: str,
+) -> None:
+    repository, _ = finalize(coverage([code_snapshot(), snapshot]))
+    expected = "Подтверждённых замечаний нет; Проверка неполная: " + literal + " (1)."
+    assert repository.response["summary"]["problem"] == expected
+    assert expected in repository.body
+    result = read_saved_review_result(repository.response, head_sha="a" * 40, severities=())
+    assert result is not None
+    view = check_run_view(
+        CheckRunReport(
+            CheckRunTarget(17, "octo/repo", "a" * 40, UUID(int=213)),
+            "succeeded",
+            1,
+            verdict=result.verdict,
+            coverage_status=result.coverage.status.value,
+            saved_summary=result.summary,
+        )
+    )
+    assert expected in view.summary
+
+
+def test_oversized_blob_over_max_bytes_reaches_summary_body_and_check_run_text() -> None:
+    from app.modules.reviews.application.check_runs import RunProviderCheckpoint
+    from app.modules.reviews.application.vcs_diff import MAX_BLOB_BYTES
+
+    class _OversizedBlobProvider(EmptyAdditionProvider):
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            await checkpoint()
+            self.blob_requests.append(sha)
+            return b"x" * (MAX_BLOB_BYTES + 1)
+
+    blob_sha = "f" * 40
+    provider = _OversizedBlobProvider(
+        files=(VcsFile("huge.bin", "modified", blob_sha, None, 0, 0, 0, None),)
+    )
+    fetched = asyncio.run(
+        FetchVcsReviewInput(provider, checkpoint=provider_checkpoint).execute(
+            PullRequestLocator(17, "octo/repo", 7),
+            "a" * 40,
+            "b" * 40,
+        )
+    )
+    file = fetched.files[0]
+    omissions = {item.file.filename: item.reason.value for item in fetched.omissions}
+    assert omissions == {"huge.bin": "too_large"}
+    snapshot = DiffSnapshot(
+        file.filename,
+        file.patch,
+        file.blob_sha,
+        file.status,
+        file.previous_filename,
+        file.additions,
+        file.deletions,
+        file.changes,
+        omission_reason=omissions[file.filename],
+    )
+    _assert_reason_summary_body_and_check_run(
+        snapshot, "Превышен лимит размера, содержимое не проверено"
+    )
+
+
+def test_gitlab_empty_added_reaches_empty_addition_summary_body_and_check_run_text() -> None:
+    fetched, _ = asyncio.run(_fetch_gitlab_empty_added(collapsed=False))
+    file = fetched.files[0]
+    omissions = {item.file.filename: item.reason.value for item in fetched.omissions}
+    assert omissions == {"pkg/__init__.py": "missing_patch"}
+    snapshot = DiffSnapshot(
+        file.filename,
+        file.patch,
+        file.blob_sha,
+        file.status,
+        file.previous_filename,
+        file.additions,
+        file.deletions,
+        file.changes,
+        omission_reason=omissions[file.filename],
+    )
+    _assert_reason_summary_body_and_check_run(snapshot, "Нет подтверждения обычного пустого файла")
