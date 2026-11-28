@@ -225,6 +225,20 @@ class Payloads:
         self.rows.append((run_id, summary))
         return summary
 
+    async def save_without_text_payload(
+        self,
+        run_id: UUID,
+        summarize: Callable[[list[DiffSnapshot]], dict[str, Any]],
+    ) -> dict[str, Any]:
+        if self.error is not None:
+            raise self.error
+        if self.snapshots is None:
+            raise AssertionError("the no-text path reloads stored rows")
+        self.snapshots[:] = [replace(row, review_patch=None) for row in self.snapshots]
+        summary = summarize(self.snapshots)
+        self.rows.append((run_id, summary))
+        return summary
+
 
 def _stored(path: str, patch: str) -> str:
     """The patch as ``StoreDiffSnapshot`` keeps it for the UI: under a git header."""

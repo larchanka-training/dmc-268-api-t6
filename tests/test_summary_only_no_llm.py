@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any, Self
@@ -335,6 +335,16 @@ class DiffFlag:
         if self._runs.stored is None:
             raise AssertionError("the summary-only stop reloads stored rows")
         self._runs.stored = _mark_summary_only_rows(self._runs.stored)
+        return summarize(self._runs.stored)
+
+    async def save_without_text_payload(
+        self,
+        run_id: UUID,
+        summarize: Callable[[list[DiffSnapshot]], dict[str, Any]],
+    ) -> dict[str, Any]:
+        if self._runs.stored is None:
+            raise AssertionError("the no-text path reloads stored rows")
+        self._runs.stored = [replace(row, review_patch=None) for row in self._runs.stored]
         return summarize(self._runs.stored)
 
 
@@ -810,6 +820,8 @@ def test_a_snapshot_run_without_text_is_partial_without_summary_only_or_a_model_
     assert build["coverage"]["reason_counts"] == reasons
     assert build["coverage"]["exclusion_counts"] == exclusions
     assert outcome.stored and not any(row.summary_only for row in outcome.stored)
+    if len(files) == 1 and files[0].patch == "@@ -0,0 +0,0 @@":
+        assert outcome.stored[0].review_patch is None
     assert [tool for tool, _, _ in outcome.trace.steps] == [
         "policy.load",
         "vcs.fetch_diff",
@@ -819,16 +831,146 @@ def test_a_snapshot_run_without_text_is_partial_without_summary_only_or_a_model_
     _assert_published_without_a_model(outcome.published)
 
 
-def test_a_truncated_patch_with_rows_is_not_no_text_partial() -> None:
-    # Its rows are analysable text (CVS §2.2), which no-text partial never takes. Until the
-    # builder reads them, the set keeps the residual summary-only stop.
+def test_a_truncated_patch_with_rows_runs_review_with_l1_and_partial_coverage() -> None:
+    # CVS §2.2: a truncated patch with surviving rows contributes L1 hunks and partial coverage.
     outcome = _run((_missing(3, "@@ -0,0 +1 @@\n+x\n"),), files_changed=1, version="v5")
     build = _context(outcome.trace)
 
-    assert build["status"] == "summary_only"
-    assert build["reason"] == "no_reviewable_files"
-    assert outcome.stored and all(row.summary_only for row in outcome.stored)
-    _assert_no_model_call(outcome.trace)
+    assert outcome.skipped is None
+    assert outcome.result is True
+    assert build["status"] == "review"
+    assert build["reason"] is None
+    assert [
+        (block["level"], block["path"]) for block in build["blocks"] if block["level"] == "L1"
+    ] == [("L1", "src/note.txt")]
+    assert build["coverage"]["status"] == "partial"
+    assert build["coverage"]["reason_counts"] == {"patch_truncated": 1}
+    assert any(call.get("operation") == "review" for call in _calls(outcome.trace))
+
+
+def test_truncated_patch_alongside_code_contributes_l1_hunks_and_body_only_findings() -> None:
+    from app.modules.reviews.application.diff_map import VcsProviderName, build_diff_map
+    from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
+    from app.modules.reviews.application.prompt_budget import verify_provenance_pre_send_guard
+    from app.modules.reviews.application.prompt_builder import (
+        PromptBuilder,
+        PullRequestMeta,
+        RepoConventions,
+        ReviewContext,
+        file_block_id,
+    )
+    from app.modules.reviews.application.review_output import (
+        EvidenceRef,
+        ReviewFinding,
+        ReviewFindingV2,
+        ReviewOutput,
+        ReviewSummary,
+        validate_v2_attribution,
+        validate_v2_coordinates,
+    )
+    from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsPullRequest
+
+    truncated = _missing(3, "@@ -0,0 +1 @@\n+x\n")
+    outcome = _run((_text(1), truncated), files_changed=2, version="v5")
+    build = _context(outcome.trace)
+
+    assert build["status"] == "review"
+    assert sorted(block["path"] for block in build["blocks"] if block["level"] == "L1") == [
+        "src/app.py",
+        "src/note.txt",
+    ]
+    assert build["coverage"]["status"] == "partial"
+    assert build["coverage"]["reviewed_files"] == 1
+    assert build["coverage"]["reason_counts"] == {"patch_truncated": 1}
+
+    assert outcome.stored is not None
+    changed, omitted = review_files_from_snapshots(outcome.stored)
+    assert [item.path for item in changed] == ["src/app.py", "src/note.txt"]
+    assert omitted == ()
+
+    pr = VcsPullRequest(
+        PullRequestLocator(17, "octo/repo", 7),
+        _HEAD,
+        _BASE,
+        PullRequestMeta("t", None, "octo", "f", "main", (), 2, 4, 0, False, False),
+    )
+    context = ReviewContext(
+        system="system",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions(_PATTERNS, _RECOMMENDATIONS),
+        pr_meta=replace(pr.meta, head_sha=_HEAD, diff_old_sha="c" * 40),
+        changed_files=changed,
+        omitted_files=omitted,
+    )
+    manifest = PromptBuilder().build_manifest(context, call_id=_RUN, stage="review")
+    verify_provenance_pre_send_guard(manifest, context=context)
+
+    v2 = ReviewFindingV2(
+        path="src/note.txt",
+        start_line=None,
+        line=1,
+        severity="high",
+        category="correctness",
+        title="Truncated line issue",
+        body="Detail",
+        confidence=0.95,
+        suggestion=None,
+        rule_name=None,
+        evidence_refs=[
+            EvidenceRef(block_id=file_block_id("src/note.txt"), start_line=1, end_line=1)
+        ],
+    )
+    empty_hunk_snapshot = DiffSnapshot(
+        "src/empty_hunk.py",
+        "@@ -0,0 +0,0 @@",
+        _TEXT_BLOB,
+        additions=2,
+        changes=2,
+        review_patch="@@ -0,0 +0,0 @@",
+    )
+    filtered_changed, filtered_omitted = review_files_from_snapshots([empty_hunk_snapshot])
+    assert filtered_changed == ()
+    assert filtered_omitted == ("src/empty_hunk.py",)
+    assert validate_v2_coordinates(v2, changed, original_files=changed) == (True, None)
+    assert validate_v2_attribution(v2, manifest, pr_meta=context.pr_meta) == (True, None)
+
+    diff_map = build_diff_map(
+        pr,
+        (_text(1), truncated),
+        provider=VcsProviderName.GITHUB,
+        repository_id=_REPOSITORY,
+        diff_old_sha="c" * 40,
+    )
+    output = ReviewOutput(
+        summary=ReviewSummary(
+            problem="One issue found.",
+            done_well="Good structure.",
+            effort="small",
+        ),
+        findings=[
+            ReviewFinding(
+                path="src/note.txt",
+                start_line=None,
+                line=1,
+                severity="high",
+                category="correctness",
+                title="Truncated line issue",
+                body="Detail",
+                confidence=0.95,
+                suggestion=None,
+                rule_name=None,
+            )
+        ],
+    )
+    processed = FindingsPostProcessor.from_default_patterns().process(
+        output,
+        diff_map=diff_map,
+        checked_paths=frozenset(item.path for item in changed),
+        rule_names=frozenset(),
+    )
+    assert processed.inline == ()
+    assert [item.finding.path for item in processed.body_only] == ["src/note.txt"]
 
 
 def test_a_second_attempt_without_text_stays_partial_without_summary_only() -> None:

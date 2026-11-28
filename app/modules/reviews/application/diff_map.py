@@ -135,6 +135,15 @@ class DiffFile:
         return self.omission_reason is None and self.patch_state is PatchState.COMPLETE
 
 
+def has_reviewable_hunks(file: DiffFile) -> bool:
+    """Whether ``file`` contributes L1 diff rows (complete or truncated with rows, CVS §2.2)."""
+    if file.omission_reason is not None:
+        return False
+    if file.anchorable:
+        return True
+    return file.patch_state is PatchState.TRUNCATED and any(hunk.rows for hunk in file.hunks)
+
+
 @dataclass(frozen=True)
 class DiffMap:
     """The diff of one pull request head; ``diff_old_sha`` is its merge base, when known."""

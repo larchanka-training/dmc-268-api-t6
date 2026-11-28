@@ -50,6 +50,12 @@ class RunTraceStore(Protocol):
         summarize: Callable[[list[DiffSnapshot]], dict[str, Any]],
     ) -> dict[str, Any]: ...
 
+    async def save_without_text_payload(
+        self,
+        run_id: UUID,
+        summarize: Callable[[list[DiffSnapshot]], dict[str, Any]],
+    ) -> dict[str, Any]: ...
+
 
 class RunTraceUnitOfWork(UnitOfWork, Protocol):
     @property
@@ -88,6 +94,17 @@ class TransactionalRunTrace:
         """Mark the stop's rows and store coverage of the reloaded rows, then commit."""
         async with self._uow_factory() as uow:
             summary = await uow.trace.save_summary_only_stop(run_id, summarize)
+            await uow.commit()
+        return summary
+
+    async def save_without_text_payload(
+        self,
+        run_id: UUID,
+        summarize: Callable[[list[DiffSnapshot]], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Clear residual review patches and store no-text coverage in one commit."""
+        async with self._uow_factory() as uow:
+            summary = await uow.trace.save_without_text_payload(run_id, summarize)
             await uow.commit()
         return summary
 
@@ -142,6 +159,12 @@ class ContextPayloadStore(Protocol):
     async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None: ...
 
     async def save_summary_only_stop(
+        self,
+        run_id: UUID,
+        summarize: Callable[[list[DiffSnapshot]], dict[str, Any]],
+    ) -> dict[str, Any]: ...
+
+    async def save_without_text_payload(
         self,
         run_id: UUID,
         summarize: Callable[[list[DiffSnapshot]], dict[str, Any]],

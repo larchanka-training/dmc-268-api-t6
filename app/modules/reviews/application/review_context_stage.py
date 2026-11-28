@@ -31,6 +31,7 @@ from app.modules.reviews.application.diff_map import (
     VcsProviderName,
     build_diff_map,
     diagnostic_text,
+    has_reviewable_hunks,
     is_supported_path,
 )
 from app.modules.reviews.application.get_run_diff import DiffSnapshot, over_max_diff_lines
@@ -659,7 +660,7 @@ class ReviewContextStage:
             # the run is published with the backend result (coverage none), not skipped.
             # A legacy run keeps its model calls. Stored summary_only rows are already
             # excluded here and stop in _summary_only_reason before any model call.
-            await self._record_without_text(run_id, snapshot, diff_map, coverage)
+            await self._record_without_text(run_id, snapshot, diff_map, classified_ignore, stored)
             raise NoReviewableText
         reason = self._summary_only_reason(diff_map, stored, coverage, ignore)
         if (
@@ -672,7 +673,7 @@ class ReviewContextStage:
             # be beside them) and no analysable text. Published like coverage none, with the
             # backend result (coverage partial), not as summary-only. A legacy run, or rows an
             # earlier attempt flagged, keep the summary-only stop below.
-            await self._record_without_text(run_id, snapshot, diff_map, coverage)
+            await self._record_without_text(run_id, snapshot, diff_map, classified_ignore, stored)
             raise NoReviewableText
         if reason is not None:
             # #313: incomplete inventory, the line flag, or residual no_reviewable_files.
@@ -790,7 +791,7 @@ class ReviewContextStage:
                 item in ignore.denied_paths or self._builtin_excluded(item) for item in names
             ):
                 ignored += 1
-            elif not file.anchorable:
+            elif not has_reviewable_hunks(file):
                 withheld += 1
             else:
                 allowed += 1
@@ -824,28 +825,44 @@ class ReviewContextStage:
         return False
 
     async def _record_without_text(
-        self, run_id: UUID, snapshot: PolicySnapshot, diff_map: DiffMap, coverage: RunCoverage
+        self,
+        run_id: UUID,
+        snapshot: PolicySnapshot,
+        diff_map: DiffMap,
+        ignore: IgnoreResult,
+        stored: list[DiffSnapshot],
     ) -> None:
         """Record ``context.build`` and its ``context_payloads`` row for a backend result.
 
         Coverage none (technical skips only) and no-text partial both end the attempt after
-        this record and before RAG, the build and every model call (CVS §2.2).
+        this record and before RAG, the build and every model call (CVS §2.2). Stored
+        ``review_patch`` values (such as empty-hunk truncated rows) are cleared in the same
+        transaction as ``context_payloads`` so ``checked_paths`` never includes them.
         """
-        response = await self._record_nothing_to_review(
-            run_id,
-            snapshot,
-            diff_map.head_sha,
-            ContextStatus.NO_REVIEWABLE_TEXT,
-            digest=diff_map.digest,
-            files=len(diff_map.files),
-            coverage=coverage,
-            diff_map=diff_map,
-            ignored_files=sum(coverage.exclusion_counts.values()),
-        )
-        if self._payloads is not None:
-            # The attempt's one context.build is also its context_payloads row: a failed
-            # write, or a retired origin, ends the attempt before publishing.
-            await self._payloads.save_context_payload(run_id, response)
+
+        def summarize(rows: list[DiffSnapshot]) -> dict[str, Any]:
+            coverage = project_run_coverage(
+                rows,
+                diff_map,
+                ignore=ignore,
+                snapshot_path=self._snapshot_for_llm is not None,
+            )
+            return self._nothing_to_review_response(
+                ContextStatus.NO_REVIEWABLE_TEXT,
+                digest=diff_map.digest,
+                files=len(diff_map.files),
+                coverage=coverage,
+                diff_map=diff_map,
+                ignored_files=sum(coverage.exclusion_counts.values()),
+            )
+
+        if self._payloads is None:
+            response = summarize(stored)
+        else:
+            response = await self._payloads.save_without_text_payload(run_id, summarize)
+        request = {"head_sha": diff_map.head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
+        async with traced_step(self._trace, run_id, "context.build", request) as step:
+            step.response = response
 
     async def _commit_summary_only(
         self,
